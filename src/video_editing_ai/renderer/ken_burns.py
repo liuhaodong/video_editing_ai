@@ -109,13 +109,41 @@ def _resolve_kb_endpoints(
     return (kb.start_zoom, kb.end_zoom, kb.start_center, kb.end_center)
 
 
+_NVENC_AVAILABLE: Optional[bool] = None
+
+
+def has_hevc_nvenc() -> bool:
+    """Check once whether hardware-accelerated hevc_nvenc is functional on this system."""
+    global _NVENC_AVAILABLE
+    if _NVENC_AVAILABLE is None:
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "nullsrc=s=256x256:d=0.1",
+            "-c:v",
+            "hevc_nvenc",
+            "-f",
+            "null",
+            "-",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, check=False)
+        _NVENC_AVAILABLE = proc.returncode == 0
+    return _NVENC_AVAILABLE
+
+
 def render_photo_clip(
     photo_path: str | Path,
     output_mp4: str | Path,
     duration: float = 3.0,
-    width: int = 1920,
-    height: int = 1080,
+    width: int = 3840,
+    height: int = 2160,
     fps: int = 30,
+    hdr: bool = True,
     ken_burns: Optional[KenBurnsConfig] = None,
     transition_in: Optional[TransitionConfig] = None,
     transition_out: Optional[TransitionConfig] = None,
@@ -125,8 +153,8 @@ def render_photo_clip(
     out_path = Path(output_mp4)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Prepare oversampled base canvas (1.25x target resolution) for razor-sharp sub-pixel resampling
-    oversample = 1.25
+    # Prepare oversampled base canvas for sub-pixel resampling
+    oversample = 1.12 if width >= 3840 else 1.25
     work_w = int(round(width * oversample))
     work_h = int(round(height * oversample))
 
@@ -140,14 +168,78 @@ def render_photo_clip(
     s_zoom, e_zoom, (sx, sy), (ex, ey) = _resolve_kb_endpoints(kb)
     total_frames = max(1, int(round(duration * fps)))
 
-    # Build FFmpeg fade filter for smooth head/tail transitions
-    vf_filters: list[str] = ["format=yuv420p", "setsar=1:1"]
+    # Build FFmpeg fade + color space filter chain
+    vf_filters: list[str] = ["setsar=1:1"]
     if transition_in and transition_in.type == "fade_black" and transition_in.duration > 0:
         vf_filters.append(f"fade=t=in:st=0:d={min(duration * 0.45, transition_in.duration):.3f}")
     if transition_out and transition_out.type == "fade_black" and transition_out.duration > 0:
         fade_d = min(duration * 0.45, transition_out.duration)
         st = max(0.0, duration - fade_d)
         vf_filters.append(f"fade=t=out:st={st:.3f}:d={fade_d:.3f}")
+
+    if hdr:
+        vf_filters.extend(
+            [
+                "zscale=primariesin=709:transferin=iec61966-2-1:matrixin=709:"
+                "primaries=2020:transfer=arib-std-b67:matrix=2020_ncl",
+                "format=p010le",
+                "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
+            ]
+        )
+        if has_hevc_nvenc():
+            v_enc = [
+                "-c:v",
+                "hevc_nvenc",
+                "-profile:v",
+                "main10",
+                "-rc",
+                "vbr",
+                "-cq",
+                "19",
+                "-b:v",
+                "28M",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "arib-std-b67",
+                "-colorspace",
+                "bt2020nc",
+                "-bsf:v",
+                "hevc_metadata=colour_primaries=9:transfer_characteristics=18:matrix_coefficients=9",
+                "-tag:v",
+                "hvc1",
+            ]
+        else:
+            v_enc = [
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "arib-std-b67",
+                "-colorspace",
+                "bt2020nc",
+                "-x265-params",
+                "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+                "-tag:v",
+                "hvc1",
+            ]
+    else:
+        vf_filters.append("format=yuv420p")
+        v_enc = [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+        ]
 
     cmd = [
         "ffmpeg",
@@ -173,22 +265,18 @@ def render_photo_clip(
         f"{duration:.3f}",
         "-vf",
         ",".join(vf_filters),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
+        *v_enc,
         "-video_track_timescale",
         "30000",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        "256k",
         "-shortest",
         str(out_path),
     ]
 
+    resample_mode = Image.Resampling.BILINEAR if width >= 3840 else Image.Resampling.BICUBIC
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdin is not None
 
@@ -204,7 +292,6 @@ def render_photo_clip(
             crop_w = work_w / cur_zoom
             crop_h = work_h / cur_zoom
 
-            # Clamp center so crop window stays strictly inside [0, work_w] x [0, work_h]
             half_w = crop_w / 2.0
             half_h = crop_h / 2.0
             center_px = min(max(cx * work_w, half_w), work_w - half_w)
@@ -215,12 +302,11 @@ def render_photo_clip(
             x1 = center_px + half_w
             y1 = center_py + half_h
 
-            # Floating-point EXTENT transform performs sub-pixel resampling without integer stepping jitter
             frame = base_img.transform(
                 (width, height),
                 Image.Transform.EXTENT,
                 (x0, y0, x1, y1),
-                resample=Image.Resampling.BICUBIC,
+                resample=resample_mode,
             )
             proc.stdin.write(frame.tobytes())
     finally:

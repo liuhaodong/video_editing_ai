@@ -131,9 +131,13 @@ class MediaCatalog(BaseModel):
 class TimelineSettings(BaseModel):
     """Global output video canvas and encoding settings."""
 
-    width: int = Field(default=1920, description="Output video width in pixels (e.g. 1920 or 3840)")
-    height: int = Field(default=1080, description="Output video height in pixels (e.g. 1080 or 2160)")
+    width: int = Field(default=3840, description="Output video width in pixels (default 3840 for 4K UHD)")
+    height: int = Field(default=2160, description="Output video height in pixels (default 2160 for 4K UHD)")
     fps: int = Field(default=30, description="Output frame rate")
+    hdr: bool = Field(
+        default=True,
+        description="Render in 10-bit HLG HDR (HEVC Main 10, Rec.2020 / arib-std-b67, yuv420p10le)",
+    )
     background_color: str = Field(default="#000000")
 
 

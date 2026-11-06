@@ -10,9 +10,66 @@ from typing import Callable, Optional
 
 from ..analyzer.media_probe import probe_video_file
 from ..models.schema import EditTimeline, VisualTrackItem
-from .ken_burns import render_photo_clip
+from .ken_burns import has_hevc_nvenc, render_photo_clip
 from .subtitles import export_ass_subtitles, export_srt_subtitles
 from .titles import render_title_png
+
+
+def _video_encoder_args(hdr: bool) -> list[str]:
+    if hdr:
+        if has_hevc_nvenc():
+            return [
+                "-c:v",
+                "hevc_nvenc",
+                "-profile:v",
+                "main10",
+                "-rc",
+                "vbr",
+                "-cq",
+                "19",
+                "-b:v",
+                "28M",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "arib-std-b67",
+                "-colorspace",
+                "bt2020nc",
+                "-bsf:v",
+                "hevc_metadata=colour_primaries=9:transfer_characteristics=18:matrix_coefficients=9",
+                "-tag:v",
+                "hvc1",
+            ]
+        return [
+            "-c:v",
+            "libx265",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-color_primaries",
+            "bt2020",
+            "-color_trc",
+            "arib-std-b67",
+            "-colorspace",
+            "bt2020nc",
+            "-x265-params",
+            "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+            "-tag:v",
+            "hvc1",
+        ]
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+    ]
 
 
 def _render_video_segment(
@@ -21,10 +78,12 @@ def _render_video_segment(
     width: int,
     height: int,
     fps: int,
+    hdr: bool = True,
 ) -> Path:
     """Trim, scale/pad, fade, and normalize a single video clip to match master timeline settings."""
     info = probe_video_file(Path(item.source))
     has_audio = bool(info.get("has_audio", False))
+    src_trc = str(info.get("color_transfer", "bt709"))
     dur = item.duration
     src_in = item.source_in
 
@@ -32,7 +91,6 @@ def _render_video_segment(
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
         f"fps={fps}",
-        "format=yuv420p",
         "setsar=1:1",
     ]
     if item.speed != 1.0 and item.speed > 0:
@@ -45,6 +103,21 @@ def _render_video_segment(
         fd = min(dur * 0.45, item.transition_out.duration)
         st = max(0.0, dur - fd)
         vf_parts.append(f"fade=t=out:st={st:.3f}:d={fd:.3f}")
+
+    if hdr:
+        if src_trc not in ("arib-std-b67", "smpte2084"):
+            vf_parts.append(
+                "zscale=primariesin=709:transferin=709:matrixin=709:"
+                "primaries=2020:transfer=arib-std-b67:matrix=2020_ncl"
+            )
+        vf_parts.extend(
+            [
+                "format=p010le",
+                "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
+            ]
+        )
+    else:
+        vf_parts.append("format=yuv420p")
 
     cmd = [
         "ffmpeg",
@@ -100,18 +173,13 @@ def _render_video_segment(
 
     cmd.extend(
         [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
+            *_video_encoder_args(hdr),
             "-video_track_timescale",
             "30000",
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            "256k",
             "-shortest",
             str(output_mp4),
         ]
@@ -181,6 +249,7 @@ def render_timeline(
     width = timeline.settings.width
     height = timeline.settings.height
     fps = timeline.settings.fps
+    hdr = timeline.settings.hdr
     total_dur = timeline.total_duration
 
     # 1. Export .srt and .ass subtitle files alongside the output video
@@ -204,6 +273,7 @@ def render_timeline(
                 "w": width,
                 "h": height,
                 "fps": fps,
+                "hdr": hdr,
             },
             sort_keys=True,
         )
@@ -218,6 +288,7 @@ def render_timeline(
                     width=width,
                     height=height,
                     fps=fps,
+                    hdr=hdr,
                     ken_burns=item.ken_burns,
                     transition_in=item.transition_in,
                     transition_out=item.transition_out,
@@ -229,6 +300,7 @@ def render_timeline(
                     width=width,
                     height=height,
                     fps=fps,
+                    hdr=hdr,
                 )
         segment_files.append(seg_mp4)
 
@@ -300,6 +372,7 @@ def render_timeline(
 
     filter_parts: list[str] = []
     cur_v = "[0:v]"
+    ov_fmt = "yuv420p10" if hdr else "auto"
     for idx, t_item in enumerate(active_titles):
         in_idx = 1 + idx
         st = t_item.timeline_start
@@ -317,9 +390,15 @@ def render_timeline(
             f"setpts=PTS+{st:.3f}/TB{ov_label}"
         )
         filter_parts.append(
-            f"{cur_v}{ov_label}overlay=0:0:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
+            f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
         )
         cur_v = next_v
+
+    if hdr and active_titles:
+        filter_parts.append(
+            f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc[vhdr]"
+        )
+        cur_v = "[vhdr]"
 
     # Audio mixing & auto-ducking
     if active_bgm:
@@ -369,18 +448,11 @@ def render_timeline(
             final_audio_map,
             "-t",
             f"{total_dur:.3f}",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
+            *_video_encoder_args(hdr),
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            "320k" if hdr else "192k",
             str(out_path),
         ]
     )

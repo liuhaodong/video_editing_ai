@@ -36,9 +36,10 @@ class PlanRequest(BaseModel):
     project_dir: str = "workspace_project"
     user_prompt: str
     target_duration: Optional[float] = None
-    width: int = 1920
-    height: int = 1080
+    width: int = 3840
+    height: int = 2160
     fps: int = 30
+    hdr: bool = True
     photo_mode: str = "gallery_frame"
     use_antigravity: bool = True
 
@@ -172,6 +173,7 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
             width=req.width,
             height=req.height,
             fps=req.fps,
+            hdr=req.hdr,
             photo_mode=req.photo_mode,
             use_antigravity=req.use_antigravity,
         )

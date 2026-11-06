@@ -83,9 +83,10 @@ def _build_baseline_timeline(
     catalog: MediaCatalog,
     user_prompt: str,
     target_duration: Optional[float] = None,
-    width: int = 1920,
-    height: int = 1080,
+    width: int = 3840,
+    height: int = 2160,
     fps: int = 30,
+    hdr: bool = True,
     photo_mode: str = "gallery_frame",
 ) -> EditTimeline:
     """Construct a structured 4-Act baseline EditTimeline from the analyzed MediaCatalog."""
@@ -317,7 +318,7 @@ def _build_baseline_timeline(
             "A 4-act narrative progression combining natural spoken dialogue clips with "
             "floating gallery-framed & Ken Burns animated photos, chapter banners, and auto-ducked BGM."
         ),
-        settings=TimelineSettings(width=width, height=height, fps=fps),
+        settings=TimelineSettings(width=width, height=height, fps=fps, hdr=hdr),
         markers=markers,
         visual_track=visual_track,
         title_track=title_track,
@@ -494,9 +495,10 @@ def generate_edit_plan(
     user_prompt: str,
     project_dir: str | Path,
     target_duration: Optional[float] = None,
-    width: int = 1920,
-    height: int = 1080,
+    width: int = 3840,
+    height: int = 2160,
     fps: int = 30,
+    hdr: bool = True,
     photo_mode: str = "gallery_frame",
     use_antigravity: bool = True,
 ) -> tuple[EditTimeline, Path, Path]:
@@ -511,6 +513,7 @@ def generate_edit_plan(
         width=width,
         height=height,
         fps=fps,
+        hdr=hdr,
         photo_mode=photo_mode,
     )
 

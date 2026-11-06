@@ -60,9 +60,10 @@ def cmd_plan(
     project_dir: Path = typer.Argument(Path("workspace_project"), help="Project folder containing annotations.yaml"),
     prompt: str = typer.Option(..., "-p", "--prompt", help="Rough story idea for the final video"),
     duration: Optional[float] = typer.Option(None, "-d", "--duration", help="Optional target duration in seconds"),
-    width: int = typer.Option(1920, "--width", help="Output video width"),
-    height: int = typer.Option(1080, "--height", help="Output video height"),
+    width: int = typer.Option(3840, "--width", help="Output video width (default 3840 for 4K UHD)"),
+    height: int = typer.Option(2160, "--height", help="Output video height (default 2160 for 4K UHD)"),
     fps: int = typer.Option(30, "--fps", help="Output video frame rate"),
+    hdr: bool = typer.Option(True, "--hdr/--sdr", help="Render in 10-bit HLG HDR (Rec.2020 / arib-std-b67)"),
     photo_mode: str = typer.Option("gallery_frame", "--photo-mode", help="gallery_frame or full_bleed"),
     use_antigravity: bool = typer.Option(True, "--antigravity/--no-antigravity", help="Use Google Antigravity SDK"),
 ) -> None:
@@ -82,6 +83,7 @@ def cmd_plan(
         width=width,
         height=height,
         fps=fps,
+        hdr=hdr,
         photo_mode=photo_mode,
         use_antigravity=use_antigravity,
     )
