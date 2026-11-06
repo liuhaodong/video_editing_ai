@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Photo & Video Editing Studio</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo-dot"></span>
+      <h1>AI Photo &amp; Video Story Studio</h1>
+      <span class="badge">Antigravity + FFmpeg + Pillow</span>
+    </div>
+    <div class="status-pill" id="statusPill">Ready</div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="step1">1. Media Analysis &amp; Timestamps</button>
+    <button class="tab-btn" data-tab="step2">2. AI Story Plan &amp; Text Timeline</button>
+    <button class="tab-btn" data-tab="step3">3. Render Video &amp; NLE Exports</button>
+  </nav>
+
+  <main class="container">
+    <!-- STEP 1 -->
+    <section id="tab-step1" class="tab-panel active">
+      <div class="card">
+        <h2>Step 1: Analyze Videos &amp; Photos (Scenes, Keyframes &amp; Timestamped Dialogues)</h2>
+        <div class="form-grid">
+          <div>
+            <label>Source Media Directory</label>
+            <input id="mediaDirInput" type="text" value="C:\Users\hihao\Documents\projects\ai_editor\raw_media" />
+          </div>
+          <div>
+            <label>Project Output Workspace</label>
+            <input id="projectDirInput" type="text" value="C:\Users\hihao\Documents\projects\video_editing_ai\gilroy_halloween_project" />
+          </div>
+          <div>
+            <label>Optional Background Music File (.mp3 / .wav)</label>
+            <input id="bgmPathInput" type="text" value="C:\Users\hihao\Documents\projects\ai_editor\bgm_sneaky_snitch.mp3" />
+          </div>
+          <div>
+            <label>Whisper Model &amp; Antigravity AI</label>
+            <div class="inline-controls">
+              <select id="whisperModelSelect">
+                <option value="small" selected>faster-whisper: small</option>
+                <option value="base">faster-whisper: base</option>
+              </select>
+              <label class="checkbox-label">
+                <input type="checkbox" id="useAgStep1" checked />
+                Use Antigravity SDK
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="actions-row">
+          <button class="btn primary" id="btnAnalyze">Run Step 1: Analyze Media</button>
+          <button class="btn secondary" id="btnRefreshState">Reload Existing Project</button>
+        </div>
+      </div>
+
+      <div class="split-grid">
+        <div class="card">
+          <h3>Analyzed Videos, Dialogues &amp; Photos</h3>
+          <div id="catalogSummary" class="catalog-summary">No catalog loaded yet.</div>
+        </div>
+        <div class="card">
+          <div class="card-header-row">
+            <h3>Editable <code>annotations.yaml</code></h3>
+            <button class="btn small" id="btnSaveAnnotations">Save Annotations YAML</button>
+          </div>
+          <textarea id="annotationsYamlEditor" class="code-editor" spellcheck="false" placeholder="# annotations.yaml will appear here..."></textarea>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 2 -->
+    <section id="tab-step2" class="tab-panel">
+      <div class="card">
+        <h2>Step 2: AI Story Director &amp; Text-Based Timeline Generator</h2>
+        <div class="form-grid">
+          <div class="full-span">
+            <label>Rough Story Idea / Editing Prompt</label>
+            <textarea id="storyPromptInput" rows="2">Create an upbeat, heartwarming 4-act family Halloween highlight video at Gilroy Gardens. Keep the kids' excited Mandarin dialogue in the car and on the spinning ride, feature the giant pumpkin pyramid and maze photos with gallery frames, include the Great Big Boo live stage song, and end with Boo Alley night lights.</textarea>
+          </div>
+          <div>
+            <label>Output Resolution</label>
+            <select id="resolutionSelect">
+              <option value="1920x1080" selected>1920x1080 (Full HD 1080p)</option>
+              <option value="1280x720">1280x720 (Fast Preview 720p)</option>
+              <option value="3840x2160">3840x2160 (4K UHD)</option>
+            </select>
+          </div>
+          <div>
+            <label>Photo Framing &amp; Ken Burns Mode</label>
+            <select id="photoModeSelect">
+              <option value="gallery_frame" selected>Gallery Frame + Floating Ken Burns (Uncropped)</option>
+              <option value="full_bleed">Full-Bleed Ken Burns (16:9 Crop)</option>
+            </select>
+          </div>
+        </div>
+        <div class="actions-row">
+          <button class="btn primary" id="btnGeneratePlan">Run Step 2: Generate Story Plan &amp; Timeline</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Visual Multi-Track Timeline Overview</h3>
+        <div id="visualTimelineTracks" class="timeline-tracks-box">Generate or load a timeline to view tracks.</div>
+      </div>
+
+      <div class="split-grid">
+        <div class="card">
+          <div class="card-header-row">
+            <h3>Editable Text Timeline (<code>timeline.yaml</code>)</h3>
+            <button class="btn small primary" id="btnSaveTimeline">Save &amp; Validate timeline.yaml</button>
+          </div>
+          <textarea id="timelineYamlEditor" class="code-editor" spellcheck="false" placeholder="# timeline.yaml will appear here..."></textarea>
+        </div>
+        <div class="card">
+          <h3>Story Script &amp; Storyboard (<code>storyboard.md</code>)</h3>
+          <pre id="storyboardPreview" class="markdown-preview">No storyboard generated yet.</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 3 -->
+    <section id="tab-step3" class="tab-panel">
+      <div class="card">
+        <h2>Step 3: Programmatic Open-Source Video Rendering &amp; NLE Exports</h2>
+        <p class="muted">Renders your text timeline into MP4 with sub-pixel Ken Burns / Gallery Frame photos, RGBA titles, dialogue callouts, and auto-ducked background music, plus FCPXML/EDL/OTIO/SRT/ASS files.</p>
+        <div class="actions-row">
+          <button class="btn primary" id="btnRenderVideo">Render Video (.mp4) &amp; Export All Formats</button>
+        </div>
+      </div>
+
+      <div class="split-grid">
+        <div class="card">
+          <h3>Rendered Video Preview</h3>
+          <div id="videoPlayerContainer" class="video-container">
+            <p class="muted">Click "Render Video" or load a rendered project to preview the final MP4 here.</p>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Download Deliverables &amp; NLE Project Files</h3>
+          <div id="exportsList" class="exports-list">No exports available yet.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

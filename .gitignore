@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+src/*.egg-info/
+
+# Pytest & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments & env files
+.env
+.venv/
+env/
+venv/
+
+# Generated project workspaces, caches, and heavy media outputs
+gilroy_halloween_project/
+workspace_project/
+render_cache/
+cache/
+scratch_frames/
+*.mp4
+*.mov
+*.MOV
+*.heic
+*.HEIC
+*.wav
+*.mp3
+*.fcpxml
+*.edl
+*.otio
+*.srt
+*.ass
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
