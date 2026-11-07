@@ -195,8 +195,7 @@ class StoryProducerAgent(BaseEditingAgent):
             c_vids = v_buckets[c_idx]
             c_photos = p_buckets[c_idx]
 
-            # Build Track V2 B-Roll cutaway anchor map for A-roll clips (>= min_aroll_cutaway_dur)
-            # or long B-roll anchor clips (>= 6.0s) when the chapter has ample still photos
+            # Build semantically matched Track V2 B-Roll cutaway anchor map for A-roll clips
             broll_anchor_map: dict[str, list[str]] = {}
             for v in c_vids:
                 eligible_for_cutaway = (
@@ -204,19 +203,42 @@ class StoryProducerAgent(BaseEditingAgent):
                     or (v.duration >= 6.0 and len(c_photos) >= 3 and not broll_anchor_map)
                 )
                 if eligible_for_cutaway:
-                    cutaway_candidate = next(
-                        (
-                            p
-                            for p in reversed(c_photos)
-                            if p.subclip_id not in used_as_v2_cutaway and not p.secondary_source_path
-                        ),
-                        None,
+                    v_words = set(
+                        w.lower()
+                        for w in (v.spoken_text + " " + (v.annotation_title or "") + " " + v.summary).split()
+                        if len(w) >= 4
                     )
+                    avail_cutaways = [
+                        p
+                        for p in c_photos
+                        if p.subclip_id not in used_as_v2_cutaway and not p.secondary_source_path
+                    ]
+                    cutaway_candidate = None
+                    if avail_cutaways:
+                        cutaway_candidate = max(
+                            avail_cutaways,
+                            key=lambda p: (
+                                sum(
+                                    1
+                                    for w in v_words
+                                    if w in ((p.annotation_title or "") + " " + p.summary).lower()
+                                ),
+                                p.aesthetic_score,
+                            ),
+                        )
                     if cutaway_candidate is not None:
                         broll_anchor_map[v.subclip_id] = [cutaway_candidate.subclip_id]
                         used_as_v2_cutaway.add(cutaway_candidate.subclip_id)
 
             primary_photos = [p for p in c_photos if p.subclip_id not in used_as_v2_cutaway]
+            # Sort primary photos so wide establishing landmarks lead, followed by medium/closeup portraits & details
+            scale_rank = {"wide": 0, "medium": 1, "closeup": 2}
+            primary_photos.sort(
+                key=lambda p: (
+                    scale_rank.get(p.shot_scale, 1),
+                    p.normalized_timestamp,
+                )
+            )
             ordered_selects: list[CulledSubClip] = []
             p_cursor = 0
             for v in c_vids:
@@ -312,34 +334,44 @@ class StoryProducerAgent(BaseEditingAgent):
                 "as a 3.4s Cold-Open Teaser Hook before the Main Title Card drop to maximize viewer retention."
             )
 
-        if blackboard.use_antigravity:
-            ag_plan = self.ask_antigravity_json(
-                "You are the Story Producer. Review this candidate_story_digest.json and return JSON with optional "
-                "keys: cold_open_subclip_id, cold_open_hook_caption, cold_open_rationale, and chapter_titles "
-                "(list of {title, subtitle}).\n\n" + json.dumps(digest_doc, ensure_ascii=False)[:3500]
-            )
-            if isinstance(ag_plan, dict):
-                if ag_plan.get("cold_open_subclip_id") in {v.subclip_id for v in videos}:
-                    cold_open_sid = str(ag_plan["cold_open_subclip_id"])
-                if ag_plan.get("cold_open_hook_caption"):
-                    cold_open_caption = str(ag_plan["cold_open_hook_caption"])
-                if ag_plan.get("cold_open_rationale"):
-                    cold_open_rationale = str(ag_plan["cold_open_rationale"])
-                ag_titles = ag_plan.get("chapter_titles")
-                if isinstance(ag_titles, list):
-                    for idx_t, t_obj in enumerate(ag_titles[: len(chapters)]):
-                        if isinstance(t_obj, dict):
-                            if t_obj.get("title"):
-                                chapters[idx_t].title = str(t_obj["title"])
-                            if t_obj.get("subtitle"):
-                                chapters[idx_t].subtitle = str(t_obj["subtitle"])
+        ag_plan = self.ask_ai_creative_json(
+            blackboard=blackboard,
+            prompt=(
+                "You are the Story Producer (Stage 20). Review this candidate_story_digest.json and return JSON with optional "
+                "keys: cold_open_subclip_id, cold_open_hook_caption, cold_open_rationale, story_arc_summary, chapter_titles "
+                "(list of {title, subtitle, narrative_goal}), or chapters (list of chapter overrides).\n\n"
+                + json.dumps(digest_doc, ensure_ascii=False)[:4200]
+            ),
+            decision_key="story_producer",
+            timeout_sec=35.0,
+        )
+        story_arc_summary = (
+            "Cold-Open Teaser Hook followed by a four-chapter Day-in-the-Life narrative arc alternating between "
+            "spoken A-Roll story anchors (with Track V2 B-Roll cutaways) and AI-choreographed 10-mode photo galleries."
+        )
+        if isinstance(ag_plan, dict):
+            if ag_plan.get("cold_open_subclip_id") in {v.subclip_id for v in videos}:
+                cold_open_sid = str(ag_plan["cold_open_subclip_id"])
+            if ag_plan.get("cold_open_hook_caption"):
+                cold_open_caption = str(ag_plan["cold_open_hook_caption"])
+            if ag_plan.get("cold_open_rationale"):
+                cold_open_rationale = str(ag_plan["cold_open_rationale"])
+            if ag_plan.get("story_arc_summary"):
+                story_arc_summary = str(ag_plan["story_arc_summary"])
+            ag_titles = ag_plan.get("chapter_titles")
+            if isinstance(ag_titles, list):
+                for idx_t, t_obj in enumerate(ag_titles[: len(chapters)]):
+                    if isinstance(t_obj, dict):
+                        if t_obj.get("title"):
+                            chapters[idx_t].title = str(t_obj["title"])
+                        if t_obj.get("subtitle"):
+                            chapters[idx_t].subtitle = str(t_obj["subtitle"])
+                        if t_obj.get("narrative_goal"):
+                            chapters[idx_t].narrative_goal = str(t_obj["narrative_goal"])
 
         paper_edit = PaperEdit(
             project_title=brief.project_title if brief else "Family_Travel_Story",
-            story_arc_summary=(
-                "Cold-Open Teaser Hook followed by a four-chapter Day-in-the-Life narrative arc alternating between "
-                "spoken A-Roll story anchors (with Track V2 B-Roll cutaways) and beat-synced Gallery Frame photo montages."
-            ),
+            story_arc_summary=story_arc_summary,
             cold_open_subclip_id=cold_open_sid,
             cold_open_in_tc=cold_open_in,
             cold_open_out_tc=cold_open_out,
@@ -350,6 +382,12 @@ class StoryProducerAgent(BaseEditingAgent):
 
         out_path = blackboard.project_dir / "paper_edit.json"
         paper_edit.to_json_file(out_path)
+        if isinstance(ag_plan, dict) and isinstance(ag_plan.get("chapters"), list):
+            try:
+                apply_story_plan_overrides(blackboard.project_dir, ag_plan)
+                paper_edit = PaperEdit.from_json_file(out_path)
+            except Exception:
+                pass
         blackboard.paper_edit = paper_edit
         hook_note = f" + Cold-Open Hook ({cold_open_sid})" if cold_open_sid else ""
         blackboard.emit_activity(

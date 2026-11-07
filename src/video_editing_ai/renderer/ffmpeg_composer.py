@@ -87,13 +87,29 @@ def _render_video_segment(
         if builder is not None:
             post_filters.append(builder(fx))
 
-    if item.transition_in.type == "fade_black" and item.transition_in.duration > 0:
-        fd = min(dur * 0.40, item.transition_in.duration)
-        post_filters.append(f"fade=t=in:st=0:d={fd:.3f}")
-    if item.transition_out.type == "fade_black" and item.transition_out.duration > 0:
-        fd = min(dur * 0.40, item.transition_out.duration)
-        st = max(0.0, dur - fd)
-        post_filters.append(f"fade=t=out:st={st:.3f}:d={fd:.3f}")
+    if item.transition_in.type not in ("none", "cut") and item.transition_in.duration > 0:
+        if item.transition_in.type == "dip_to_white":
+            fd = min(dur * 0.35, item.transition_in.duration)
+            post_filters.append(f"fade=t=in:st=0:d={fd:.3f}:c=#F6F2E8")
+        elif item.transition_in.type in ("dissolve", "crossfade"):
+            fd = min(dur * 0.25, item.transition_in.duration, 0.26)
+            post_filters.append(f"fade=t=in:st=0:d={fd:.3f}:c=#0B0E14")
+        else:
+            fd = min(dur * 0.40, item.transition_in.duration)
+            post_filters.append(f"fade=t=in:st=0:d={fd:.3f}")
+    if item.transition_out.type not in ("none", "cut") and item.transition_out.duration > 0:
+        if item.transition_out.type == "dip_to_white":
+            fd = min(dur * 0.35, item.transition_out.duration)
+            st = max(0.0, dur - fd)
+            post_filters.append(f"fade=t=out:st={st:.3f}:d={fd:.3f}:c=#F6F2E8")
+        elif item.transition_out.type in ("dissolve", "crossfade"):
+            fd = min(dur * 0.25, item.transition_out.duration, 0.26)
+            st = max(0.0, dur - fd)
+            post_filters.append(f"fade=t=out:st={st:.3f}:d={fd:.3f}:c=#0B0E14")
+        else:
+            fd = min(dur * 0.40, item.transition_out.duration)
+            st = max(0.0, dur - fd)
+            post_filters.append(f"fade=t=out:st={st:.3f}:d={fd:.3f}")
 
     if hdr:
         post_filters.extend(build_hdr_color_filters(src_trc if src_trc != "bt709" else "709"))

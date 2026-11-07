@@ -140,13 +140,21 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
             )
         )
 
-        for sid in chapter.selected_subclip_ids:
+        for s_pos, sid in enumerate(chapter.selected_subclip_ids):
             sc = subclip_map.get(sid)
             if sc is None:
                 continue
 
             clip_id = f"clip_{clip_counter:03d}"
             clip_counter += 1
+
+            # Choose semantic transition based on narrative boundary and clip content
+            is_chap_opener = s_pos == 0
+            raw_trans = sc.recommended_transition or "crossfade"
+            in_trans_type = "fade_black" if is_chap_opener else raw_trans
+            out_trans_type = "fade_black" if (s_pos == len(chapter.selected_subclip_ids) - 1) else raw_trans
+            in_trans_dur = 0.0 if in_trans_type in ("cut", "none") else (0.40 if in_trans_type == "fade_black" else 0.32)
+            out_trans_dur = 0.0 if out_trans_type in ("cut", "none") else (0.40 if out_trans_type == "fade_black" else 0.32)
 
             if sc.media_type == "video":
                 vol = 1.0 if sc.roll_type == "a_roll" else 0.10
@@ -168,11 +176,30 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
                     j_l_cut_audio_offset=jl_offset,
                     audio_crossfade_sec=0.33,
                     ken_burns=None,
-                    transition_in=TransitionConfig(type="fade_black", duration=0.30),
-                    transition_out=TransitionConfig(type="fade_black", duration=0.30),
-                    narrative_note=f"[{sc.roll_type.upper()}] {sc.summary}",
+                    transition_in=TransitionConfig(type=in_trans_type, duration=in_trans_dur),  # type: ignore[arg-type]
+                    transition_out=TransitionConfig(type=out_trans_type, duration=out_trans_dur),  # type: ignore[arg-type]
+                    narrative_note=f"[{sc.roll_type.upper()}] {sc.annotation_title or sc.summary}",
                 )
                 visual_track.append(v_item)
+
+                # Add contextual bilingual lower_third scene caption for B-roll / establishing video clips
+                if sc.annotation_title and sc.roll_type == "b_roll" and v_item.duration >= 3.2:
+                    lt_start = round(v_item.timeline_start + 0.5, 2)
+                    lt_dur = round(min(3.4, max(2.0, v_item.duration - 0.9)), 2)
+                    if not any(abs(t.timeline_start - lt_start) < 3.6 for t in title_track):
+                        title_track.append(
+                            TitleOverlayItem(
+                                id=f"title_lt_{clip_id}",
+                                style="lower_third",
+                                text=sc.annotation_title,
+                                subtitle=sc.annotation_subtitle or chapter.location_tag,
+                                timeline_start=lt_start,
+                                duration=lt_dur,
+                                fade_in=0.30,
+                                fade_out=0.30,
+                                accent_color="#FFD740",
+                            )
+                        )
 
                 # Check if this A-Roll clip has Track V2 B-Roll cutaways mapped in broll_anchor_map
                 for cutaway_sid in chapter.broll_anchor_map.get(sc.subclip_id, []):
@@ -266,8 +293,8 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
                         caption_subtitle=sc.annotation_subtitle,
                         camera_badge=sc.camera_badge,
                     ),
-                    transition_in=TransitionConfig(type="fade_black", duration=0.30),
-                    transition_out=TransitionConfig(type="fade_black", duration=0.30),
+                    transition_in=TransitionConfig(type=in_trans_type, duration=in_trans_dur),  # type: ignore[arg-type]
+                    transition_out=TransitionConfig(type=out_trans_type, duration=out_trans_dur),  # type: ignore[arg-type]
                     narrative_note=(
                         f"[STILL · {sc.annotation_title}] {sc.annotation_subtitle}"
                         if sc.annotation_title
@@ -443,20 +470,33 @@ class MontageEditorAgent(BaseEditingAgent):
             rel_offset = (b_item.timeline_start - parent.timeline_start) if parent else 2.0
             v2_parent_info.append((b_item, parent, rel_offset))
 
-        # Snap B-roll and photo durations on Track V1 to musical beat intervals
+        # Snap B-roll and photo durations on Track V1 to musical beat intervals,
+        # giving multi-panel layouts and dense bilingual captions comfortable reading hold time
         v1_with_v2_cutaway = {p.id for _, p, _ in v2_parent_info if p is not None}
         snapped_count = 0
         scale_cycle = ["wide", "medium", "closeup"]
+        is_extended_cut = (brief.target_duration_sec if brief else 110.0) >= 135.0
         for idx, item in enumerate(timeline.visual_track):
             if item.id == "clip_000_hook":
                 continue
             if item.roll_type in ("b_roll", "still"):
                 cap = max(max_broll, 7.0) if item.id in v1_with_v2_cutaway else max_broll
                 target_d = min(cap, item.duration)
+                min_hold = 2.4
+                if item.type == "photo" and item.ken_burns is not None and is_extended_cut:
+                    kb_mode = item.ken_burns.mode
+                    cap_len = len(item.ken_burns.caption_title or "") + len(item.ken_burns.caption_subtitle or "")
+                    if kb_mode in ("diptych_frame", "triptych_cinematic"):
+                        min_hold = min(cap, 4.8)
+                        target_d = max(target_d, min_hold)
+                    elif cap_len >= 42:
+                        min_hold = min(cap, 4.2)
+                        target_d = max(target_d, min_hold)
+
                 if beat_grid is not None:
-                    snapped_d = beat_grid.snap_duration_to_beat(target_d, min_dur=2.2, max_dur=cap)
+                    snapped_d = beat_grid.snap_duration_to_beat(target_d, min_dur=min(min_hold, cap), max_dur=cap)
                 else:
-                    snapped_d = round(min(cap, max(2.4, target_d)), 2)
+                    snapped_d = round(min(cap, max(min_hold, target_d)), 2)
 
                 item.duration = snapped_d
                 item.source_out = round(item.source_in + snapped_d, 2)
@@ -469,10 +509,15 @@ class MontageEditorAgent(BaseEditingAgent):
                     item.shot_scale = scale_cycle[idx % len(scale_cycle)]  # type: ignore[assignment]
                 snapped_count += 1
 
-        # Recalculate sequential Track V1 timeline_start positions and update subtitles + V2 cutaways
+        # Recalculate sequential Track V1 timeline_start positions and update subtitles + V2 cutaways + lower_thirds
         old_starts = {item.id: item.timeline_start for item in timeline.visual_track}
         timeline.recalculate_sequential_starts()
         new_starts = {item.id: item.timeline_start for item in timeline.visual_track}
+        for t_item in timeline.title_track:
+            if t_item.id.startswith("title_lt_clip_"):
+                cid_ref = t_item.id.replace("title_lt_", "")
+                if cid_ref in new_starts:
+                    t_item.timeline_start = round(new_starts[cid_ref] + 0.5, 2)
 
         # Re-align subtitles to updated V1 A-roll start times
         if blackboard.catalog is not None:
@@ -538,6 +583,22 @@ class MontageEditorAgent(BaseEditingAgent):
                 )
             ]
 
+        # Optional AI Creative Intelligence refinement of transitions, hold durations, and lower-third captions
+        ai_montage_resp = self.ask_ai_creative_json(
+            blackboard=blackboard,
+            prompt=(
+                f"Assembled Timeline ({len(timeline.visual_track)} V1 cuts, {timeline.total_duration:.1f}s).\n"
+                "Optionally refine clip transitions ('cut', 'crossfade', 'dissolve', 'fade_black'), photo modes, or add "
+                "Track V3 lower_third scene captions. Return JSON compatible with apply_timeline_intelligence_overrides."
+            ),
+            decision_key="montage_editor",
+            timeout_sec=30.0,
+        )
+        if isinstance(ai_montage_resp, dict) and (
+            ai_montage_resp.get("clips") or ai_montage_resp.get("lower_thirds")
+        ):
+            _apply_timeline_intelligence_to_obj(timeline, ai_montage_resp)
+
         blackboard.send_message(
             sender_role=self.role_id,
             recipient_role="showrunner",
@@ -552,10 +613,117 @@ class MontageEditorAgent(BaseEditingAgent):
         blackboard.emit_activity(
             self.role_id,
             f"Beat-snapped {snapped_count} B-Roll & 2.5D photo plates -> Total timeline runtime: {timeline.total_duration:.1f}s",
-            detail="Alternated Wide -> Medium -> Close-up shot scales and diversified 2.5D parallax & diptych vectors",
+            detail="Alternated Wide -> Medium -> Close-up shot scales, semantic transitions, and Track V3 lower-thirds",
         )
 
         return {
             "snapped_clips": snapped_count,
             "total_duration": round(timeline.total_duration, 2),
         }
+
+
+def _apply_timeline_intelligence_to_obj(timeline: EditTimeline, overrides: dict[str, Any]) -> int:
+    """Apply AI transition, duration, photo mode, and lower-third overrides directly to an EditTimeline."""
+    clips_ov = overrides.get("clips") or {}
+    if isinstance(clips_ov, list):
+        clips_ov = {str(c.get("id") or c.get("clip_id")): c for c in clips_ov if isinstance(c, dict)}
+
+    updated = 0
+    for item in timeline.visual_track:
+        u = clips_ov.get(item.id)
+        if not isinstance(u, dict):
+            continue
+        if u.get("transition_in") in ("none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"):
+            t_type = u["transition_in"]
+            item.transition_in = TransitionConfig(
+                type=t_type,  # type: ignore[arg-type]
+                duration=0.0 if t_type in ("none", "cut") else float(u.get("transition_duration", 0.35)),
+            )
+        if u.get("transition_out") in ("none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"):
+            t_type = u["transition_out"]
+            item.transition_out = TransitionConfig(
+                type=t_type,  # type: ignore[arg-type]
+                duration=0.0 if t_type in ("none", "cut") else float(u.get("transition_duration", 0.35)),
+            )
+        if isinstance(u.get("duration"), (int, float)):
+            new_d = max(1.8, min(12.0, float(u["duration"])))
+            item.duration = round(new_d, 2)
+            item.source_out = round(item.source_in + new_d, 2)
+        if item.ken_burns is not None:
+            if u.get("photo_mode"):
+                item.ken_burns.mode = u["photo_mode"]
+            if u.get("overlay_fx"):
+                item.ken_burns.overlay_fx = u["overlay_fx"]
+            if u.get("caption_title"):
+                item.ken_burns.caption_title = str(u["caption_title"])
+            if u.get("caption_subtitle"):
+                item.ken_burns.caption_subtitle = str(u["caption_subtitle"])
+        updated += 1
+
+    if updated > 0:
+        timeline.recalculate_sequential_starts()
+        for a_item in timeline.audio_tracks:
+            if a_item.role == "music":
+                a_item.duration = round(timeline.total_duration, 2)
+
+    lt_list = overrides.get("lower_thirds")
+    if isinstance(lt_list, list):
+        clip_by_id = {c.id: c for c in timeline.visual_track}
+        for idx_lt, lt in enumerate(lt_list):
+            if not isinstance(lt, dict) or not lt.get("text"):
+                continue
+            target_cid = str(lt.get("clip_id") or "")
+            start_t = float(lt.get("timeline_start", 0.0))
+            if target_cid in clip_by_id:
+                start_t = round(clip_by_id[target_cid].timeline_start + 0.5, 2)
+            lt_id = str(lt.get("id") or f"title_lt_ai_{idx_lt + 1:02d}")
+            existing = next((t for t in timeline.title_track if t.id == lt_id), None)
+            if existing:
+                existing.text = str(lt["text"])
+                existing.subtitle = str(lt.get("subtitle") or "")
+                existing.timeline_start = start_t
+            else:
+                timeline.title_track.append(
+                    TitleOverlayItem(
+                        id=lt_id,
+                        style="lower_third",
+                        text=str(lt["text"]),
+                        subtitle=str(lt.get("subtitle") or ""),
+                        timeline_start=start_t,
+                        duration=float(lt.get("duration", 3.2)),
+                        fade_in=0.30,
+                        fade_out=0.30,
+                        accent_color=str(lt.get("accent_color") or "#FFD740"),
+                    )
+                )
+            updated += 1
+
+    return updated
+
+
+def apply_timeline_intelligence_overrides(
+    project_dir: str | Path,
+    overrides: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist AI Agent transition, hold duration, photo mode, and lower-third caption overrides to timeline.yaml."""
+    import json as _json
+
+    proj_path = Path(project_dir).resolve()
+    tl_path = proj_path / "timeline.yaml"
+    if not tl_path.exists():
+        raise FileNotFoundError(f"timeline.yaml not found in {proj_path}")
+
+    timeline = EditTimeline.from_yaml(tl_path)
+    updated = _apply_timeline_intelligence_to_obj(timeline, overrides)
+    timeline.to_yaml(tl_path)
+
+    decisions_dir = proj_path / "ai_decisions"
+    decisions_dir.mkdir(parents=True, exist_ok=True)
+    (decisions_dir / "montage_editor.json").write_text(
+        _json.dumps(overrides, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return {
+        "updated_items": updated,
+        "total_duration": round(timeline.total_duration, 2),
+        "timeline_path": str(tl_path),
+    }

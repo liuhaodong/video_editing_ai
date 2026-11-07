@@ -2,11 +2,184 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
 from typing import Any, Optional
 
-from ..models.schema import DirectorReviewReport, DirectorStageReview
+from PIL import Image, ImageDraw
+
+from ..analyzer.media_probe import _get_cjk_font
+from ..models.schema import DirectorReviewReport, DirectorStageReview, EditTimeline, KenBurnsConfig
+from ..renderer.ken_burns import _prepare_photo_scene_context, _render_photo_frame_from_context
+from ..renderer.titles import render_title_png
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
+from .picture_editors import _apply_timeline_intelligence_to_obj
+
+
+def render_director_screening_sheet(
+    project_dir: str | Path,
+    timeline_override: Optional[EditTimeline] = None,
+    max_tiles: int = 12,
+) -> Path:
+    """
+    Mechanically render a 4x3 Multimodal Director Screening Sheet sampling rendered frames
+    (including 10-mode photo effects, museum plaques, and Track V3 lower-third/chapter overlays)
+    across the assembled EditTimeline for AI Executive Director visual quality inspection.
+    """
+    proj_path = Path(project_dir).resolve()
+    tl = timeline_override
+    if tl is None:
+        tl_path = proj_path / "timeline.yaml"
+        if not tl_path.exists():
+            raise FileNotFoundError(f"timeline.yaml not found in {proj_path}")
+        tl = EditTimeline.from_yaml(tl_path)
+
+    out_dir = proj_path / "cache" / "curation"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_jpg = out_dir / "director_screening_sheet.jpg"
+
+    v1 = tl.visual_track
+    if not v1:
+        canvas = Image.new("RGB", (1920, 1080), (12, 16, 24))
+        canvas.save(out_jpg, quality=90)
+        return out_jpg
+
+    sample_count = min(max_tiles, len(v1))
+    sampled_clips = [v1[min(len(v1) - 1, int(i * len(v1) / sample_count))] for i in range(sample_count)]
+
+    cols = 4
+    rows = max(1, (sample_count + cols - 1) // cols)
+    tile_w, tile_h = 450, 254
+    label_h = 54
+    pad = 22
+    header_h = 72
+    canvas_w = cols * tile_w + (cols + 1) * pad
+    canvas_h = header_h + rows * (tile_h + label_h) + (rows + 1) * pad
+
+    sheet = Image.new("RGB", (canvas_w, canvas_h), (10, 14, 22))
+    draw = ImageDraw.Draw(sheet)
+    f_hdr = _get_cjk_font(26)
+    f_meta = _get_cjk_font(15)
+    f_sub = _get_cjk_font(13)
+
+    draw.rectangle([0, 0, canvas_w, header_h], fill=(18, 25, 38))
+    draw.text(
+        (pad, 20),
+        f"STAGE 60 EXECUTIVE DIRECTOR — TIMELINE VISUAL SCREENING SHEET ({len(v1)} Cuts • {tl.total_duration:.1f}s Total Runtime)",
+        fill=(255, 215, 64),
+        font=f_hdr,
+    )
+
+    tmp_title_png = out_dir / "_tmp_screening_title.png"
+    for idx, clip in enumerate(sampled_clips):
+        r = idx // cols
+        c = idx % cols
+        x0 = pad + c * (tile_w + pad)
+        y0 = header_h + pad + r * (tile_h + label_h + pad)
+
+        tile_img: Optional[Image.Image] = None
+        if clip.type == "photo" and Path(clip.source).exists():
+            try:
+                kb = clip.ken_burns or KenBurnsConfig()
+                ctx = _prepare_photo_scene_context(photo_path=clip.source, width=tile_w, height=tile_h, kb=kb)
+                tile_img = _render_photo_frame_from_context(
+                    ctx=ctx, t_norm=0.55, f_idx=15, duration=clip.duration, fps=30
+                )
+            except Exception:
+                tile_img = None
+        elif clip.type == "video":
+            tmp_vid_jpg = out_dir / f"_tmp_vid_{idx}.jpg"
+            if Path(clip.source).exists():
+                try:
+                    import subprocess
+
+                    seek_t = max(0.0, float(clip.in_tc) + float(clip.duration) * 0.5)
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-ss",
+                            f"{seek_t:.2f}",
+                            "-i",
+                            str(clip.source),
+                            "-frames:v",
+                            "1",
+                            "-vf",
+                            f"scale={tile_w}:{tile_h}:force_original_aspect_ratio=increase,crop={tile_w}:{tile_h}",
+                            "-q:v",
+                            "3",
+                            str(tmp_vid_jpg),
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=8,
+                        check=False,
+                    )
+                    if tmp_vid_jpg.exists():
+                        with Image.open(tmp_vid_jpg) as vf:
+                            tile_img = vf.convert("RGB")
+                        tmp_vid_jpg.unlink(missing_ok=True)
+                except Exception:
+                    tile_img = None
+            if tile_img is None:
+                kf_dir = proj_path / "cache" / "keyframes"
+                stem = Path(clip.source).stem
+                candidates_kf = sorted(kf_dir.glob(f"*{stem}*.jpg")) if kf_dir.exists() else []
+                if candidates_kf:
+                    try:
+                        with Image.open(candidates_kf[len(candidates_kf) // 2]) as kf_im:
+                            tile_img = kf_im.convert("RGB").resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+                    except Exception:
+                        tile_img = None
+
+        if tile_img is None:
+            tile_img = Image.new("RGB", (tile_w, tile_h), (24, 32, 48))
+            td = ImageDraw.Draw(tile_img)
+            td.text((18, tile_h // 2 - 20), f"VIDEO [{clip.roll_type.upper()}] {Path(clip.source).name}", fill=(0, 229, 255), font=f_meta)
+            td.text((18, tile_h // 2 + 8), clip.narrative_note[:54], fill=(225, 232, 245), font=f_sub)
+
+        # Composite any active Track V3 title / lower-third overlay at clip midpoint
+        mid_t = clip.timeline_start + clip.duration * 0.5
+        active_title = next(
+            (t for t in tl.title_track if t.timeline_start <= mid_t <= (t.timeline_start + t.duration)),
+            None,
+        )
+        if active_title is not None:
+            try:
+                render_title_png(active_title, tmp_title_png, width=tile_w, height=tile_h)
+                with Image.open(tmp_title_png) as ov:
+                    ov_rgba = ov.convert("RGBA")
+                    tile_rgba = tile_img.convert("RGBA")
+                    tile_rgba.alpha_composite(ov_rgba)
+                    tile_img = tile_rgba.convert("RGB")
+            except Exception:
+                pass
+
+        border_col = (0, 229, 255) if clip.type == "video" else (214, 176, 84)
+        draw.rectangle([x0 - 2, y0 - 2, x0 + tile_w + 1, y0 + tile_h + label_h + 1], outline=border_col, width=2)
+        sheet.paste(tile_img, (x0, y0))
+        draw.rectangle([x0, y0 + tile_h, x0 + tile_w, y0 + tile_h + label_h], fill=(16, 22, 34))
+
+        mode_str = clip.ken_burns.mode if (clip.type == "photo" and clip.ken_burns) else clip.roll_type.upper()
+        trans_str = clip.transition_in.type
+        draw.text(
+            (x0 + 10, y0 + tile_h + 6),
+            f"[{clip.id}] {clip.timeline_start:.1f}s–{clip.timeline_start + clip.duration:.1f}s ({clip.duration:.1f}s) • {mode_str} • in:{trans_str}",
+            fill=(255, 215, 64),
+            font=f_meta,
+        )
+        cap_preview = (clip.caption_title or clip.narrative_note or Path(clip.source).name)[:56]
+        draw.text((x0 + 10, y0 + tile_h + 29), cap_preview, fill=(215, 225, 240), font=f_sub)
+
+    if tmp_title_png.exists():
+        try:
+            tmp_title_png.unlink()
+        except Exception:
+            pass
+
+    sheet.save(out_jpg, quality=90)
+    return out_jpg
 
 
 @register_agent
@@ -458,6 +631,45 @@ class ProductionDirectorAgent(BaseEditingAgent):
                 if t_item.timeline_start < min_s and min_s + t_item.duration < total_dur:
                     t_item.timeline_start = min_s
 
+        # 2b. Closed-Loop Caption & Transition Craft Audit: upgrade any generic filename captions
+        captions_upgraded = 0
+        for p_idx, item in enumerate(tl.visual_track):
+            if item.type == "photo" and item.ken_burns is not None:
+                c_title = (item.ken_burns.caption_title or "").strip()
+                if not c_title or re.match(r"^(IMG_|_?DSC|PXL_|Capture\s)", c_title, re.IGNORECASE):
+                    act_label = (item.act or "Curated Gallery Plate").split("-")[0].strip()
+                    item.ken_burns.caption_title = f"{act_label} — Curated Keepsake Plate #{p_idx + 1:02d}"
+                    if not item.ken_burns.caption_subtitle:
+                        item.ken_burns.caption_subtitle = "4K HDR 精选视觉记忆 · 珍藏光影瞬间"
+                    captions_upgraded += 1
+
+        # 2c. Render Multimodal Timeline Screening Contact Sheet & run AI Executive Director inspection
+        screening_sheet_str: Optional[str] = None
+        try:
+            s_path = render_director_screening_sheet(blackboard.project_dir, timeline_override=tl)
+            screening_sheet_str = str(s_path)
+        except Exception:
+            screening_sheet_str = None
+
+        ai_dir_resp = self.ask_ai_creative_json(
+            blackboard=blackboard,
+            prompt=(
+                f"Executive Final Screening of Timeline ({len(tl.visual_track)} V1 cuts, {tl.total_duration:.1f}s).\n"
+                "Inspect the director_screening_sheet.jpg. Optionally return JSON with 'director_vision_statement', "
+                "'final_director_notes' (list of strings), 'rubric_scores' (dict), or surgical 'clips'/'lower_thirds' "
+                "overrides to polish captions, transitions, or photo modes."
+            ),
+            image_paths=[screening_sheet_str] if screening_sheet_str else [],
+            decision_key="production_director",
+            timeout_sec=35.0,
+        )
+        if isinstance(ai_dir_resp, dict) and (ai_dir_resp.get("clips") or ai_dir_resp.get("lower_thirds")):
+            try:
+                _apply_timeline_intelligence_to_obj(tl, ai_dir_resp)
+                total_dur = tl.total_duration
+            except Exception:
+                pass
+
         # 3. Compute the 6 Cinematic Rubric Scores (0-10 scale)
         has_opening = any(t.style == "opening_card" for t in tl.title_track)
         has_closing = any(t.style == "closing_card" for t in tl.title_track)
@@ -499,15 +711,24 @@ class ProductionDirectorAgent(BaseEditingAgent):
             f"Locked soundtrack '{bgm_title}' with -14dB dialogue auto-ducking and 4K UHD 10-bit HLG HDR delivery.",
         ]
 
+        if isinstance(ai_dir_resp, dict):
+            if ai_dir_resp.get("director_vision_statement"):
+                vision_statement = str(ai_dir_resp["director_vision_statement"])
+            if isinstance(ai_dir_resp.get("final_director_notes"), list):
+                final_notes.extend([str(n) for n in ai_dir_resp["final_director_notes"] if n])
+        if captions_upgraded > 0:
+            final_notes.append(f"Closed-loop caption audit upgraded {captions_upgraded} generic filename captions to bilingual story titles.")
+
         report = DirectorReviewReport(
             director_vision_statement=vision_statement,
             overall_quality_score=overall_score,
             quality_grade=grade,
             approved_for_master_render=True,
-            interventions_count=interventions,
+            interventions_count=interventions + (1 if captions_upgraded > 0 else 0),
             rubric_scores=rubric_scores,
             stage_reviews=stage_reviews,
             final_director_notes=final_notes,
+            screening_sheet_path=screening_sheet_str,
         )
 
         report_path = blackboard.project_dir / "director_review.json"

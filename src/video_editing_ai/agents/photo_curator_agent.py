@@ -581,25 +581,87 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 p1.annotation_subtitle = f"{s1_short} · {s2_short} (双联画展陈)"
             absorbed_partner_ids.add(p2.subclip_id)
 
-        # Assign curated premium photo modes & atmospheric finishers to remaining primary selects
+        # Assign semantic AI-paired photo modes & atmospheric finishers to remaining primary selects,
+        # honoring both the photo's visual content (portrait vs. fine art vs. culinary vs. skyline)
+        # and the client's multi-select photo_effects_suite & photo_overlay_finishers from CreativeBrief
         active_selects = [it for it in selected_items if it.subclip_id not in absorbed_partner_ids]
-        premium_mode_cycle = [
-            ("cinematic_depth_3d", "golden_light_leak"),
-            ("parallax_gallery", "museum_spotlight"),
-            ("editorial_magazine", "none"),
-            ("curator_loupe", "museum_spotlight"),
-            ("polaroid_scrapbook", "nostalgic_film_grain"),
-            ("triptych_cinematic", "none"),
-            ("cinema_anamorphic", "champagne_bokeh"),
+        default_fx_map: dict[str, str] = {
+            "cinematic_depth_3d": "golden_light_leak",
+            "parallax_gallery": "museum_spotlight",
+            "editorial_magazine": "none",
+            "curator_loupe": "museum_spotlight",
+            "polaroid_scrapbook": "nostalgic_film_grain",
+            "triptych_cinematic": "none",
+            "cinema_anamorphic": "champagne_bokeh",
+            "gallery_frame": "museum_spotlight",
+            "full_bleed": "golden_light_leak",
+        }
+        client_modes = [
+            m for m in (brief.enabled_photo_modes if brief and brief.enabled_photo_modes else [])
+            if m != "diptych_frame"
         ]
+        if not client_modes:
+            client_modes = [
+                "cinematic_depth_3d",
+                "parallax_gallery",
+                "editorial_magazine",
+                "curator_loupe",
+                "polaroid_scrapbook",
+                "triptych_cinematic",
+                "cinema_anamorphic",
+            ]
+        client_overlays = set(brief.enabled_overlay_fx if brief and brief.enabled_overlay_fx else default_fx_map.values())
+        allow_overlays = not ("none" in client_overlays and len(client_overlays) == 1)
+        non_none_overlays = [fx for fx in client_overlays if fx != "none"]
+
+        def _pick_overlay_for_mode(m_code: str, idx_hint: int) -> str:
+            if not allow_overlays:
+                return "none"
+            pref_fx = default_fx_map.get(m_code, "none")
+            if pref_fx in client_overlays or pref_fx == "none":
+                return pref_fx
+            if non_none_overlays:
+                return non_none_overlays[idx_hint % len(non_none_overlays)]
+            return "none"
+
+        prev_assigned_mode = ""
         for idx_sel, sel_it in enumerate(active_selects):
             if sel_it.recommended_photo_mode == "diptych_frame":
+                if not allow_overlays:
+                    sel_it.overlay_fx = "none"
+                prev_assigned_mode = "diptych_frame"
                 continue
-            m_name, fx_name = premium_mode_cycle[idx_sel % len(premium_mode_cycle)]
-            sel_it.recommended_photo_mode = m_name  # type: ignore[assignment]
-            sel_it.overlay_fx = fx_name  # type: ignore[assignment]
 
-        # Step 5: Sync curated selections, scores, modes, and bilingual annotations back to media_index.subclips
+            blob_low = f"{sel_it.annotation_title} {sel_it.annotation_subtitle} {sel_it.subject_category}".lower()
+            if any(k in blob_low for k in ("mosaic", "sculpture", "nymph", "painting", "stained glass", "dome", "carving", "apsis", "detail", "masterpiece")):
+                semantic_prefs = ["curator_loupe", "parallax_gallery", "editorial_magazine", "cinematic_depth_3d"]
+            elif any(k in blob_low for k in ("croissant", "bistro", "cheese", "café", "cafe", "boeuf", "dining", "food", "pastry", "candid", "smile", "selfie")):
+                semantic_prefs = ["polaroid_scrapbook", "cinematic_depth_3d", "parallax_gallery", "editorial_magazine"]
+            elif sel_it.subject_category == "family_portrait" or sel_it.portrait_warmth_score >= 8.9:
+                semantic_prefs = ["cinematic_depth_3d", "polaroid_scrapbook", "parallax_gallery", "editorial_magazine"]
+            elif any(k in blob_low for k in ("panorama", "skyline", "seine", "twilight", "horizon", "illuminated", "night")):
+                semantic_prefs = ["cinema_anamorphic", "editorial_magazine", "parallax_gallery", "cinematic_depth_3d"]
+            else:
+                semantic_prefs = ["editorial_magazine", "parallax_gallery", "triptych_cinematic", "cinematic_depth_3d", "curator_loupe"]
+
+            # Filter by client-enabled modes and avoid consecutive identical modes
+            valid_prefs = [m for m in semantic_prefs if m in client_modes]
+            if not valid_prefs:
+                valid_prefs = list(client_modes)
+
+            chosen_mode = valid_prefs[0]
+            if chosen_mode == prev_assigned_mode and len(valid_prefs) > 1:
+                chosen_mode = valid_prefs[1]
+            elif chosen_mode == prev_assigned_mode and len(client_modes) > 1:
+                alt_modes = [m for m in client_modes if m != prev_assigned_mode]
+                chosen_mode = alt_modes[idx_sel % len(alt_modes)]
+
+            chosen_fx = _pick_overlay_for_mode(chosen_mode, idx_sel)
+            sel_it.recommended_photo_mode = chosen_mode  # type: ignore[assignment]
+            sel_it.overlay_fx = chosen_fx  # type: ignore[assignment]
+            prev_assigned_mode = chosen_mode
+
+        # Step 5: Sync curated selections, scores, modes, semantic transitions, and bilingual annotations back to media_index.subclips
         for item in curated_items:
             sc = subclip_by_id[item.subclip_id]
             sc.aesthetic_score = item.overall_taste_score
@@ -610,6 +672,14 @@ class PhotoCuratorAgent(BaseEditingAgent):
             sc.subject_category = item.subject_category
             sc.recommended_photo_mode = item.recommended_photo_mode
             sc.overlay_fx = item.overlay_fx
+            sc.recommended_transition = (
+                "dissolve"
+                if item.recommended_photo_mode in ("curator_loupe", "cinema_anamorphic", "triptych_cinematic", "diptych_frame")
+                else "crossfade"
+            )
+            sc.ai_rationale = (
+                f"Semantic Mode='{item.recommended_photo_mode}' + Finisher='{item.overlay_fx}' — {item.curation_rationale}"
+            )
             sc.summary = f"{item.annotation_title} ({item.annotation_subtitle}) — {item.curation_rationale}"
 
             if item.subclip_id in chosen_ids and item.subclip_id not in absorbed_partner_ids:
@@ -666,6 +736,33 @@ class PhotoCuratorAgent(BaseEditingAgent):
 
         # Mechanically generate visual contact sheets so Antigravity / AI Agent can inspect & override
         cs_info = render_curation_contact_sheets(blackboard.project_dir)
+
+        # Invoke Multimodal AI Creative Intelligence (or load cached ai_decisions/photo_curator.json)
+        ai_photo_resp = self.ask_ai_creative_json(
+            blackboard=blackboard,
+            prompt=(
+                f"CreativeBrief: {brief.model_dump_json() if brief else blackboard.user_prompt}\n"
+                f"Enabled Photo Modes: {client_modes}\n"
+                f"Curated Photo Selects ({len(selected_items)}): "
+                f"{json.dumps([{'subclip_id': it.subclip_id, 'filename': it.filename, 'title': it.annotation_title, 'subtitle': it.annotation_subtitle, 'mode': it.recommended_photo_mode, 'fx': it.overlay_fx} for it in selected_items], ensure_ascii=False)}\n"
+                "Inspect the numbered photo contact sheets. Refine any photo titles/subtitles, recommended_photo_mode, "
+                "overlay_fx, or diptych pairings if helpful. Return JSON compatible with apply_vision_curation_overrides."
+            ),
+            image_paths=cs_info.get("photo_sheets", []),
+            decision_key="photo_curator",
+            timeout_sec=40.0,
+        )
+        if isinstance(ai_photo_resp, dict) and (
+            ai_photo_resp.get("items") or ai_photo_resp.get("select_ids") or ai_photo_resp.get("annotations")
+        ):
+            try:
+                apply_vision_curation_overrides(blackboard.project_dir, ai_photo_resp)
+                blackboard.photo_curation = PhotoCurationReport.from_json_file(out_path)
+                blackboard.media_index = MediaIndex.from_json_file(blackboard.project_dir / "media_index.json")
+                report = blackboard.photo_curation
+                selected_items = [it for it in report.items if it.is_selected]
+            except Exception:
+                pass
 
         sample_titles = ", ".join(it.annotation_title.split("—")[0].strip() for it in selected_items[:4])
         blackboard.emit_activity(

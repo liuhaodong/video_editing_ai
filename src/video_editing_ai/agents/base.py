@@ -293,6 +293,111 @@ class BaseEditingAgent(ABC):
         except Exception:
             return None
 
+    def ask_ai_creative_json(
+        self,
+        blackboard: "PipelineBlackboard",
+        prompt: str,
+        image_paths: Optional[list[str | Path]] = None,
+        decision_key: Optional[str] = None,
+        timeout_sec: float = 45.0,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Unified multimodal AI Creative Intelligence gateway for all 11 editing agents:
+        1. Checks `<project_dir>/ai_decisions/<key>.json` for interactive Antigravity Agent overrides.
+        2. If `blackboard.use_antigravity` is True, invokes Google Antigravity SDK (with contact-sheet image paths)
+           or Gemini API (`GEMINI_API_KEY` / `GOOGLE_API_KEY`) to obtain structured creative JSON decisions.
+        3. Persists the decision to `<project_dir>/ai_decisions/<key>.json` and logs an `ai_intelligence` event.
+        """
+        import base64
+        import os
+        import urllib.request
+
+        key = decision_key or self.role_id
+        decisions_dir = blackboard.project_dir / "ai_decisions"
+        decisions_dir.mkdir(parents=True, exist_ok=True)
+        decision_file = decisions_dir / f"{key}.json"
+
+        # 1. Check for interactive AI Agent override file written via Skill CLI
+        if decision_file.exists():
+            try:
+                cached = json.loads(decision_file.read_text(encoding="utf-8"))
+                if isinstance(cached, dict) and cached:
+                    blackboard.emit_activity(
+                        self.role_id,
+                        f"Loaded AI Creative Intelligence decision packet ('{decision_file.name}')",
+                        detail=str(cached.get("ai_rationale") or cached.get("curatorial_statement") or "Applied AI creative overrides")[:180],
+                        event_type="ai_intelligence",
+                    )
+                    return cached
+            except Exception:
+                pass
+
+        if not blackboard.use_antigravity:
+            return None
+
+        valid_imgs = [str(Path(p).resolve()) for p in (image_paths or []) if p and Path(p).exists()]
+        enriched_prompt = prompt
+        if valid_imgs:
+            enriched_prompt = (
+                f"Multimodal Contact Sheet / Keyframe Images available for visual inspection: {valid_imgs}\n\n"
+                f"{prompt}"
+            )
+
+        # 2a. Try Google Antigravity SDK Agent
+        result = self.ask_antigravity_json(enriched_prompt, timeout_sec=timeout_sec)
+
+        # 2b. Optional fallback to GEMINI_API_KEY / GOOGLE_API_KEY if configured in environment
+        if result is None:
+            api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+            if api_key:
+                try:
+                    parts: list[dict[str, Any]] = [
+                        {"text": self.load_skill_instructions() + "\n\n" + enriched_prompt}
+                    ]
+                    for img_p in valid_imgs[:3]:
+                        raw_bytes = Path(img_p).read_bytes()
+                        if len(raw_bytes) <= 4_000_000:
+                            parts.append(
+                                {
+                                    "inline_data": {
+                                        "mime_type": "image/jpeg",
+                                        "data": base64.b64encode(raw_bytes).decode("ascii"),
+                                    }
+                                }
+                            )
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                    body = json.dumps(
+                        {
+                            "contents": [{"parts": parts}],
+                            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3},
+                        }
+                    ).encode("utf-8")
+                    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                        resp_doc = json.loads(resp.read().decode("utf-8"))
+                        cand_text = (
+                            resp_doc.get("candidates", [{}])[0]
+                            .get("content", {})
+                            .get("parts", [{}])[0]
+                            .get("text", "")
+                        )
+                        result = _extract_json_dict(cand_text)
+                except Exception:
+                    result = None
+
+        if isinstance(result, dict) and result:
+            try:
+                decision_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+            blackboard.emit_activity(
+                self.role_id,
+                f"AI Creative Intelligence synthesized decision packet ('{decision_file.name}')",
+                detail=str(result.get("ai_rationale") or "Applied multimodal AI creative intelligence")[:180],
+                event_type="ai_intelligence",
+            )
+        return result
+
     @classmethod
     def to_metadata_dict(cls) -> dict[str, Any]:
         return {

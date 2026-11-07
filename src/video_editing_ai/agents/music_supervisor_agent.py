@@ -744,9 +744,35 @@ class MusicSupervisorAgent(BaseEditingAgent):
                 user_bgm = None
 
         target_dur = max(120.0, float(brief.target_duration_sec if brief else 180.0) + 20.0)
-        candidates_meta = CURATED_FREE_BGM_CATALOG.get(
-            target_profile, CURATED_FREE_BGM_CATALOG["warm_family_acoustic"]
+        candidates_meta = list(
+            CURATED_FREE_BGM_CATALOG.get(
+                target_profile, CURATED_FREE_BGM_CATALOG["warm_family_acoustic"]
+            )
         )
+
+        # Invoke AI Creative Intelligence to evaluate musical arc, search keywords, and candidate ranking
+        ai_bgm_resp = self.ask_ai_creative_json(
+            blackboard=blackboard,
+            prompt=(
+                f"CreativeBrief: {brief.model_dump_json() if brief else blackboard.user_prompt}\n"
+                f"Target Mood Profile: {target_profile}\n"
+                f"Candidate Tracks: {json.dumps(candidates_meta, ensure_ascii=False)}\n"
+                "Evaluate which track(s) best match the cultural setting, emotional arc, and spoken dialogue headroom. "
+                "Return JSON: {\"preferred_track_ids\": [\"...\"], \"search_keywords\": [\"...\"], \"ai_rationale\": \"...\"}"
+            ),
+            decision_key="music_supervisor",
+            timeout_sec=30.0,
+        )
+        ai_music_rationale = ""
+        if isinstance(ai_bgm_resp, dict):
+            ai_music_rationale = str(ai_bgm_resp.get("ai_rationale") or "").strip()
+            pref_ids = [str(tid) for tid in (ai_bgm_resp.get("preferred_track_ids") or []) if tid]
+            if pref_ids:
+                by_tid = {str(m["track_id"]): m for m in candidates_meta}
+                reordered = [by_tid[tid] for tid in pref_ids if tid in by_tid] + [
+                    m for m in candidates_meta if str(m["track_id"]) not in pref_ids
+                ]
+                candidates_meta = reordered
         candidates: list[BGMCandidate] = []
         downloaded_paths: list[Path] = []
         selected_cand: Optional[BGMCandidate] = None
@@ -825,6 +851,8 @@ class MusicSupervisorAgent(BaseEditingAgent):
             f"'{target_profile}' (score {selected_cand.mood_match_score}/10, mastered duration {diag['duration_sec']:.1f}s, "
             f"mean loudness {diag['mean_volume_db']:.1f} dB)."
         )
+        if ai_music_rationale:
+            rationale = f"{rationale} AI Musical Direction: {ai_music_rationale}"
         if rejected_reason:
             rationale = f"{rejected_reason} {rationale}"
 

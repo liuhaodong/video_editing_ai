@@ -179,6 +179,18 @@ class InterviewQuestion(BaseModel):
     question: str
     options: list[str] = Field(default_factory=list)
     default_answer: str = ""
+    is_multi_select: bool = Field(
+        default=False,
+        description="Whether the client can select multiple options simultaneously (checkboxes / multi-choice)",
+    )
+    recommended_options: list[str] = Field(
+        default_factory=list,
+        description="Option code(s) recommended by the Intake Agent & Executive Director",
+    )
+    recommendation_rationale: str = Field(
+        default="",
+        description="Why the Intake Agent & Executive Director recommend these option(s) for this media library",
+    )
 
 
 class CreativeBrief(BaseModel):
@@ -207,6 +219,31 @@ class CreativeBrief(BaseModel):
     photo_mode: PhotoModeType = Field(
         default="parallax_gallery"
     )
+    enabled_photo_modes: list[PhotoModeType] = Field(
+        default_factory=lambda: [
+            "cinematic_depth_3d",
+            "triptych_cinematic",
+            "polaroid_scrapbook",
+            "curator_loupe",
+            "editorial_magazine",
+            "parallax_gallery",
+            "diptych_frame",
+        ],
+        description="Multi-selected photo presentation modes choreographed across chapters",
+    )
+    enabled_overlay_fx: list[PhotoOverlayFxType] = Field(
+        default_factory=lambda: [
+            "golden_light_leak",
+            "museum_spotlight",
+            "champagne_bokeh",
+            "nostalgic_film_grain",
+        ],
+        description="Multi-selected atmospheric photo finishers",
+    )
+    director_recommendations: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Structured Intake Agent & Executive Director recommendations and rationales",
+    )
     max_broll_duration_sec: float = Field(default=4.5, ge=1.5, le=12.0)
     max_consecutive_same_subject: int = Field(default=3, ge=1, le=10)
     nat_sound_db: float = Field(default=-20.0, description="Ambient B-roll natural sound level in dB (-18 to -24)")
@@ -219,7 +256,7 @@ class CreativeBrief(BaseModel):
         default=True,
         description="Start film with a 3-4s Cold-Open Teaser Hook before the Main Opening Title Card",
     )
-    interview_qa: list[dict[str, str]] = Field(default_factory=list)
+    interview_qa: list[dict[str, Any]] = Field(default_factory=list)
 
     def to_json_file(self, path: str | Path) -> None:
         p = Path(path)
@@ -282,6 +319,14 @@ class CulledSubClip(BaseModel):
     )
     tertiary_source_path: Optional[str] = Field(
         default=None, description="Optional third photo path for 3-panel triptych_cinematic layout"
+    )
+    recommended_transition: Literal["none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"] = Field(
+        default="crossfade",
+        description="AI-recommended transition style based on narrative and visual continuity",
+    )
+    ai_rationale: str = Field(
+        default="",
+        description="AI Agent creative rationale for selecting/trimming/styling this clip or photo",
     )
     is_discarded: bool = Field(default=False)
     discard_reason: Optional[str] = Field(default=None)
@@ -530,6 +575,10 @@ class DirectorReviewReport(BaseModel):
     rubric_scores: dict[str, float] = Field(default_factory=dict)
     stage_reviews: list[DirectorStageReview] = Field(default_factory=list)
     final_director_notes: list[str] = Field(default_factory=list)
+    screening_sheet_path: Optional[str] = Field(
+        default=None,
+        description="Path to the rendered Timeline Visual Screening Contact Sheet inspected by the Director",
+    )
 
     def to_json_file(self, path: str | Path) -> None:
         p = Path(path)
@@ -652,7 +701,7 @@ class KenBurnsConfig(BaseModel):
 class TransitionConfig(BaseModel):
     """Visual transition into or out of a clip."""
 
-    type: Literal["none", "crossfade", "fade_black"] = Field(default="fade_black")
+    type: Literal["none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"] = Field(default="fade_black")
     duration: float = Field(default=0.35, ge=0.0, le=3.0)
 
 

@@ -571,11 +571,76 @@ body {
   grid-column: 1 / -1;
 }
 
+.intake-q-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
 .intake-q-title {
   font-size: 0.87rem;
   font-weight: 700;
   color: var(--accent);
+}
+
+.intake-multi-badge {
+  background: rgba(0, 229, 255, 0.14);
+  border: 1px solid rgba(0, 229, 255, 0.4);
+  color: var(--accent-cyan);
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.intake-single-badge {
+  background: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #94a3b8;
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.intake-select-rec-btn {
+  background: rgba(255, 200, 59, 0.14);
+  border: 1px solid rgba(255, 200, 59, 0.45);
+  color: var(--accent);
+  font-size: 0.69rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.intake-select-rec-btn:hover {
+  background: rgba(255, 200, 59, 0.28);
+  color: #fff;
+}
+
+.intake-rec-banner {
+  background: rgba(255, 200, 59, 0.07);
+  border-left: 3px solid var(--accent);
+  padding: 6px 10px;
+  border-radius: 5px;
+  font-size: 0.76rem;
+  color: #dbe4f3;
   margin-bottom: 9px;
+  line-height: 1.38;
+}
+
+.intake-rec-pill-tag {
+  background: rgba(255, 200, 59, 0.18);
+  border: 1px solid rgba(255, 200, 59, 0.55);
+  color: var(--accent);
+  font-size: 0.66rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
 .intake-options-list {
@@ -608,7 +673,8 @@ body {
   color: #fff;
 }
 
-.intake-option-pill input[type="radio"] {
+.intake-option-pill input[type="radio"],
+.intake-option-pill input[type="checkbox"] {
   margin-top: 2px;
   accent-color: var(--accent);
 }

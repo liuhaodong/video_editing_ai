@@ -781,3 +781,127 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
     assert showcase_jpg.exists() and showcase_jpg.stat().st_size > 5000
 
 
+def test_ai_creative_intelligence_and_interactive_multi_choice_intake(
+    tmp_path: Path, sample_media_dir: Path
+) -> None:
+    """Verify interactive multi-select intake, ask_question payload, video/timeline AI overrides, and Director screening sheet."""
+    from video_editing_ai.agents import (
+        apply_timeline_intelligence_overrides,
+        apply_video_curation_overrides,
+        build_ask_question_tool_payload,
+        generate_intake_questions,
+        refine_intake_interactively,
+        render_director_screening_sheet,
+        render_video_culling_contact_sheets,
+        run_multi_agent_pipeline,
+    )
+    from video_editing_ai.models.schema import EditTimeline, MediaIndex
+
+    # 1. Interactive Intake Questions + Multi-Select + Recommendations + ask_question payload
+    questions = generate_intake_questions(sample_media_dir, "Paris Louvre museum & family trip")
+    assert len(questions) == 8
+    q_by_id = {q.id: q for q in questions}
+    assert q_by_id["photo_effects_suite"].is_multi_select is True
+    assert q_by_id["photo_overlay_finishers"].is_multi_select is True
+    assert q_by_id["must_include_topics"].is_multi_select is True
+    assert len(q_by_id["photo_effects_suite"].recommended_options) >= 3
+    assert q_by_id["target_duration_sec"].recommendation_rationale != ""
+
+    ask_payload = build_ask_question_tool_payload(questions, max_questions=4)
+    assert len(ask_payload) == 4
+    assert any(item["is_multi_select"] for item in ask_payload)
+    assert all(any(opt.startswith("(Recommended)") for opt in item["options"]) for item in ask_payload)
+
+    # 2. Interactive Refinement with Multi-Select Photo Effects & Finishers
+    ref = refine_intake_interactively(
+        media_dir=sample_media_dir,
+        user_message="Apply all Director recommendations with 3D depth parallax and curator loupe",
+        interview_answers={
+            "photo_effects_suite": "cinematic_depth_3d, curator_loupe, polaroid_scrapbook",
+            "photo_overlay_finishers": "golden_light_leak, museum_spotlight",
+        },
+    )
+    draft = ref["draft_brief"]
+    assert "cinematic_depth_3d" in draft["enabled_photo_modes"]
+    assert "curator_loupe" in draft["enabled_photo_modes"]
+    assert "golden_light_leak" in draft["enabled_overlay_fx"]
+    assert "recommended_duration_sec" in draft["director_recommendations"]
+    assert len(ref["ask_question_payload"]) == 4
+
+    # 3. Run multi-agent pipeline and verify AI Video Culling Sheet, Timeline Intelligence & Director Screening Sheet
+    proj_dir = tmp_path / "ai_intel_proj"
+    bb = run_multi_agent_pipeline(
+        media_dir=sample_media_dir,
+        project_dir=proj_dir,
+        user_prompt="Paris family adventure with rich captions and transitions",
+        interview_answers={
+            "photo_effects_suite": "cinematic_depth_3d, curator_loupe, polaroid_scrapbook, editorial_magazine",
+            "photo_overlay_finishers": "golden_light_leak, museum_spotlight",
+        },
+        width=640,
+        height=360,
+        fps=24,
+        hdr=False,
+        use_antigravity=False,
+        whisper_model="base",
+        render_video=False,
+    )
+    assert bb.timeline is not None
+    assert bb.director_review is not None
+    assert bb.director_review.screening_sheet_path is not None
+    assert Path(bb.director_review.screening_sheet_path).exists()
+
+    # Verify video culling contact sheet & AI video curation override helper
+    vcs = render_video_culling_contact_sheets(proj_dir)
+    assert vcs["video_clips_count"] >= 1
+    assert len(vcs["contact_sheets"]) >= 1
+    assert Path(vcs["contact_sheets"][0]).exists()
+
+    mi = MediaIndex.from_json_file(proj_dir / "media_index.json")
+    first_vid = next(s for s in mi.subclips if s.media_type == "video")
+    vc_res = apply_video_curation_overrides(
+        proj_dir,
+        {
+            "videos": {
+                first_vid.subclip_id: {
+                    "recommended_transition": "dissolve",
+                    "annotation_title": "AI Curated Opening Vista",
+                    "annotation_subtitle": "AI 精选开篇实景镜头",
+                }
+            }
+        },
+    )
+    assert vc_res["updated_video_clips"] == 1
+
+    # Verify AI timeline intelligence override helper (transitions, hold duration, Track V3 lower-third captions)
+    first_clip_id = bb.timeline.visual_track[0].id
+    ti_res = apply_timeline_intelligence_overrides(
+        proj_dir,
+        {
+            "clips": {
+                first_clip_id: {
+                    "transition_in": "dissolve",
+                    "transition_out": "crossfade",
+                    "duration": 4.2,
+                }
+            },
+            "lower_thirds": [
+                {
+                    "id": "title_lt_custom_01",
+                    "clip_id": first_clip_id,
+                    "text": "Pont Alexandre III & Eiffel View",
+                    "subtitle": "亚历山大三世桥与埃菲尔铁塔远眺",
+                    "duration": 3.0,
+                }
+            ],
+        },
+    )
+    assert ti_res["updated_items"] >= 2
+    tl_updated = EditTimeline.from_yaml(proj_dir / "timeline.yaml")
+    assert any(t.id == "title_lt_custom_01" and t.style == "lower_third" for t in tl_updated.title_track)
+
+    screening_jpg = render_director_screening_sheet(proj_dir)
+    assert screening_jpg.exists() and screening_jpg.stat().st_size > 5000
+
+
+

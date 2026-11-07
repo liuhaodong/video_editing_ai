@@ -468,20 +468,38 @@ function applyIntakeRefinementResult(refData, userMsgText = null) {
   const chosenDur = draft.target_duration_sec || currentIntakeAnswers.target_duration_sec || 155;
   updateDurationControlsUI(chosenDur, durRec);
 
-  // Sync underlying selects & radio pills
-  ["narrative_style", "photo_mode", "bgm_mood", "dialogue_preference"].forEach((qId) => {
-    const val = (currentIntakeAnswers[qId] || "").split(" ")[0].trim();
-    if (!val) return;
-    const container = document.getElementById("interactiveIntakeContainer");
-    if (container) {
+  // Sync underlying single-choice radio pills and multi-choice checkbox pills
+  const container = document.getElementById("interactiveIntakeContainer");
+  if (container) {
+    ["narrative_style", "photo_mode", "bgm_mood", "dialogue_preference"].forEach((qId) => {
+      const val = (currentIntakeAnswers[qId] || "").split(" ")[0].trim();
+      if (!val) return;
       container.querySelectorAll(`.intake-option-pill[data-qid="${qId}"]`).forEach((p) => {
         const isMatch = p.dataset.val === val;
         p.classList.toggle("active", isMatch);
         const r = p.querySelector("input[type='radio']");
         if (r) r.checked = isMatch;
       });
-    }
-  });
+    });
+
+    ["photo_effects_suite", "photo_overlay_finishers", "must_include_topics"].forEach((qId) => {
+      const rawAns = currentIntakeAnswers[qId] || "";
+      if (!rawAns) return;
+      const activeSet = new Set(
+        rawAns
+          .split(/[,;|]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
+      container.querySelectorAll(`.intake-option-pill[data-qid="${qId}"]`).forEach((p) => {
+        const code = p.dataset.val || "";
+        const isMatch = activeSet.has(code) || rawAns.includes(code);
+        p.classList.toggle("active", isMatch);
+        const cb = p.querySelector("input[type='checkbox']");
+        if (cb) cb.checked = isMatch;
+      });
+    });
+  }
 
   // Update conversation feed
   if (userMsgText) {
@@ -517,6 +535,8 @@ function applyIntakeRefinementResult(refData, userMsgText = null) {
       .slice(0, 6)
       .map((t) => `<span class="brief-tag">${escapeHtml(t)}</span>`)
       .join("");
+    const modesCount = Array.isArray(draft.enabled_photo_modes) ? draft.enabled_photo_modes.length : 1;
+    const fxCount = Array.isArray(draft.enabled_overlay_fx) ? draft.enabled_overlay_fx.length : 0;
     briefCard.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
         <strong style="color:var(--accent-cyan);">📄 Live Draft <code>creative_brief.json</code></strong>
@@ -524,8 +544,8 @@ function applyIntakeRefinementResult(refData, userMsgText = null) {
       </div>
       <div style="font-size:0.76rem; color:#cbd5e1; margin-bottom:5px;">
         <strong>Arc:</strong> <code>${escapeHtml(draft.narrative_style)}</code> &bull;
-        <strong>Photos:</strong> <code>${escapeHtml(draft.photo_mode)}</code> &bull;
-        <strong>Audio:</strong> <code>${escapeHtml(currentIntakeAnswers.bgm_mood || "auto_match")}</code> (-14dB Ducking)
+        <strong>Photo Suite:</strong> <code>${modesCount} modes</code> (${escapeHtml(draft.photo_mode)}) + <code>${fxCount} finishers</code> &bull;
+        <strong>Audio:</strong> <code>${escapeHtml((currentIntakeAnswers.bgm_mood || "auto_match").split(" ")[0])}</code> (-14dB Ducking)
       </div>
       <div>${topicsHtml}</div>
     `;
@@ -588,6 +608,15 @@ async function runLiveIntakeRefinement(customUserAction = null) {
     }
   }
 }
+function extractOptionCodeClient(optStr, qId) {
+  const s = (optStr || "").trim();
+  if (qId === "must_include_topics") {
+    return s.replace(/\s*\(Recommended[^)]*\)/gi, "").trim();
+  }
+  const withoutRec = s.replace(/^\(Recommended[^)]*\)\s*/i, "").trim();
+  return withoutRec.split(" ")[0].trim();
+}
+
 function renderInteractiveIntakeQuestions(questions) {
   const container = document.getElementById("interactiveIntakeContainer");
   if (!container) return;
@@ -595,45 +624,134 @@ function renderInteractiveIntakeQuestions(questions) {
   container.innerHTML = (questions || [])
     .map((q) => {
       const qId = q.id;
-      const defaultCode = (q.default_answer || "").split(" ")[0].trim();
+      const isMulti = Boolean(q.is_multi_select);
+      const recSet = new Set(Array.isArray(q.recommended_options) ? q.recommended_options : []);
+      const defaultCode = extractOptionCodeClient(q.default_answer || "", qId);
+
       if (!currentIntakeAnswers[qId]) {
-        currentIntakeAnswers[qId] = qId === "must_include_topics" ? q.default_answer : defaultCode;
+        if (isMulti && recSet.size > 0) {
+          currentIntakeAnswers[qId] = Array.from(recSet).join(qId === "must_include_topics" ? " | " : ", ");
+        } else {
+          currentIntakeAnswers[qId] = qId === "must_include_topics" ? q.default_answer : defaultCode;
+        }
       }
-      const selectedVal = currentIntakeAnswers[qId];
-      const isFullSpan = qId === "must_include_topics" || qId === "photo_mode";
+      const selectedVal = currentIntakeAnswers[qId] || "";
+      const selectedMultiSet = new Set(
+        selectedVal
+          .split(/[,;|]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
+
+      const isFullSpan =
+        qId === "must_include_topics" ||
+        qId === "photo_effects_suite" ||
+        qId === "photo_overlay_finishers" ||
+        qId === "photo_mode";
 
       const optionsHtml = (q.options || [])
         .map((optStr, optIdx) => {
-          const optCode = qId === "must_include_topics" ? optStr : optStr.split(" ")[0].trim();
-          const isChecked =
-            qId === "must_include_topics"
-              ? optIdx === 0
-              : selectedVal === optCode || (optIdx === 0 && !selectedVal);
+          const optCode = extractOptionCodeClient(optStr, qId);
+          const isRec = optStr.includes("(Recommended") || recSet.has(optCode) || recSet.has(optStr);
+          const isChecked = isMulti
+            ? selectedMultiSet.has(optCode) || selectedVal.includes(optCode) || (selectedMultiSet.size === 0 && isRec)
+            : selectedVal === optCode || (optIdx === 0 && !selectedVal);
+
+          const recBadgeHtml = isRec ? `<span class="intake-rec-pill-tag">★ Recommended</span>` : "";
+          const cleanLabel = optStr.replace(/\s*\(Recommended[^)]*\)/gi, "");
+          const inputType = isMulti ? "checkbox" : "radio";
           return `
-            <label class="intake-option-pill ${isChecked ? "active" : ""}" data-qid="${escapeHtml(qId)}" data-val="${escapeHtml(optCode)}">
-              <input type="radio" name="intake_${escapeHtml(qId)}" value="${escapeHtml(optCode)}" ${isChecked ? "checked" : ""} />
-              <span>${escapeHtml(optStr)}</span>
+            <label class="intake-option-pill ${isChecked ? "active" : ""} ${isRec ? "recommended-opt" : ""}" data-qid="${escapeHtml(qId)}" data-val="${escapeHtml(optCode)}" data-multi="${isMulti ? "1" : "0"}" data-rec="${isRec ? "1" : "0"}">
+              <input type="${inputType}" name="intake_${escapeHtml(qId)}" value="${escapeHtml(optCode)}" ${isChecked ? "checked" : ""} />
+              <span style="flex:1;">${escapeHtml(cleanLabel)}</span>
+              ${recBadgeHtml}
             </label>
           `;
         })
         .join("");
 
+      const multiBadgeHtml = isMulti
+        ? `<div style="display:flex; align-items:center; gap:8px;">
+             <span class="intake-multi-badge">☑ MULTI-SELECT</span>
+             <button type="button" class="intake-select-rec-btn" data-qid="${escapeHtml(qId)}">★ Select Recommended</button>
+           </div>`
+        : `<span class="intake-single-badge">◉ SINGLE CHOICE</span>`;
+
+      const rationaleHtml = q.recommendation_rationale
+        ? `<div class="intake-rec-banner">💡 <strong>Director & Producer Recommendation:</strong> ${escapeHtml(q.recommendation_rationale)}</div>`
+        : "";
+
       return `
         <div class="intake-q-card ${isFullSpan ? "full-span" : ""}">
-          <div class="intake-q-title">${escapeHtml(q.question)}</div>
+          <div class="intake-q-header-row">
+            <div class="intake-q-title">${escapeHtml(q.question)}</div>
+            ${multiBadgeHtml}
+          </div>
+          ${rationaleHtml}
           <div class="intake-options-list">${optionsHtml}</div>
         </div>
       `;
     })
     .join("");
 
+  // Quick '★ Select Recommended' button on multi-select questions
+  container.querySelectorAll(".intake-select-rec-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const qId = btn.dataset.qid;
+      const pills = container.querySelectorAll(`.intake-option-pill[data-qid="${qId}"]`);
+      const chosen = [];
+      pills.forEach((p) => {
+        const isRec = p.dataset.rec === "1";
+        p.classList.toggle("active", isRec);
+        const cb = p.querySelector("input[type='checkbox']");
+        if (cb) cb.checked = isRec;
+        if (isRec && p.dataset.val) chosen.push(p.dataset.val);
+      });
+      const sep = qId === "must_include_topics" ? " | " : ", ";
+      currentIntakeAnswers[qId] = chosen.join(sep);
+      if (qId === "must_include_topics") {
+        const promptEl = document.getElementById("agentPromptInput");
+        if (promptEl) promptEl.value = currentIntakeAnswers[qId];
+      }
+      runLiveIntakeRefinement(`Applied Director recommended selections for ${qId}: ${currentIntakeAnswers[qId]}`);
+    });
+  });
+
   container.querySelectorAll(".intake-option-pill").forEach((pill) => {
-    pill.addEventListener("click", () => {
+    pill.addEventListener("click", (ev) => {
+      ev.preventDefault();
       const qId = pill.dataset.qid;
       const val = pill.dataset.val;
+      const isMulti = pill.dataset.multi === "1";
+
+      if (isMulti) {
+        const isNowActive = !pill.classList.contains("active");
+        pill.classList.toggle("active", isNowActive);
+        const cb = pill.querySelector("input[type='checkbox']");
+        if (cb) cb.checked = isNowActive;
+
+        const chosen = [];
+        container.querySelectorAll(`.intake-option-pill[data-qid="${qId}"].active`).forEach((p) => {
+          if (p.dataset.val) chosen.push(p.dataset.val);
+        });
+        if (chosen.length === 0) {
+          pill.classList.add("active");
+          if (cb) cb.checked = true;
+          chosen.push(val);
+        }
+        const sep = qId === "must_include_topics" ? " | " : ", ";
+        currentIntakeAnswers[qId] = chosen.join(sep);
+        if (qId === "must_include_topics") {
+          const promptEl = document.getElementById("agentPromptInput");
+          if (promptEl) promptEl.value = currentIntakeAnswers[qId];
+        }
+        runLiveIntakeRefinement(`Updated multi-select ${qId} = ${currentIntakeAnswers[qId]}`);
+        return;
+      }
+
       currentIntakeAnswers[qId] = val;
 
-      // Update active styling within this question group
+      // Update active styling within this single-choice question group
       container.querySelectorAll(`.intake-option-pill[data-qid="${qId}"]`).forEach((p) => {
         p.classList.remove("active");
       });
@@ -654,12 +772,8 @@ function renderInteractiveIntakeQuestions(questions) {
       } else if (qId === "target_duration_sec") {
         updateDurationControlsUI(val);
         runLiveIntakeRefinement(`Set target duration to ${val}s`);
-      } else if (qId === "must_include_topics") {
-        const promptEl = document.getElementById("agentPromptInput");
-        if (promptEl) promptEl.value = val;
-        runLiveIntakeRefinement(`Prioritize highlights: ${val}`);
       }
-      if (qId !== "target_duration_sec" && qId !== "must_include_topics") {
+      if (qId !== "target_duration_sec") {
         runLiveIntakeRefinement(`Selected ${qId} = ${val}`);
       }
     });

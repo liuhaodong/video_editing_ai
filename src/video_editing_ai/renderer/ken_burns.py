@@ -57,15 +57,15 @@ def _load_editorial_font(size: int, bold: bool = True, serif: bool = False) -> I
         ]
     else:
         candidates = [
-            # Windows
-            "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
+            # Windows (Microsoft YaHei renders both crisp Segoe-style Latin & full CJK)
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
             "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-            # macOS (2019 MacBook Pro & Apple Silicon)
+            # macOS (2019 MacBook Pro & Apple Silicon — PingFang SC renders both Latin & CJK)
+            "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/SFNS.ttf",
             "/System/Library/Fonts/HelveticaNeue.ttc",
             "/System/Library/Fonts/Avenir Next.ttc",
-            "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/STHeiti Medium.ttc",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
             # Linux
@@ -1600,12 +1600,29 @@ def render_photo_clip(
 
     # Prepare FFmpeg encoder & HDR color space pipeline
     vf_filters: list[str] = ["setsar=1:1"]
-    if transition_in and transition_in.type == "fade_black" and transition_in.duration > 0:
-        vf_filters.append(f"fade=t=in:st=0:d={min(duration * 0.40, transition_in.duration):.3f}")
-    if transition_out and transition_out.type == "fade_black" and transition_out.duration > 0:
-        fade_d = min(duration * 0.40, transition_out.duration)
-        st = max(0.0, duration - fade_d)
-        vf_filters.append(f"fade=t=out:st={st:.3f}:d={fade_d:.3f}")
+    if transition_in and transition_in.type not in ("none", "cut") and transition_in.duration > 0:
+        if transition_in.type == "dip_to_white":
+            fd = min(duration * 0.35, transition_in.duration)
+            vf_filters.append(f"fade=t=in:st=0:d={fd:.3f}:c=#F6F2E8")
+        elif transition_in.type in ("dissolve", "crossfade"):
+            fd = min(duration * 0.25, transition_in.duration, 0.26)
+            vf_filters.append(f"fade=t=in:st=0:d={fd:.3f}:c=#0B0E14")
+        else:
+            fd = min(duration * 0.40, transition_in.duration)
+            vf_filters.append(f"fade=t=in:st=0:d={fd:.3f}")
+    if transition_out and transition_out.type not in ("none", "cut") and transition_out.duration > 0:
+        if transition_out.type == "dip_to_white":
+            fade_d = min(duration * 0.35, transition_out.duration)
+            st = max(0.0, duration - fade_d)
+            vf_filters.append(f"fade=t=out:st={st:.3f}:d={fade_d:.3f}:c=#F6F2E8")
+        elif transition_out.type in ("dissolve", "crossfade"):
+            fade_d = min(duration * 0.25, transition_out.duration, 0.26)
+            st = max(0.0, duration - fade_d)
+            vf_filters.append(f"fade=t=out:st={st:.3f}:d={fade_d:.3f}:c=#0B0E14")
+        else:
+            fade_d = min(duration * 0.40, transition_out.duration)
+            st = max(0.0, duration - fade_d)
+            vf_filters.append(f"fade=t=out:st={st:.3f}:d={fade_d:.3f}")
 
     if hdr:
         vf_filters.extend(build_hdr_color_filters("iec61966-2-1"))

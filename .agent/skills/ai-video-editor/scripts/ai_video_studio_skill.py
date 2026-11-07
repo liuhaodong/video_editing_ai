@@ -50,12 +50,17 @@ from video_editing_ai.agents import (  # noqa: E402
     PipelineBlackboard,
     ProductionDirectorAgent,
     apply_story_plan_overrides,
+    apply_timeline_intelligence_overrides,
+    apply_video_curation_overrides,
     apply_vision_curation_overrides,
+    build_ask_question_tool_payload,
     compute_director_duration_recommendation,
     generate_intake_questions,
     inspect_media_library,
     refine_intake_interactively,
     render_curation_contact_sheets,
+    render_director_screening_sheet,
+    render_video_culling_contact_sheets,
     run_multi_agent_pipeline,
 )
 from video_editing_ai.exporters.nle_export import export_all_nle_formats  # noqa: E402
@@ -86,7 +91,9 @@ def cmd_inspect_library(args: argparse.Namespace) -> int:
 
     workspace_root = _WORKSPACE_ROOT
     lib_info = inspect_media_library(media_dir, workspace_root=workspace_root)
-    questions = [q.model_dump(mode="json") for q in generate_intake_questions(media_dir, args.prompt or "")]
+    q_objs = generate_intake_questions(media_dir, args.prompt or "")
+    questions = [q.model_dump(mode="json") for q in q_objs]
+    ask_q_payload = build_ask_question_tool_payload(q_objs)
     dur_rec = compute_director_duration_recommendation(lib_info)
 
     out_path = (
@@ -98,6 +105,7 @@ def cmd_inspect_library(args: argparse.Namespace) -> int:
         "library": lib_info,
         "director_duration_recommendation": dur_rec,
         "intake_questions": questions,
+        "ask_question_tool_payload": ask_q_payload,
     }
     _write_json(out_path, doc)
     print(
@@ -128,6 +136,10 @@ def cmd_intake_refine(args: argparse.Namespace) -> int:
         answers["narrative_style"] = args.narrative_style
     if args.photo_mode:
         answers["photo_mode"] = args.photo_mode
+    if getattr(args, "photo_modes", None):
+        answers["photo_effects_suite"] = args.photo_modes
+    if getattr(args, "overlay_fxs", None):
+        answers["photo_overlay_finishers"] = args.overlay_fxs
     if args.bgm_mood:
         answers["bgm_mood"] = args.bgm_mood
     if args.dialogue_preference:
@@ -809,6 +821,57 @@ def cmd_preview_photo_effects(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_apply_video_curation(args: argparse.Namespace) -> int:
+    """Persist AI Agent video clip selection, golden-window [in_tc, out_tc] trims, transitions & captions."""
+    proj = Path(args.project_dir).resolve()
+    raw = args.overrides_json
+    ov_path = Path(raw)
+    if ov_path.exists():
+        overrides = json.loads(ov_path.read_text(encoding="utf-8"))
+    else:
+        overrides = json.loads(raw)
+
+    res = apply_video_curation_overrides(proj, overrides)
+    out_p = Path(args.output).resolve() if args.output else (proj / "video_curation_applied.json")
+    _write_json(out_p, res)
+    print(f"Success! Applied AI video curation to {res['updated_video_clips']} clips -> {res['media_index_path']}")
+    return 0
+
+
+def cmd_apply_timeline_intelligence(args: argparse.Namespace) -> int:
+    """Persist AI Agent transition choreography, hold durations, photo modes & Track V3 lower-third captions."""
+    proj = Path(args.project_dir).resolve()
+    raw = args.overrides_json
+    ov_path = Path(raw)
+    if ov_path.exists():
+        overrides = json.loads(ov_path.read_text(encoding="utf-8"))
+    else:
+        overrides = json.loads(raw)
+
+    res = apply_timeline_intelligence_overrides(proj, overrides)
+    out_p = Path(args.output).resolve() if args.output else (proj / "timeline_intelligence_applied.json")
+    _write_json(out_p, res)
+    print(
+        f"Success! Applied AI timeline intelligence ({res['updated_items']} updates, total {res['total_duration']}s) -> {res['timeline_path']}"
+    )
+    return 0
+
+
+def cmd_render_screening_sheet(args: argparse.Namespace) -> int:
+    """Mechanically render the 4x3 Multimodal Director Screening Sheet for AI visual quality inspection."""
+    proj = Path(args.project_dir).resolve()
+    sheet_path = render_director_screening_sheet(proj, max_tiles=args.max_tiles)
+    if args.output:
+        import shutil
+
+        dest = Path(args.output).resolve()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sheet_path, dest)
+        sheet_path = dest
+    print(f"Success! Rendered Executive Director Timeline Screening Sheet to: {sheet_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai_video_studio_skill",
@@ -830,7 +893,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_int.add_argument("--project-dir", required=True, help="Target project workspace directory")
     p_int.add_argument("--prompt", default="", help="User story vision and feedback")
     p_int.add_argument("--narrative-style", default=None, help="family_keepsake_4act | day_in_the_life_vlog | upbeat_montage | dialogue_story")
-    p_int.add_argument("--photo-mode", default=None, help="parallax_gallery | gallery_frame | full_bleed")
+    p_int.add_argument("--photo-mode", default=None, help="Primary photo mode (cinematic_depth_3d | parallax_gallery | editorial_magazine | curator_loupe | polaroid_scrapbook | triptych_cinematic | cinema_anamorphic | diptych_frame | gallery_frame | full_bleed)")
+    p_int.add_argument("--photo-modes", default=None, help="Multi-select comma-separated photo modes for photo_effects_suite")
+    p_int.add_argument("--overlay-fxs", default=None, help="Multi-select comma-separated atmospheric finishers for photo_overlay_finishers")
     p_int.add_argument("--bgm-mood", default=None, help="auto_match | classical_chamber | acoustic_warm | cinematic_orchestral")
     p_int.add_argument("--dialogue-preference", default=None, help="keep_full_sentences_with_broll_cutaways | highlights_only | music_mostly")
     p_int.add_argument("--duration", type=int, default=None, help="Target duration in seconds (30 to 600)")
@@ -1046,6 +1111,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_pe.add_argument("--camera-badge", default=None, help="Sample camera badge")
     p_pe.add_argument("--output", default=None, help="Optional output JPEG path")
     p_pe.set_defaults(func=cmd_preview_photo_effects)
+
+    # 16. apply-video-curation
+    p_avc = sub.add_parser(
+        "apply-video-curation",
+        help="Persist AI Agent video clip selection, golden-window [in_tc, out_tc] trims, transitions & captions",
+    )
+    p_avc.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_avc.add_argument("--overrides-json", required=True, help="JSON string or file path with video clip overrides")
+    p_avc.add_argument("--output", default=None, help="Optional output report JSON path")
+    p_avc.set_defaults(func=cmd_apply_video_curation)
+
+    # 17. apply-timeline-intelligence
+    p_ati = sub.add_parser(
+        "apply-timeline-intelligence",
+        help="Persist AI Agent transition choreography, hold durations, photo modes & Track V3 lower-third captions",
+    )
+    p_ati.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_ati.add_argument("--overrides-json", required=True, help="JSON string or file path with clips / lower_thirds overrides")
+    p_ati.add_argument("--output", default=None, help="Optional output report JSON path")
+    p_ati.set_defaults(func=cmd_apply_timeline_intelligence)
+
+    # 18. render-screening-sheet
+    p_rss = sub.add_parser(
+        "render-screening-sheet",
+        help="Mechanically render the 4x3 Multimodal Director Screening Sheet for AI visual quality inspection",
+    )
+    p_rss.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_rss.add_argument("--max-tiles", type=int, default=12, help="Number of timeline cuts to sample (default 12)")
+    p_rss.add_argument("--output", default=None, help="Optional output JPEG path")
+    p_rss.set_defaults(func=cmd_render_screening_sheet)
 
     return parser
 
