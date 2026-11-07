@@ -1,9 +1,12 @@
-"""FastAPI backend for inspecting annotations, running the Modular Multi-Agent Pipeline, and rendering 4K HDR videos."""
+"""FastAPI backend for the Guided 3-Step AI Photo & Video Editing Studio with Live Multi-Agent Progress."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
+import time
+import uuid
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -11,8 +14,15 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ..agents import AgentRegistry, generate_intake_questions, run_multi_agent_pipeline
+from ..agents import (
+    AgentRegistry,
+    MultiAgentOrchestrator,
+    generate_intake_questions,
+    inspect_media_library,
+    run_multi_agent_pipeline,
+)
 from ..analyzer.ag_annotator import analyze_media_directory
+from ..analyzer.media_probe import AUDIO_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
 from ..exporters.nle_export import export_all_nle_formats
 from ..models.schema import EditTimeline, MediaCatalog
 from ..planner.story_director import generate_edit_plan, generate_storyboard_markdown
@@ -41,24 +51,24 @@ class PlanRequest(BaseModel):
     height: int = 2160
     fps: int = 30
     hdr: bool = True
-    photo_mode: str = "gallery_frame"
+    photo_mode: str = "parallax_gallery"
     use_antigravity: bool = True
 
 
 class MultiAgentRunRequest(BaseModel):
     media_dir: str
-    project_dir: str = "gilroy_halloween_project"
+    project_dir: str = "louvre_day_trip_project"
     user_prompt: str = ""
     extra_audio_path: Optional[str] = None
     interview_answers: dict[str, str] = Field(default_factory=dict)
-    enabled_optional_roles: list[str] = Field(default_factory=list)
+    enabled_optional_roles: list[str] = Field(default_factory=lambda: ["vfx_designer"])
     disabled_roles: list[str] = Field(default_factory=list)
     width: int = 3840
     height: int = 2160
     fps: int = 30
     hdr: bool = True
-    use_antigravity: bool = True
-    render_video: bool = False
+    use_antigravity: bool = False
+    render_video: bool = True
 
 
 class RenderRequest(BaseModel):
@@ -75,16 +85,96 @@ def _read_json_if_exists(path: Path) -> Optional[dict[str, Any]]:
     return None
 
 
-def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI:
-    app = FastAPI(title="AI Photo & Video Editing Studio (Modular Multi-Agent Edition)", version="0.2.0")
+def _discover_local_media_libraries(workspace_root: Path) -> list[dict[str, Any]]:
+    """Scan common local folders for ready-to-edit media libraries."""
+    candidates: list[Path] = []
+    projects_parent = workspace_root.parent
+
+    # 1. Check sibling clips/* folders (e.g. C:\Users\hihao\Documents\projects\clips\louvre)
+    clips_root = projects_parent / "clips"
+    if clips_root.exists() and clips_root.is_dir():
+        for sub in sorted(clips_root.iterdir()):
+            if sub.is_dir() and not sub.name.startswith("."):
+                candidates.append(sub)
+        if not candidates:
+            candidates.append(clips_root)
+
+    # 2. Check sibling ai_editor/raw_media
+    raw_media = projects_parent / "ai_editor" / "raw_media"
+    if raw_media.exists() and raw_media.is_dir():
+        candidates.append(raw_media)
+
+    # 3. Check any local media_library or raw_media inside workspace_root
+    for local_name in ("raw_media", "media", "clips"):
+        p = workspace_root / local_name
+        if p.exists() and p.is_dir() and p not in candidates:
+            candidates.append(p)
+
+    libraries: list[dict[str, Any]] = []
+    seen_resolved: set[str] = set()
+    for c in candidates:
+        try:
+            res_str = str(c.resolve())
+        except Exception:
+            continue
+        if res_str in seen_resolved:
+            continue
+        seen_resolved.add(res_str)
+        info = inspect_media_library(c, workspace_root=workspace_root)
+        if info["video_count"] > 0 or info["photo_count"] > 0:
+            libraries.append(info)
+
+    return libraries
+
+
+def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> FastAPI:
+    app = FastAPI(title="AI Photo & Video Editing Studio (Guided Multi-Agent Edition)", version="0.3.0")
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    state = {
-        "project_dir": str(Path(default_project_dir).resolve()),
+    workspace_root = Path.cwd().resolve()
+    default_proj_resolved = Path(default_project_dir).resolve()
+
+    state: dict[str, Any] = {
+        "project_dir": str(default_proj_resolved),
         "last_status": "Ready",
         "progress": 0.0,
     }
+
+    job_lock = threading.Lock()
+    job_state: dict[str, Any] = {
+        "job_id": None,
+        "status": "idle",  # idle | running | completed | error
+        "error": None,
+        "media_dir": "",
+        "project_dir": str(default_proj_resolved),
+        "progress": 0.0,
+        "progress_pct": 0,
+        "current_role_id": "",
+        "current_stage_title": "Ready to start",
+        "last_status": "Select your media library and click Run to start.",
+        "started_at": None,
+        "completed_at": None,
+        "elapsed_sec": 0.0,
+        "stages": [],
+        "activity_log": [],
+    }
+
+    def _append_log(role_id: str, message: str, level: str = "info") -> None:
+        started = job_state.get("started_at") or time.monotonic()
+        elapsed = max(0.0, time.monotonic() - started)
+        mm = int(elapsed // 60)
+        ss = int(elapsed % 60)
+        entry = {
+            "time_str": f"{mm:02d}:{ss:02d}",
+            "elapsed_sec": round(elapsed, 1),
+            "role_id": role_id,
+            "message": message,
+            "level": level,
+        }
+        job_state["activity_log"].append(entry)
+        if len(job_state["activity_log"]) > 120:
+            job_state["activity_log"] = job_state["activity_log"][-120:]
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -97,15 +187,306 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
             "agents": [cls.to_metadata_dict() for cls in AgentRegistry.list_all()],
         }
 
+    @app.get("/api/fs/libraries")
+    def api_list_media_libraries() -> dict:
+        libs = _discover_local_media_libraries(workspace_root)
+        return {
+            "workspace_root": str(workspace_root),
+            "libraries": libs,
+        }
+
+    @app.get("/api/fs/inspect")
+    def api_inspect_media_library(media_dir: str = Query(..., description="Path to media folder")) -> dict:
+        return inspect_media_library(media_dir, workspace_root=workspace_root)
+
+    @app.get("/api/fs/browse")
+    def api_browse_directory(path: Optional[str] = Query(default=None)) -> dict:
+        target = Path(path).resolve() if path else workspace_root.parent.resolve()
+        if not target.exists() or not target.is_dir():
+            target = workspace_root.parent.resolve()
+
+        parent_path = str(target.parent.resolve()) if target.parent != target else None
+        subdirs: list[dict[str, Any]] = []
+        direct_videos = 0
+        direct_photos = 0
+
+        try:
+            for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+                if entry.name.startswith(".") or entry.name in ("__pycache__", "node_modules", ".git", ".venv"):
+                    continue
+                if entry.is_dir():
+                    v_c = 0
+                    p_c = 0
+                    try:
+                        for child in entry.iterdir():
+                            if child.is_file():
+                                ext = child.suffix.lower()
+                                if ext in VIDEO_EXTENSIONS:
+                                    v_c += 1
+                                elif ext in PHOTO_EXTENSIONS:
+                                    p_c += 1
+                            elif child.is_dir() and not child.name.startswith("."):
+                                for gchild in child.iterdir():
+                                    if gchild.is_file():
+                                        ext = gchild.suffix.lower()
+                                        if ext in VIDEO_EXTENSIONS:
+                                            v_c += 1
+                                        elif ext in PHOTO_EXTENSIONS:
+                                            p_c += 1
+                    except Exception:
+                        pass
+                    subdirs.append(
+                        {
+                            "name": entry.name,
+                            "path": str(entry.resolve()),
+                            "video_count": v_c,
+                            "photo_count": p_c,
+                        }
+                    )
+                elif entry.is_file():
+                    ext = entry.suffix.lower()
+                    if ext in VIDEO_EXTENSIONS:
+                        direct_videos += 1
+                    elif ext in PHOTO_EXTENSIONS:
+                        direct_photos += 1
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Cannot browse folder: {exc}") from exc
+
+        return {
+            "current_path": str(target),
+            "parent_path": parent_path,
+            "direct_videos": direct_videos,
+            "direct_photos": direct_photos,
+            "subdirectories": subdirs[:80],
+        }
+
+    @app.post("/api/fs/pick-folder")
+    def api_pick_folder_native(initial_dir: Optional[str] = None) -> dict:
+        """Open a native OS folder selection dialog on the local machine."""
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            start_dir = initial_dir if (initial_dir and Path(initial_dir).exists()) else str(workspace_root.parent)
+            chosen = filedialog.askdirectory(initialdir=start_dir, title="Select Media Library Folder")
+            root.destroy()
+            if not chosen:
+                return {"cancelled": True, "selected_path": None}
+            info = inspect_media_library(chosen, workspace_root=workspace_root)
+            return {"cancelled": False, "selected_path": info["media_dir"], "library": info}
+        except Exception as exc:
+            return {
+                "cancelled": True,
+                "selected_path": None,
+                "error": f"Native folder dialog unavailable ({exc}). Please use the in-browser Folder Explorer.",
+            }
+
     @app.get("/api/intake-questions")
     def api_intake_questions(
-        media_dir: str = Query(default="C:/Users/hihao/Documents/projects/ai_editor/raw_media"),
+        media_dir: str = Query(default="C:/Users/hihao/Documents/projects/clips/louvre"),
         prompt: str = Query(default=""),
     ) -> dict:
+        lib_info = inspect_media_library(media_dir, workspace_root=workspace_root)
         questions = generate_intake_questions(media_dir=media_dir, initial_prompt=prompt)
         return {
+            "library": lib_info,
             "questions": [q.model_dump(mode="json") for q in questions],
         }
+
+    @app.get("/api/jobs/status")
+    def api_job_status() -> dict:
+        with job_lock:
+            if job_state["status"] == "running" and job_state["started_at"] is not None:
+                job_state["elapsed_sec"] = round(time.monotonic() - job_state["started_at"], 1)
+            return dict(job_state)
+
+    @app.post("/api/jobs/start")
+    def api_job_start(req: MultiAgentRunRequest, wait: bool = Query(default=False)) -> dict:
+        media_path = Path(req.media_dir).resolve()
+        if not media_path.exists() or not media_path.is_dir():
+            raise HTTPException(status_code=400, detail=f"Media directory not found: {req.media_dir}")
+
+        with job_lock:
+            if job_state["status"] == "running":
+                return dict(job_state)
+
+            proj = Path(req.project_dir).resolve()
+            state["project_dir"] = str(proj)
+
+            orchestrator = MultiAgentOrchestrator(
+                enabled_optional_roles=req.enabled_optional_roles,
+                disabled_roles=req.disabled_roles,
+            )
+            planned_agents = orchestrator.get_execution_plan()
+            stages_init: list[dict[str, Any]] = [
+                {
+                    "role_id": a.role_id,
+                    "display_name": a.display_name,
+                    "stage_order": a.stage_order,
+                    "status": "pending",
+                    "duration_sec": None,
+                    "quality_score": None,
+                    "critique": a.description,
+                    "directive_sent": None,
+                }
+                for a in planned_agents
+            ]
+            if req.render_video:
+                stages_init.append(
+                    {
+                        "role_id": "renderer",
+                        "display_name": "7. 4K 10-bit HLG HDR Video & NLE Renderer",
+                        "stage_order": 70,
+                        "status": "pending",
+                        "duration_sec": None,
+                        "quality_score": None,
+                        "critique": "Synthesizes 2.5D parallax & diptych photo plates, titles, and 3-layer audio into 4K HDR MP4.",
+                        "directive_sent": None,
+                    }
+                )
+
+            job_id = f"job_{uuid.uuid4().hex[:8]}"
+            now_mono = time.monotonic()
+            job_state.update(
+                {
+                    "job_id": job_id,
+                    "status": "running",
+                    "error": None,
+                    "media_dir": str(media_path),
+                    "project_dir": str(proj),
+                    "progress": 0.01,
+                    "progress_pct": 1,
+                    "current_role_id": planned_agents[0].role_id if planned_agents else "client_intake",
+                    "current_stage_title": planned_agents[0].display_name if planned_agents else "Initializing...",
+                    "last_status": "Initializing Multi-Agent Pipeline...",
+                    "started_at": now_mono,
+                    "completed_at": None,
+                    "elapsed_sec": 0.0,
+                    "stages": stages_init,
+                    "activity_log": [],
+                }
+            )
+            _append_log("system", f"Started job {job_id} on media library '{media_path.name}' -> '{proj.name}'")
+
+        def _worker() -> None:
+            extra_audio = (
+                [req.extra_audio_path]
+                if req.extra_audio_path and Path(req.extra_audio_path).exists()
+                else None
+            )
+
+            def _on_prog(role_id: str, msg: str, pct: int) -> None:
+                with job_lock:
+                    state["last_status"] = f"[{role_id}] {msg}"
+                    state["progress"] = round(pct / 100.0, 2)
+                    job_state["progress"] = round(pct / 100.0, 2)
+                    job_state["progress_pct"] = int(pct)
+                    job_state["last_status"] = msg
+                    if job_state["started_at"] is not None:
+                        job_state["elapsed_sec"] = round(time.monotonic() - job_state["started_at"], 1)
+
+            def _on_event(ev: dict[str, Any]) -> None:
+                with job_lock:
+                    etype = ev.get("event", "")
+                    rid = ev.get("role_id", "")
+                    pct = int(ev.get("progress_pct", job_state["progress_pct"]))
+                    msg = ev.get("message", "")
+                    job_state["progress_pct"] = pct
+                    job_state["progress"] = round(pct / 100.0, 2)
+                    if msg:
+                        job_state["last_status"] = msg
+
+                    stage_obj = next((s for s in job_state["stages"] if s["role_id"] == rid), None)
+                    if etype == "stage_started":
+                        job_state["current_role_id"] = rid
+                        job_state["current_stage_title"] = ev.get("display_name", rid)
+                        if stage_obj is not None:
+                            stage_obj["status"] = "running"
+                        _append_log(rid, msg)
+                    elif etype == "director_directive":
+                        if stage_obj is not None:
+                            stage_obj["status"] = "directed_improvement"
+                            stage_obj["directive_sent"] = ev.get("directive_sent")
+                            stage_obj["critique"] = ev.get("critique", stage_obj["critique"])
+                            stage_obj["quality_score"] = ev.get("quality_score")
+                        _append_log("production_director", msg, level="directive")
+                    elif etype == "stage_completed":
+                        if stage_obj is not None:
+                            rev_status = ev.get("review_status", "approved")
+                            stage_obj["status"] = (
+                                rev_status
+                                if rev_status in ("directed_improvement", "polished_by_director")
+                                else "completed"
+                            )
+                            stage_obj["duration_sec"] = ev.get("duration_sec")
+                            stage_obj["quality_score"] = ev.get("quality_score")
+                            stage_obj["critique"] = ev.get("critique", stage_obj["critique"])
+                            if ev.get("directive_sent"):
+                                stage_obj["directive_sent"] = ev.get("directive_sent")
+                        _append_log(rid, f"{msg} — {ev.get('critique', '')}", level="success")
+                    elif etype == "render_progress":
+                        job_state["current_role_id"] = "renderer"
+                        job_state["current_stage_title"] = "7. 4K 10-bit HLG HDR Video & NLE Renderer"
+                        if stage_obj is not None:
+                            stage_obj["status"] = "running"
+                            stage_obj["critique"] = msg
+                        _append_log("renderer", msg)
+                    elif etype == "pipeline_complete":
+                        _append_log("complete", msg, level="success")
+
+            try:
+                bb = run_multi_agent_pipeline(
+                    media_dir=media_path,
+                    project_dir=proj,
+                    user_prompt=req.user_prompt,
+                    extra_audio_paths=extra_audio,
+                    interview_answers=req.interview_answers,
+                    enabled_optional_roles=req.enabled_optional_roles,
+                    disabled_roles=req.disabled_roles,
+                    width=req.width,
+                    height=req.height,
+                    fps=req.fps,
+                    hdr=req.hdr,
+                    use_antigravity=req.use_antigravity,
+                    render_video=req.render_video,
+                    progress_callback=_on_prog,
+                    event_callback=_on_event,
+                )
+                with job_lock:
+                    end_mono = time.monotonic()
+                    job_state["status"] = "completed"
+                    job_state["progress"] = 1.0
+                    job_state["progress_pct"] = 100
+                    job_state["completed_at"] = end_mono
+                    if job_state["started_at"] is not None:
+                        job_state["elapsed_sec"] = round(end_mono - job_state["started_at"], 1)
+                    dr = bb.director_review
+                    grade_str = f"Grade {dr.quality_grade} ({dr.overall_quality_score}/10)" if dr else "Complete"
+                    job_state["current_stage_title"] = f"All Stages Complete • {grade_str}"
+                    job_state["last_status"] = (
+                        f"Finished in {job_state['elapsed_sec']}s — {grade_str}"
+                    )
+                    state["last_status"] = job_state["last_status"]
+                    state["progress"] = 1.0
+            except Exception as exc:
+                with job_lock:
+                    job_state["status"] = "error"
+                    job_state["error"] = str(exc)
+                    job_state["last_status"] = f"Error: {exc}"
+                    state["last_status"] = f"Error: {exc}"
+                    _append_log("error", f"Pipeline failed: {exc}", level="error")
+
+        if wait:
+            _worker()
+        else:
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+
+        with job_lock:
+            return dict(job_state)
 
     @app.get("/api/state")
     def get_state(project_dir: Optional[str] = None) -> dict:
@@ -156,10 +537,14 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
             "blackboard": _read_json_if_exists(proj / "blackboard.json"),
         }
 
+        with job_lock:
+            current_job = dict(job_state)
+
         return {
             "project_dir": str(proj),
             "last_status": state["last_status"],
             "progress": state["progress"],
+            "job": current_job,
             "registered_agents": [cls.to_metadata_dict() for cls in AgentRegistry.list_all()],
             "agent_contracts": agent_contracts,
             "has_annotations": ann_path.exists(),

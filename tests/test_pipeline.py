@@ -305,9 +305,56 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
 
     r_q = client.get("/api/intake-questions", params={"media_dir": str(sample_media_dir)})
     assert r_q.status_code == 200
-    assert len(r_q.json()["questions"]) >= 4
+    q_body = r_q.json()
+    assert len(q_body["questions"]) >= 5
+    assert q_body["library"]["video_count"] == 1
+    assert q_body["library"]["photo_count"] == 2
 
-    r_state = client.get("/api/state")
+    r_libs = client.get("/api/fs/libraries")
+    assert r_libs.status_code == 200
+    assert "libraries" in r_libs.json()
+
+    r_insp = client.get("/api/fs/inspect", params={"media_dir": str(sample_media_dir)})
+    assert r_insp.status_code == 200
+    assert r_insp.json()["video_count"] == 1
+
+    r_browse = client.get("/api/fs/browse", params={"path": str(sample_media_dir.parent)})
+    assert r_browse.status_code == 200
+    assert any(sub["name"] == "raw_media" for sub in r_browse.json()["subdirectories"])
+
+    # Verify live job start + status tracking endpoint
+    job_proj = tmp_path / "async_job_proj"
+    r_job = client.post(
+        "/api/jobs/start?wait=true",
+        json={
+            "media_dir": str(sample_media_dir),
+            "project_dir": str(job_proj),
+            "user_prompt": "Quick family highlight reel",
+            "interview_answers": {
+                "narrative_style": "family_keepsake_4act",
+                "photo_mode": "parallax_gallery",
+            },
+            "enabled_optional_roles": ["vfx_designer"],
+            "width": 640,
+            "height": 360,
+            "fps": 24,
+            "hdr": False,
+            "use_antigravity": False,
+            "render_video": False,
+        },
+    )
+    assert r_job.status_code == 200
+    job_data = r_job.json()
+    assert job_data["status"] == "completed"
+    assert job_data["progress_pct"] == 100
+    assert len(job_data["stages"]) >= 10
+    assert len(job_data["activity_log"]) >= 5
+
+    r_job_status = client.get("/api/jobs/status")
+    assert r_job_status.status_code == 200
+    assert r_job_status.json()["status"] == "completed"
+
+    r_state = client.get("/api/state", params={"project_dir": str(proj_dir)})
     assert r_state.status_code == 200
     st = r_state.json()
     assert st["agent_contracts"]["creative_brief"] is not None

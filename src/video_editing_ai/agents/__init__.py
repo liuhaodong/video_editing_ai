@@ -4,7 +4,7 @@ from .audio_vibe_agent import AudioVibeAgent
 from .base import AgentRegistry, BaseEditingAgent, PipelineBlackboard, register_agent
 from .culler_agent import CullerAgent
 from .director_agent import ProductionDirectorAgent
-from .intake_agent import ClientIntakeAgent, generate_intake_questions
+from .intake_agent import ClientIntakeAgent, generate_intake_questions, inspect_media_library
 from .music_supervisor_agent import MusicSupervisorAgent
 from .orchestrator import MultiAgentOrchestrator, run_multi_agent_pipeline
 from .photo_curator_agent import PhotoCuratorAgent
@@ -30,6 +30,7 @@ __all__ = [
     "StoryProducerAgent",
     "VFXAgent",
     "generate_intake_questions",
+    "inspect_media_library",
     "register_agent",
     "run_multi_agent_pipeline",
 ]

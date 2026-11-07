@@ -1,9 +1,29 @@
 const statusPill = document.getElementById("statusPill");
 let latestAgentContracts = {};
 let registeredAgentsList = [];
+let discoveredLibraries = [];
+let currentIntakeAnswers = {
+  narrative_style: "family_keepsake_4act",
+  photo_mode: "parallax_gallery",
+  bgm_mood: "auto_match",
+  dialogue_preference: "keep_full_sentences_with_broll_cutaways",
+  target_duration_sec: "90",
+  must_include_topics: "",
+};
+let activePollTimer = null;
+let currentBrowserPath = "";
+let currentBrowserParent = null;
 
 function setStatus(text) {
-  statusPill.textContent = text;
+  if (statusPill) statusPill.textContent = text;
+}
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 // Tab switching
@@ -12,10 +32,380 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
-    document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
+    const target = document.getElementById(`tab-${btn.dataset.tab}`);
+    if (target) target.classList.add("active");
   });
 });
 
+// ---------------------------------------------------------------------------
+// STEP 1: MEDIA LIBRARY DISCOVERY & FOLDER SELECTION
+// ---------------------------------------------------------------------------
+function renderDiscoveredLibraries(libs) {
+  discoveredLibraries = libs || [];
+  const grid = document.getElementById("discoveredLibrariesGrid");
+  if (!grid) return;
+
+  if (!discoveredLibraries.length) {
+    grid.innerHTML = `<div class="muted">No pre-populated media libraries found. Click "📂 Browse Folders" or "🪟 OS Folder Picker" below.</div>`;
+    return;
+  }
+
+  const currentMediaDir = (document.getElementById("mediaDirInput")?.value || "").trim().toLowerCase();
+
+  grid.innerHTML = discoveredLibraries
+    .map((lib, idx) => {
+      const isSelected = lib.media_dir.toLowerCase() === currentMediaDir;
+      const cams = (lib.detected_cameras || []).join(" • ");
+      return `
+        <div class="library-card ${isSelected ? "selected" : ""}" data-lib-idx="${idx}">
+          <div class="library-card-title">
+            <span>📁 ${escapeHtml(lib.display_title)}</span>
+            <span class="stage-badge-mini">${lib.total_size_mb} MB</span>
+          </div>
+          <div class="library-card-counts">
+            🎬 ${lib.video_count} Videos &bull; 📸 ${lib.photo_count} Photos
+          </div>
+          <div class="muted" style="font-size:0.76rem;">📷 ${escapeHtml(cams)}</div>
+          <div class="library-card-path" title="${escapeHtml(lib.media_dir)}">${escapeHtml(lib.media_dir)}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  grid.querySelectorAll(".library-card").forEach((card) => {
+    card.addEventListener("click", async () => {
+      const idx = Number(card.dataset.libIdx);
+      const lib = discoveredLibraries[idx];
+      if (!lib) return;
+      await selectMediaLibrary(lib.media_dir, lib.suggested_project_dir, true);
+    });
+  });
+}
+
+function updateLibraryBanner(lib) {
+  if (!lib) return;
+  const titleEl = document.getElementById("libTitleText");
+  const countsEl = document.getElementById("libCountsText");
+  const camsEl = document.getElementById("libCamerasText");
+  const sizeEl = document.getElementById("libSizeText");
+
+  if (titleEl) titleEl.textContent = lib.display_title || "Selected Media Library";
+  if (countsEl) {
+    countsEl.textContent = `🎬 ${lib.video_count || 0} Videos • 📸 ${lib.photo_count || 0} Photos${
+      lib.audio_count ? ` • 🎵 ${lib.audio_count} Audio` : ""
+    }`;
+  }
+  if (camsEl) camsEl.textContent = (lib.detected_cameras || ["Multi-Cam"]).join(" • ");
+  if (sizeEl) sizeEl.textContent = `${lib.total_size_mb || 0} MB`;
+}
+
+async function selectMediaLibrary(mediaDir, suggestedProjectDir = null, updatePrompt = true) {
+  const mediaInput = document.getElementById("mediaDirInput");
+  const projInput = document.getElementById("projectDirInput");
+  if (mediaInput) mediaInput.value = mediaDir;
+
+  setStatus("Scanning media library & preparing interactive intake...");
+  const res = await fetch(`/api/intake-questions?media_dir=${encodeURIComponent(mediaDir)}`);
+  if (res.ok) {
+    const data = await res.json();
+    const lib = data.library;
+    if (lib) {
+      updateLibraryBanner(lib);
+      if (projInput && (suggestedProjectDir || lib.suggested_project_dir)) {
+        projInput.value = suggestedProjectDir || lib.suggested_project_dir;
+      }
+      if (updatePrompt && lib.default_prompt) {
+        const promptEl = document.getElementById("agentPromptInput");
+        if (promptEl) promptEl.value = lib.default_prompt;
+        currentIntakeAnswers.must_include_topics = lib.default_prompt;
+      }
+    }
+    if (data.questions) {
+      renderInteractiveIntakeQuestions(data.questions);
+    }
+  }
+
+  renderDiscoveredLibraries(discoveredLibraries);
+  await refreshProjectState();
+}
+
+// ---------------------------------------------------------------------------
+// STEP 2: DYNAMIC INTERACTIVE CLIENT INTAKE WIZARD
+// ---------------------------------------------------------------------------
+function renderInteractiveIntakeQuestions(questions) {
+  const container = document.getElementById("interactiveIntakeContainer");
+  if (!container) return;
+
+  container.innerHTML = (questions || [])
+    .map((q) => {
+      const qId = q.id;
+      const defaultCode = (q.default_answer || "").split(" ")[0].trim();
+      if (!currentIntakeAnswers[qId]) {
+        currentIntakeAnswers[qId] = qId === "must_include_topics" ? q.default_answer : defaultCode;
+      }
+      const selectedVal = currentIntakeAnswers[qId];
+      const isFullSpan = qId === "must_include_topics" || qId === "photo_mode";
+
+      const optionsHtml = (q.options || [])
+        .map((optStr, optIdx) => {
+          const optCode = qId === "must_include_topics" ? optStr : optStr.split(" ")[0].trim();
+          const isChecked =
+            qId === "must_include_topics"
+              ? optIdx === 0
+              : selectedVal === optCode || (optIdx === 0 && !selectedVal);
+          return `
+            <label class="intake-option-pill ${isChecked ? "active" : ""}" data-qid="${escapeHtml(qId)}" data-val="${escapeHtml(optCode)}">
+              <input type="radio" name="intake_${escapeHtml(qId)}" value="${escapeHtml(optCode)}" ${isChecked ? "checked" : ""} />
+              <span>${escapeHtml(optStr)}</span>
+            </label>
+          `;
+        })
+        .join("");
+
+      return `
+        <div class="intake-q-card ${isFullSpan ? "full-span" : ""}">
+          <div class="intake-q-title">${escapeHtml(q.question)}</div>
+          <div class="intake-options-list">${optionsHtml}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  container.querySelectorAll(".intake-option-pill").forEach((pill) => {
+    pill.addEventListener("click", () => {
+      const qId = pill.dataset.qid;
+      const val = pill.dataset.val;
+      currentIntakeAnswers[qId] = val;
+
+      // Update active styling within this question group
+      container.querySelectorAll(`.intake-option-pill[data-qid="${qId}"]`).forEach((p) => {
+        p.classList.remove("active");
+      });
+      pill.classList.add("active");
+      const radio = pill.querySelector("input[type='radio']");
+      if (radio) radio.checked = true;
+
+      // Sync with underlying selects / prompt box
+      if (qId === "narrative_style") {
+        const el = document.getElementById("intakeNarrativeStyle");
+        if (el) el.value = val;
+      } else if (qId === "photo_mode") {
+        const el = document.getElementById("intakePhotoMode");
+        if (el) el.value = val;
+      } else if (qId === "dialogue_preference") {
+        const el = document.getElementById("intakeDialoguePref");
+        if (el) el.value = val;
+      } else if (qId === "target_duration_sec") {
+        const el = document.getElementById("intakeTargetDuration");
+        if (el) el.value = val;
+      } else if (qId === "must_include_topics") {
+        const promptEl = document.getElementById("agentPromptInput");
+        if (promptEl) promptEl.value = val;
+      }
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// STEP 3: LIVE PIPELINE PROGRESS & 12-STAGE AGENT STEPPER
+// ---------------------------------------------------------------------------
+function formatElapsed(sec) {
+  const s = Math.max(0, Math.floor(sec || 0));
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `⏱️ ${mm}:${ss}`;
+}
+
+function renderJobProgress(job) {
+  if (!job) return;
+
+  const badgeEl = document.getElementById("liveStageBadge");
+  const titleEl = document.getElementById("liveStageTitle");
+  const elapsedEl = document.getElementById("liveElapsedText");
+  const pctEl = document.getElementById("livePctText");
+  const fillEl = document.getElementById("liveProgressBarFill");
+  const subEl = document.getElementById("liveStatusSubtext");
+  const gridEl = document.getElementById("liveAgentStagesGrid");
+  const logEl = document.getElementById("liveActivityLog");
+  const logCountEl = document.getElementById("activityLogCount");
+  const runBtn = document.getElementById("btnRunMultiAgent");
+
+  const st = job.status || "idle";
+  const pct = job.progress_pct || 0;
+
+  if (badgeEl) {
+    badgeEl.textContent = st.toUpperCase();
+    badgeEl.className = `progress-stage-pill ${st}`;
+  }
+  if (titleEl) {
+    titleEl.textContent = job.current_stage_title || "Ready";
+  }
+  if (elapsedEl) {
+    elapsedEl.textContent = formatElapsed(job.elapsed_sec || 0);
+  }
+  if (pctEl) {
+    pctEl.textContent = `${pct}%`;
+  }
+  if (fillEl) {
+    fillEl.style.width = `${pct}%`;
+  }
+  if (subEl) {
+    subEl.textContent = job.last_status || "";
+  }
+  if (runBtn) {
+    if (st === "running") {
+      runBtn.disabled = true;
+      runBtn.textContent = `⏳ Running Pipeline (${pct}%)...`;
+    } else {
+      runBtn.disabled = false;
+      runBtn.textContent = "🚀 Run Full AI Edit & Render Video";
+    }
+  }
+
+  if (gridEl && Array.isArray(job.stages) && job.stages.length > 0) {
+    gridEl.innerHTML = job.stages
+      .map((s) => {
+        const sStatus = s.status || "pending";
+        let badgeLabel = "WAITING";
+        if (sStatus === "running") badgeLabel = "RUNNING...";
+        else if (sStatus === "completed") {
+          badgeLabel = s.quality_score ? `✓ ${s.quality_score.toFixed(1)}/10` : "✓ DONE";
+        } else if (sStatus === "polished_by_director" || sStatus === "directed_improvement") {
+          badgeLabel = `🎬 DIRECTED (${s.quality_score ? s.quality_score.toFixed(1) : "9.5"})`;
+        } else if (sStatus === "error") {
+          badgeLabel = "ERROR";
+        }
+        const durText = s.duration_sec != null ? ` (${s.duration_sec}s)` : "";
+        return `
+          <div class="stage-step-card ${escapeHtml(sStatus)}">
+            <div class="stage-step-top">
+              <span>${escapeHtml(s.display_name)}${durText}</span>
+              <span class="stage-badge-mini">${escapeHtml(badgeLabel)}</span>
+            </div>
+            <div class="stage-step-desc" title="${escapeHtml(s.critique || "")}">
+              ${escapeHtml(s.critique || "")}
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  if (logEl && Array.isArray(job.activity_log)) {
+    if (logCountEl) logCountEl.textContent = `${job.activity_log.length} events`;
+    if (job.activity_log.length > 0) {
+      logEl.innerHTML = job.activity_log
+        .map(
+          (entry) => `
+          <div class="log-line ${escapeHtml(entry.level || "info")}">
+            <span class="log-time">[${escapeHtml(entry.time_str)}]</span>
+            <span class="log-role">[${escapeHtml(entry.role_id)}]</span>
+            <span>${escapeHtml(entry.message)}</span>
+          </div>`
+        )
+        .join("");
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  }
+}
+
+function renderDefaultAgentStagesFromRegistry(agents) {
+  const gridEl = document.getElementById("liveAgentStagesGrid");
+  if (!gridEl || !agents || !agents.length) return;
+  if (gridEl.children.length > 0) return;
+
+  const stages = [
+    ...agents.map((a) => ({
+      display_name: a.display_name,
+      status: "pending",
+      critique: a.description,
+    })),
+    {
+      display_name: "7. 4K 10-bit HLG HDR Video & NLE Renderer",
+      status: "pending",
+      critique: "Synthesizes 2.5D parallax & diptych photo plates, titles, and 3-layer audio into 4K HDR MP4.",
+    },
+  ];
+  renderJobProgress({
+    status: "idle",
+    progress_pct: 0,
+    current_stage_title: "Ready to run all 11 AI editing agents + 4K HDR Renderer",
+    last_status: "Select your media library above and click 'Run Full AI Edit & Render Video'.",
+    elapsed_sec: 0,
+    stages,
+    activity_log: [],
+  });
+}
+
+function renderDirectorHighlights(contracts) {
+  const box = document.getElementById("directorHighlightsBox");
+  if (!box) return;
+
+  const dr = contracts?.director_review;
+  const bgm = contracts?.bgm_selection;
+  const pc = contracts?.photo_curation;
+
+  if (!dr && !bgm && !pc) {
+    box.innerHTML = `<p class="muted">Run the pipeline to inspect the Director's Sign-Off, BGM selection, and curated museum photo annotations.</p>`;
+    return;
+  }
+
+  let html = "";
+  if (dr) {
+    html += `
+      <div class="highlight-banner">
+        <div style="font-size:0.95rem; font-weight:700; color:var(--accent);">
+          🎬 Executive Director Sign-Off: Grade ${escapeHtml(dr.quality_grade)} (${dr.overall_quality_score}/10)
+        </div>
+        <div style="font-size:0.8rem; margin-top:4px;">${escapeHtml(dr.director_vision_statement)}</div>
+      </div>
+    `;
+  }
+
+  if (bgm) {
+    html += `
+      <div class="curated-photo-pill" style="border-color:rgba(168,85,247,0.45); background:rgba(168,85,247,0.08);">
+        <strong>🎵 Selected Soundtrack (Stage 05 Music Supervisor):</strong><br/>
+        <span style="color:#c084fc; font-weight:600;">${escapeHtml(bgm.track_title)}</span> — ${escapeHtml(bgm.composer_or_artist)}
+        <span class="stage-badge-mini" style="margin-left:6px;">Mood Match ${bgm.mood_match_score}/10</span>
+        ${
+          bgm.rejected_user_bgm_reason
+            ? `<div class="muted" style="font-size:0.74rem; margin-top:3px;">🛡️ ${escapeHtml(bgm.rejected_user_bgm_reason)}</div>`
+            : ""
+        }
+      </div>
+    `;
+  }
+
+  if (pc && Array.isArray(pc.items)) {
+    const selectedPhotos = pc.items.filter((it) => it.is_selected);
+    html += `
+      <div style="margin:10px 0 6px; font-weight:700; font-size:0.84rem; color:var(--accent-cyan);">
+        🖼️ Curated Gallery Plates (${selectedPhotos.length} Selected from ${pc.total_evaluated} Photos • Avg Taste ${pc.average_taste_score_selected}/10)
+      </div>
+    `;
+    html += selectedPhotos
+      .slice(0, 12)
+      .map(
+        (p) => `
+        <div class="curated-photo-pill">
+          <div style="display:flex; justify-content:space-between;">
+            <strong>${escapeHtml(p.annotation_title)}</strong>
+            <span class="stage-badge-mini">${escapeHtml(p.recommended_photo_mode)} • ${p.overall_taste_score}/10</span>
+          </div>
+          <div style="color:var(--accent); font-size:0.76rem;">${escapeHtml(p.annotation_subtitle)}</div>
+          <div class="muted" style="font-size:0.71rem;">${escapeHtml(p.filename)} • ${escapeHtml(p.camera_badge)}</div>
+        </div>`
+      )
+      .join("");
+  }
+
+  box.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// REGISTRY, CONTRACTS, CATALOG, TIMELINE & EXPORTS RENDERERS
+// ---------------------------------------------------------------------------
 function renderAgentRegistry(agents) {
   registeredAgentsList = agents || [];
   const box = document.getElementById("agentRegistryList");
@@ -28,7 +418,7 @@ function renderAgentRegistry(agents) {
   box.innerHTML = registeredAgentsList
     .map((a) => {
       const isPlugin = !a.enabled_by_default;
-      const checked = a.enabled_by_default ? "checked" : "";
+      const checked = "checked"; // Enable vfx_designer plugin by default in the studio UI
       const tag = isPlugin
         ? `<span style="color:#00e5ff; font-weight:700;">[PLUGIN]</span>`
         : `<span style="color:#10b981;">[CORE]</span>`;
@@ -37,16 +427,20 @@ function renderAgentRegistry(agents) {
           <input type="checkbox" class="agent-role-checkbox" data-role="${a.role_id}" data-default="${a.enabled_by_default}" ${checked} />
           <div>
             <div><strong>${a.display_name}</strong> ${tag}</div>
-            <div class="muted" style="font-size:0.74rem; margin-top:2px;">Stage ${a.stage_order} • <code>${a.role_id}</code> -> ${a.produces_artifacts.join(", ") || "EditTimeline"}</div>
+            <div class="muted" style="font-size:0.74rem; margin-top:2px;">Stage ${a.stage_order} • <code>${a.role_id}</code> &rarr; ${a.produces_artifacts.join(", ") || "EditTimeline"}</div>
           </div>
         </label>
       `;
     })
     .join("");
+
+  renderDefaultAgentStagesFromRegistry(registeredAgentsList);
 }
 
 function renderContractsAndBus(contracts) {
   latestAgentContracts = contracts || {};
+  renderDirectorHighlights(latestAgentContracts);
+
   const busBox = document.getElementById("messageBusSummary");
   const viewer = document.getElementById("contractJsonViewer");
   const selector = document.getElementById("contractSelector");
@@ -67,18 +461,18 @@ function renderContractsAndBus(contracts) {
       .map(
         (m) => `
         <div class="bus-msg">
-          <strong style="color:#ffc83b;">${m.sender_role}</strong> &rarr;
-          <strong style="color:#00e5ff;">${m.recipient_role}</strong>
-          <span class="muted">[${m.message_type}]</span>: ${m.subject}
+          <strong style="color:#ffc83b;">${escapeHtml(m.sender_role)}</strong> &rarr;
+          <strong style="color:#00e5ff;">${escapeHtml(m.recipient_role)}</strong>
+          <span class="muted">[${escapeHtml(m.message_type)}]</span>: ${escapeHtml(m.subject)}
         </div>`
       )
       .join("");
-    busBox.innerHTML = busHtml;
-  } else {
-    busBox.innerHTML = "<span class='muted'>No inter-agent messages recorded yet. Click 'Run Coordinated Multi-Agent Pipeline' to execute Stages 0 -> 60.</span>";
+    if (busBox) busBox.innerHTML = busHtml;
+  } else if (busBox) {
+    busBox.innerHTML = "<span class='muted'>No inter-agent messages recorded yet.</span>";
   }
 
-  const key = selector ? selector.value : "blackboard";
+  const key = selector ? selector.value : "director_review";
   const doc = latestAgentContracts[key];
   if (viewer) {
     viewer.textContent = doc
@@ -96,6 +490,7 @@ if (contractSelectorEl) {
 
 function renderCatalogView(catalog) {
   const box = document.getElementById("catalogSummary");
+  if (!box) return;
   if (!catalog) {
     box.innerHTML = "<p class='muted'>No catalog loaded yet.</p>";
     return;
@@ -108,12 +503,12 @@ function renderCatalogView(catalog) {
 
   vids.forEach((v) => {
     const dialoguesHtml = (v.dialogues || [])
-      .map((d) => `<span class="dialogue-chip">[${d.start_time.toFixed(1)}s-${d.end_time.toFixed(1)}s] “${d.text}”</span>`)
+      .map((d) => `<span class="dialogue-chip">[${d.start_time.toFixed(1)}s-${d.end_time.toFixed(1)}s] “${escapeHtml(d.text)}”</span>`)
       .join("");
     html += `
       <div class="asset-item">
-        <div><strong>🎬 ${v.filename}</strong> (${v.duration.toFixed(1)}s, ${v.width}x${v.height}, ${v.color_transfer})</div>
-        <div class="muted" style="font-size:0.83rem;">${v.overall_summary || ""}</div>
+        <div><strong>🎬 ${escapeHtml(v.filename)}</strong> (${v.duration.toFixed(1)}s, ${v.width}x${v.height}, ${escapeHtml(v.color_transfer)})</div>
+        <div class="muted" style="font-size:0.83rem;">${escapeHtml(v.overall_summary || "")}</div>
         <div>${dialoguesHtml || "<span class='muted' style='font-size:0.78rem;'>No speech segments</span>"}</div>
       </div>
     `;
@@ -123,7 +518,7 @@ function renderCatalogView(catalog) {
     html += `<div class="asset-item"><strong>📸 Photos (${photos.length} total):</strong><div style="margin-top:6px; font-size:0.82rem;" class="muted">`;
     html += photos
       .slice(0, 24)
-      .map((p) => `${p.filename} (${p.orientation[0].toUpperCase()}, score ${p.quality_score})`)
+      .map((p) => `${escapeHtml(p.filename)} (${p.orientation[0].toUpperCase()}, score ${p.quality_score})`)
       .join(" • ");
     if (photos.length > 24) html += ` ... +${photos.length - 24} more`;
     html += `</div></div>`;
@@ -134,6 +529,7 @@ function renderCatalogView(catalog) {
 
 function renderTimelineTracks(timeline) {
   const container = document.getElementById("visualTimelineTracks");
+  if (!container) return;
   if (!timeline || !timeline.visual_track || timeline.visual_track.length === 0) {
     container.innerHTML = "<p class='muted'>No timeline loaded yet.</p>";
     return;
@@ -150,7 +546,7 @@ function renderTimelineTracks(timeline) {
       const width = Math.max(1.2, (c.duration / totalDur) * 100).toFixed(2);
       const name = c.source.split(/[\\/]/).pop();
       const roleTag = c.roll_type ? `[${c.roll_type.toUpperCase()}] ` : "";
-      return `<div class="track-block ${c.type}" style="left:${left}%; width:${width}%;" title="${c.id}: ${roleTag}${name} (${c.duration}s, scale=${c.shot_scale || 'medium'}) - ${c.narrative_note}">${roleTag}${name}</div>`;
+      return `<div class="track-block ${c.type}" style="left:${left}%; width:${width}%;" title="${escapeHtml(c.id)}: ${escapeHtml(roleTag + name)} (${c.duration}s) - ${escapeHtml(c.narrative_note)}">${escapeHtml(roleTag + name)}</div>`;
     })
     .join("");
 
@@ -159,7 +555,7 @@ function renderTimelineTracks(timeline) {
       const left = ((b.timeline_start / totalDur) * 100).toFixed(2);
       const width = Math.max(1.8, (b.duration / totalDur) * 100).toFixed(2);
       const name = b.source.split(/[\\/]/).pop();
-      return `<div class="track-block broll" style="left:${left}%; width:${width}%;" title="Track V2 Cutaway ${b.id}: ${name} (${b.duration}s) - ${b.narrative_note}">V2: ${name}</div>`;
+      return `<div class="track-block broll" style="left:${left}%; width:${width}%;" title="Track V2 Cutaway ${escapeHtml(b.id)}: ${escapeHtml(name)} (${b.duration}s) - ${escapeHtml(b.narrative_note)}">V2: ${escapeHtml(name)}</div>`;
     })
     .join("");
 
@@ -167,7 +563,7 @@ function renderTimelineTracks(timeline) {
     .map((fx) => {
       const left = ((fx.timeline_start / totalDur) * 100).toFixed(2);
       const width = Math.max(1.4, (fx.duration / totalDur) * 100).toFixed(2);
-      return `<div class="track-block vfx" style="left:${left}%; width:${width}%;" title="Stage-40 VFX (${fx.effect_type}) on ${fx.target_clip_id}">✨ ${fx.effect_type}</div>`;
+      return `<div class="track-block vfx" style="left:${left}%; width:${width}%;" title="Stage-40 VFX (${escapeHtml(fx.effect_type)}) on ${escapeHtml(fx.target_clip_id)}">✨ ${escapeHtml(fx.effect_type)}</div>`;
     })
     .join("");
 
@@ -175,7 +571,7 @@ function renderTimelineTracks(timeline) {
     .map((t) => {
       const left = ((t.timeline_start / totalDur) * 100).toFixed(2);
       const width = Math.max(2.0, (t.duration / totalDur) * 100).toFixed(2);
-      return `<div class="track-block title" style="left:${left}%; width:${width}%;" title="${t.style}: ${t.text}">${t.text}</div>`;
+      return `<div class="track-block title" style="left:${left}%; width:${width}%;" title="${escapeHtml(t.style)}: ${escapeHtml(t.text)}">${escapeHtml(t.text)}</div>`;
     })
     .join("");
 
@@ -185,7 +581,7 @@ function renderTimelineTracks(timeline) {
       const left = (((a.timeline_start || 0) / totalDur) * 100).toFixed(2);
       const width = Math.min(100, (dur / totalDur) * 100).toFixed(2);
       const name = a.source.split(/[\\/]/).pop();
-      return `<div class="track-block audio" style="left:${left}%; width:${width}%;" title="${name} (duck=${a.duck_under_dialogue}, duck_vol=${a.duck_volume})">🎵 ${name} (-14dB Auto-Duck)</div>`;
+      return `<div class="track-block audio" style="left:${left}%; width:${width}%;" title="${escapeHtml(name)}">🎵 ${escapeHtml(name)} (-14dB Auto-Duck)</div>`;
     })
     .join("");
 
@@ -210,8 +606,11 @@ function renderTimelineTracks(timeline) {
 function renderExportsView(exportsMap) {
   const exBox = document.getElementById("exportsList");
   const vidBox = document.getElementById("videoPlayerContainer");
+  if (!exBox || !vidBox) return;
+
   if (!exportsMap || Object.keys(exportsMap).length === 0) {
     exBox.innerHTML = "<p class='muted'>No exports generated yet.</p>";
+    vidBox.innerHTML = "<p class='muted'>Run the pipeline or load a rendered project to preview the final 4K HDR MP4 video here.</p>";
     return;
   }
 
@@ -227,25 +626,28 @@ function renderExportsView(exportsMap) {
   exBox.innerHTML = Object.entries(exportsMap)
     .map(([ext, fullPath]) => {
       const url = `/api/file?path=${encodeURIComponent(fullPath)}`;
-      return `<a class="export-link" href="${url}" target="_blank" download><span>${labels[ext] || ext.toUpperCase()}</span><span>Download</span></a>`;
+      return `<a class="export-link" href="${url}" target="_blank" download><span>${labels[ext] || ext.toUpperCase()}</span><span>Download &darr;</span></a>`;
     })
     .join("");
 
   if (exportsMap.mp4) {
     const videoUrl = `/api/file?path=${encodeURIComponent(exportsMap.mp4)}&t=${Date.now()}`;
-    vidBox.innerHTML = `<video controls src="${videoUrl}"></video>`;
+    vidBox.innerHTML = `<video controls preload="metadata" src="${videoUrl}"></video>`;
   }
 }
 
 async function refreshProjectState() {
   const projDir = document.getElementById("projectDirInput").value.trim();
-  setStatus("Loading state...");
   const res = await fetch(`/api/state?project_dir=${encodeURIComponent(projDir)}`);
+  if (!res.ok) return;
   const data = await res.json();
   setStatus(data.last_status || "Ready");
 
   if (data.registered_agents && registeredAgentsList.length === 0) {
     renderAgentRegistry(data.registered_agents);
+  }
+  if (data.job && data.job.stages && data.job.stages.length > 0) {
+    renderJobProgress(data.job);
   }
   if (data.agent_contracts) {
     renderContractsAndBus(data.agent_contracts);
@@ -270,11 +672,116 @@ async function refreshProjectState() {
   }
 }
 
-document.getElementById("btnRefreshState").addEventListener("click", refreshProjectState);
-document.getElementById("btnRefreshAgents").addEventListener("click", refreshProjectState);
+// ---------------------------------------------------------------------------
+// FOLDER BROWSER MODAL & NATIVE PICKER HANDLERS
+// ---------------------------------------------------------------------------
+async function openBrowserModal(path = null) {
+  const modal = document.getElementById("folderBrowserModal");
+  if (modal) modal.style.display = "flex";
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  const res = await fetch(`/api/fs/browse${query}`);
+  if (!res.ok) return;
+  const data = await res.json();
+  currentBrowserPath = data.current_path;
+  currentBrowserParent = data.parent_path;
 
-document.getElementById("btnRunMultiAgent").addEventListener("click", async () => {
-  setStatus("Running Coordinated Multi-Agent Pipeline (Stages 0 -> 50)...");
+  document.getElementById("browserCurrentPath").textContent = currentBrowserPath;
+  document.getElementById("browserFolderStats").textContent = `Direct files in this folder: 🎬 ${data.direct_videos} videos • 📸 ${data.direct_photos} photos`;
+
+  const listEl = document.getElementById("browserSubdirList");
+  if (!data.subdirectories || data.subdirectories.length === 0) {
+    listEl.innerHTML = `<div class="muted" style="padding:10px;">No subfolders inside this directory. Click "✓ Use This Folder" above to select it.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = data.subdirectories
+    .map(
+      (sub) => `
+      <div class="browser-folder-row" data-subpath="${escapeHtml(sub.path)}">
+        <span>📁 <strong>${escapeHtml(sub.name)}</strong></span>
+        <span class="muted">🎬 ${sub.video_count} videos • 📸 ${sub.photo_count} photos &rarr;</span>
+      </div>`
+    )
+    .join("");
+
+  listEl.querySelectorAll(".browser-folder-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      openBrowserModal(row.dataset.subpath);
+    });
+  });
+}
+
+document.getElementById("btnBrowseModal")?.addEventListener("click", () => {
+  const cur = document.getElementById("mediaDirInput").value.trim();
+  openBrowserModal(cur || null);
+});
+
+document.getElementById("btnCloseBrowserModal")?.addEventListener("click", () => {
+  document.getElementById("folderBrowserModal").style.display = "none";
+});
+
+document.getElementById("btnBrowserUp")?.addEventListener("click", () => {
+  if (currentBrowserParent) openBrowserModal(currentBrowserParent);
+});
+
+document.getElementById("btnSelectCurrentBrowserFolder")?.addEventListener("click", async () => {
+  document.getElementById("folderBrowserModal").style.display = "none";
+  if (currentBrowserPath) {
+    await selectMediaLibrary(currentBrowserPath, null, true);
+  }
+});
+
+document.getElementById("btnPickNativeFolder")?.addEventListener("click", async () => {
+  setStatus("Opening OS Folder Picker...");
+  const cur = document.getElementById("mediaDirInput").value.trim();
+  const res = await fetch(`/api/fs/pick-folder?initial_dir=${encodeURIComponent(cur)}`, { method: "POST" });
+  const data = await res.json();
+  if (!data.cancelled && data.selected_path) {
+    await selectMediaLibrary(data.selected_path, data.library?.suggested_project_dir, true);
+  } else if (data.error) {
+    setStatus(data.error);
+    openBrowserModal(cur || null);
+  } else {
+    setStatus("Ready");
+  }
+});
+
+document.getElementById("btnInspectFolder")?.addEventListener("click", async () => {
+  const cur = document.getElementById("mediaDirInput").value.trim();
+  if (cur) await selectMediaLibrary(cur, null, true);
+});
+
+document.getElementById("btnRefreshState")?.addEventListener("click", refreshProjectState);
+document.getElementById("btnRefreshAgents")?.addEventListener("click", refreshProjectState);
+
+// ---------------------------------------------------------------------------
+// START ASYNC PIPELINE JOB & POLL PROGRESS
+// ---------------------------------------------------------------------------
+async function pollActiveJob() {
+  try {
+    const res = await fetch("/api/jobs/status");
+    if (!res.ok) return;
+    const job = await res.json();
+    renderJobProgress(job);
+    setStatus(job.last_status || "Running...");
+
+    if (job.status === "completed" || job.status === "error") {
+      if (activePollTimer) {
+        clearInterval(activePollTimer);
+        activePollTimer = null;
+      }
+      await refreshProjectState();
+      if (job.status === "completed") {
+        const showcase = document.getElementById("showcaseSection");
+        if (showcase) showcase.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }
+  } catch (err) {
+    console.error("Poll error:", err);
+  }
+}
+
+document.getElementById("btnRunMultiAgent")?.addEventListener("click", async () => {
   const enabledOptional = [];
   const disabledRoles = [];
   document.querySelectorAll(".agent-role-checkbox").forEach((cb) => {
@@ -289,6 +796,7 @@ document.getElementById("btnRunMultiAgent").addEventListener("click", async () =
 
   const [w, h] = document.getElementById("resolutionSelect").value.split("x").map(Number);
   const promptText = document.getElementById("agentPromptInput").value.trim();
+  const shouldRender = document.getElementById("renderVideoCheckbox")?.checked ?? true;
 
   const payload = {
     media_dir: document.getElementById("mediaDirInput").value.trim(),
@@ -296,23 +804,27 @@ document.getElementById("btnRunMultiAgent").addEventListener("click", async () =
     user_prompt: promptText,
     extra_audio_path: document.getElementById("bgmPathInput").value.trim() || null,
     interview_answers: {
-      narrative_style: document.getElementById("intakeNarrativeStyle").value,
-      dialogue_preference: document.getElementById("intakeDialoguePref").value,
-      photo_mode: document.getElementById("intakePhotoMode").value,
-      target_duration_sec: document.getElementById("intakeTargetDuration").value,
+      narrative_style: currentIntakeAnswers.narrative_style || document.getElementById("intakeNarrativeStyle").value,
+      dialogue_preference:
+        currentIntakeAnswers.dialogue_preference || document.getElementById("intakeDialoguePref").value,
+      photo_mode: currentIntakeAnswers.photo_mode || document.getElementById("intakePhotoMode").value,
+      bgm_mood: currentIntakeAnswers.bgm_mood || "auto_match",
+      target_duration_sec:
+        currentIntakeAnswers.target_duration_sec || document.getElementById("intakeTargetDuration").value,
       must_include_topics: promptText,
     },
-    enabled_optional_roles: enabledOptional,
+    enabled_optional_roles: enabledOptional.length ? enabledOptional : ["vfx_designer"],
     disabled_roles: disabledRoles,
     width: w,
     height: h,
     fps: 30,
     hdr: true,
-    use_antigravity: document.getElementById("useAgStep1").checked,
-    render_video: false,
+    use_antigravity: document.getElementById("useAgStep1")?.checked ?? false,
+    render_video: shouldRender,
   };
 
-  const res = await fetch("/api/agents/run", {
+  setStatus("Starting Multi-Agent Pipeline...");
+  const res = await fetch("/api/jobs/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -322,34 +834,24 @@ document.getElementById("btnRunMultiAgent").addEventListener("click", async () =
     setStatus(`Error: ${err.detail}`);
     return;
   }
-  const data = await res.json();
-  if (data.agent_contracts) {
-    renderContractsAndBus(data.agent_contracts);
-  }
-  if (data.timeline_yaml) {
-    document.getElementById("timelineYamlEditor").value = data.timeline_yaml;
-  }
-  if (data.timeline) {
-    renderTimelineTracks(data.timeline);
-  }
-  if (data.storyboard_md) {
-    document.getElementById("storyboardPreview").textContent = data.storyboard_md;
-  }
-  if (data.exports) {
-    renderExportsView(data.exports);
-  }
-  setStatus("Multi-Agent Pipeline Complete! Inspect contracts or switch to Tab 2/3.");
+  const job = await res.json();
+  renderJobProgress(job);
+
+  if (activePollTimer) clearInterval(activePollTimer);
+  activePollTimer = setInterval(pollActiveJob, 500);
 });
 
-document.getElementById("btnAnalyze").addEventListener("click", async () => {
-  setStatus("Step 1: Analyzing media & transcribing dialogues...");
+// ---------------------------------------------------------------------------
+// STANDALONE INSPECTOR TAB HANDLERS
+// ---------------------------------------------------------------------------
+document.getElementById("btnAnalyze")?.addEventListener("click", async () => {
+  setStatus("Analyzing media & transcribing dialogues...");
   const payload = {
     media_dir: document.getElementById("mediaDirInput").value.trim(),
     project_dir: document.getElementById("projectDirInput").value.trim(),
     whisper_model: document.getElementById("whisperModelSelect").value,
     extra_audio_path: document.getElementById("bgmPathInput").value.trim() || null,
     use_antigravity: document.getElementById("useAgStep1").checked,
-    user_hint: document.getElementById("storyPromptInput").value.trim(),
   };
   const res = await fetch("/api/analyze", {
     method: "POST",
@@ -364,10 +866,11 @@ document.getElementById("btnAnalyze").addEventListener("click", async () => {
   const data = await res.json();
   document.getElementById("annotationsYamlEditor").value = data.annotations_yaml;
   renderCatalogView(data.catalog);
-  setStatus("Step 1 Complete!");
+  setStatus("Media Analysis Complete!");
 });
 
-document.getElementById("btnSaveAnnotations").addEventListener("click", async () => {
+document.getElementById("btnSaveAnnotations")?.addEventListener("click", async () => {
+  setStatus("Saving annotations.yaml...");
   const payload = {
     project_dir: document.getElementById("projectDirInput").value.trim(),
     yaml_text: document.getElementById("annotationsYamlEditor").value,
@@ -380,19 +883,20 @@ document.getElementById("btnSaveAnnotations").addEventListener("click", async ()
   if (res.ok) {
     const data = await res.json();
     renderCatalogView(data.catalog);
-    setStatus("Saved annotations.yaml");
+    setStatus("Saved annotations.yaml!");
   }
 });
 
-document.getElementById("btnGeneratePlan").addEventListener("click", async () => {
-  setStatus("Step 2: Generating AI Story Plan & Timeline...");
+document.getElementById("btnGeneratePlan")?.addEventListener("click", async () => {
+  setStatus("Generating baseline timeline...");
   const [w, h] = document.getElementById("resolutionSelect").value.split("x").map(Number);
   const payload = {
     project_dir: document.getElementById("projectDirInput").value.trim(),
-    user_prompt: document.getElementById("storyPromptInput").value.trim(),
+    user_prompt: document.getElementById("agentPromptInput").value.trim(),
     width: w,
     height: h,
     fps: 30,
+    hdr: true,
     photo_mode: document.getElementById("photoModeSelect").value,
     use_antigravity: document.getElementById("useAgStep1").checked,
   };
@@ -410,10 +914,11 @@ document.getElementById("btnGeneratePlan").addEventListener("click", async () =>
   document.getElementById("timelineYamlEditor").value = data.timeline_yaml;
   document.getElementById("storyboardPreview").textContent = data.storyboard_md;
   renderTimelineTracks(data.timeline);
-  setStatus("Step 2 Timeline Generated!");
+  setStatus("Baseline Timeline Ready!");
 });
 
-document.getElementById("btnSaveTimeline").addEventListener("click", async () => {
+document.getElementById("btnSaveTimeline")?.addEventListener("click", async () => {
+  setStatus("Validating & saving timeline.yaml...");
   const payload = {
     project_dir: document.getElementById("projectDirInput").value.trim(),
     yaml_text: document.getElementById("timelineYamlEditor").value,
@@ -423,19 +928,19 @@ document.getElementById("btnSaveTimeline").addEventListener("click", async () =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (res.ok) {
-    const data = await res.json();
-    document.getElementById("storyboardPreview").textContent = data.storyboard_md;
-    renderTimelineTracks(data.timeline);
-    setStatus("Saved & validated timeline.yaml!");
-  } else {
+  if (!res.ok) {
     const err = await res.json();
     setStatus(`Validation Error: ${err.detail}`);
+    return;
   }
+  const data = await res.json();
+  document.getElementById("storyboardPreview").textContent = data.storyboard_md;
+  renderTimelineTracks(data.timeline);
+  setStatus("Saved timeline.yaml & updated NLE exports!");
 });
 
-document.getElementById("btnRenderVideo").addEventListener("click", async () => {
-  setStatus("Step 3: Rendering 4K HDR MP4 with FFmpeg & Pillow...");
+document.getElementById("btnRenderVideo")?.addEventListener("click", async () => {
+  setStatus("Rendering 4K HDR MP4 video...");
   const payload = {
     project_dir: document.getElementById("projectDirInput").value.trim(),
     output_filename: "final_story.mp4",
@@ -451,7 +956,31 @@ document.getElementById("btnRenderVideo").addEventListener("click", async () => 
     return;
   }
   await refreshProjectState();
-  setStatus("Step 3 Render Complete!");
+  setStatus("Render Complete!");
 });
 
-window.addEventListener("DOMContentLoaded", refreshProjectState);
+// ---------------------------------------------------------------------------
+// INITIALIZE STUDIO ON PAGE LOAD
+// ---------------------------------------------------------------------------
+window.addEventListener("DOMContentLoaded", async () => {
+  try {
+    const libRes = await fetch("/api/fs/libraries");
+    if (libRes.ok) {
+      const libData = await libRes.json();
+      renderDiscoveredLibraries(libData.libraries || []);
+      if (libData.libraries && libData.libraries.length > 0) {
+        const firstLib = libData.libraries[0];
+        await selectMediaLibrary(firstLib.media_dir, firstLib.suggested_project_dir, true);
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn("Could not load discovered libraries:", e);
+  }
+  const defaultMedia = document.getElementById("mediaDirInput")?.value.trim();
+  if (defaultMedia) {
+    await selectMediaLibrary(defaultMedia, null, false);
+  } else {
+    await refreshProjectState();
+  }
+});
