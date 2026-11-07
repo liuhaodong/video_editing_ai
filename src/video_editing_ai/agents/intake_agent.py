@@ -6,7 +6,12 @@ from pathlib import Path
 import re
 from typing import Any, Optional
 
-from ..analyzer.media_probe import AUDIO_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
+from ..analyzer.media_probe import (
+    AUDIO_EXTENSIONS,
+    PHOTO_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    iter_media_files_recursive,
+)
 from ..models.schema import CreativeBrief, InterviewQuestion
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
 
@@ -15,21 +20,20 @@ def generate_intake_questions(
     media_dir: str | Path,
     initial_prompt: str = "",
 ) -> list[InterviewQuestion]:
-    """Pre-scan the raw media folder and generate context-aware client discovery questions."""
+    """Pre-scan the raw media folder (recursively) and generate context-aware client discovery questions."""
     m_dir = Path(media_dir)
     v_count = 0
     p_count = 0
     a_count = 0
     if m_dir.exists() and m_dir.is_dir():
-        for f in m_dir.iterdir():
-            if f.is_file():
-                ext = f.suffix.lower()
-                if ext in VIDEO_EXTENSIONS:
-                    v_count += 1
-                elif ext in PHOTO_EXTENSIONS:
-                    p_count += 1
-                elif ext in AUDIO_EXTENSIONS:
-                    a_count += 1
+        for f in iter_media_files_recursive(m_dir):
+            ext = f.suffix.lower()
+            if ext in VIDEO_EXTENSIONS:
+                v_count += 1
+            elif ext in PHOTO_EXTENSIONS:
+                p_count += 1
+            elif ext in AUDIO_EXTENSIONS:
+                a_count += 1
 
     media_note = f"({v_count} videos, {p_count} photos detected)" if (v_count or p_count) else ""
     return [
@@ -142,7 +146,12 @@ class ClientIntakeAgent(BaseEditingAgent):
 
         # Derive project title from user_prompt
         project_title = "Family_Travel_Story"
-        if blackboard.user_prompt.strip():
+        prompt_low = blackboard.user_prompt.lower()
+        if "louvre" in prompt_low:
+            project_title = "Louvre_Museum_Paris_Day_Trip"
+        elif "halloween" in prompt_low or "gilroy" in prompt_low:
+            project_title = "Halloween_Park_Family_Night"
+        elif blackboard.user_prompt.strip():
             words = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff\s_-]", "", blackboard.user_prompt).split()
             if words:
                 project_title = "_".join(words[:5])

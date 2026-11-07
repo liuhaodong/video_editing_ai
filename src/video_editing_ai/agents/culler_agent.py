@@ -262,18 +262,19 @@ class CullerAgent(BaseEditingAgent):
                     )
                 )
             else:
-                # Extract 2.0s - 4.5s Golden Window
+                # Extract 2.0s - 4.5s Golden Window (or up to 6.8s anchor window for long clips in compact sets)
+                win_cap = 6.8 if (vid.duration >= 8.0 and len(sorted_videos) <= 6) else max_broll_sec
                 best_in = 0.0
-                best_out = min(vid.duration, max_broll_sec)
+                best_out = min(vid.duration, win_cap)
                 if vid.scenes:
                     best_sc = max(vid.scenes, key=lambda s: s.quality_score)
                     sc_mid = 0.5 * (best_sc.start_time + best_sc.end_time)
-                    half_w = 0.5 * min(max_broll_sec, max(2.8, vid.duration))
+                    half_w = 0.5 * min(win_cap, max(2.8, vid.duration))
                     best_in = round(max(0.0, min(vid.duration - min(vid.duration, 2.5), sc_mid - half_w)), 2)
-                    best_out = round(min(vid.duration, best_in + min(max_broll_sec, vid.duration)), 2)
-                elif vid.duration > max_broll_sec:
-                    best_in = round(max(0.0, (vid.duration - max_broll_sec) * 0.35), 2)
-                    best_out = round(min(vid.duration, best_in + max_broll_sec), 2)
+                    best_out = round(min(vid.duration, best_in + min(win_cap, vid.duration)), 2)
+                elif vid.duration > win_cap:
+                    best_in = round(max(0.0, (vid.duration - win_cap) * 0.35), 2)
+                    best_out = round(min(vid.duration, best_in + win_cap), 2)
 
                 is_disc = avg_scene_q < 3.0
                 if is_disc:
@@ -347,7 +348,8 @@ class CullerAgent(BaseEditingAgent):
                 )
             )
 
-        target_active_photos = min(len(photo_candidates), 14)
+        max_photos_cap = 16 if len(photo_candidates) >= 30 else 14
+        target_active_photos = min(len(photo_candidates), max_photos_cap)
         if len(photo_candidates) > target_active_photos and target_active_photos > 0:
             bucket_size = len(photo_candidates) / target_active_photos
             chosen_ids: set[str] = set()

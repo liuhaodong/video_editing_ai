@@ -204,8 +204,6 @@ def render_photo_clip(
                 "arib-std-b67",
                 "-colorspace",
                 "bt2020nc",
-                "-bsf:v",
-                "hevc_metadata=colour_primaries=9:transfer_characteristics=18:matrix_coefficients=9",
                 "-tag:v",
                 "hvc1",
             ]

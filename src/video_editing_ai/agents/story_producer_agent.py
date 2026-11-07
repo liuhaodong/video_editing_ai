@@ -60,8 +60,47 @@ class StoryProducerAgent(BaseEditingAgent):
         is_halloween_park = any(
             k in all_text_lower for k in ("halloween", "gilroy", "pumpkin", "trick", "万圣", "南瓜")
         )
+        is_louvre_paris = any(
+            k in all_text_lower
+            for k in ("louvre", "paris", "pyramid", "museum", "卢浮宫", "巴黎")
+        ) or "louvre" in str(blackboard.media_dir).lower()
 
-        if is_halloween_park:
+        if is_louvre_paris:
+            chapter_headers = [
+                (
+                    "chap_01",
+                    "Act I - Arrival at the Louvre Pyramid",
+                    "卢浮宫金字塔 · 晨光初见",
+                    "Cour Napoleon & Glass Pyramid",
+                    "morning",
+                    "Iconic arrival at I. M. Pei's glass pyramid and sunlit palace courtyard.",
+                ),
+                (
+                    "chap_02",
+                    "Act II - Grand Galleries & Masterpieces",
+                    "艺术长廊 · 经典名作",
+                    "Denon & Sully Galleries",
+                    "afternoon",
+                    "Exploring gilded ceilings, Renaissance masterpieces, and family awe.",
+                ),
+                (
+                    "chap_03",
+                    "Act III - Sculptures & Palace Courtyards",
+                    "雕塑庭院 · 光影漫步",
+                    "Richelieu Wing & Marly Courtyard",
+                    "afternoon",
+                    "Marble sculptures under vaulted glass roofs and candid family portraits.",
+                ),
+                (
+                    "chap_04",
+                    "Act IV - Parisian Memories & Finale",
+                    "巴黎印记 · 难忘一日",
+                    "Louvre Palace Finale",
+                    "twilight",
+                    "Golden-hour reflections, keepsake portraits, and warm closing moments in Paris.",
+                ),
+            ]
+        elif is_halloween_park:
             chapter_headers = [
                 (
                     "chap_01",
@@ -155,9 +194,14 @@ class StoryProducerAgent(BaseEditingAgent):
             c_photos = p_buckets[c_idx]
 
             # Build Track V2 B-Roll cutaway anchor map for A-roll clips (>= min_aroll_cutaway_dur)
+            # or long B-roll anchor clips (>= 6.0s) when the chapter has ample still photos
             broll_anchor_map: dict[str, list[str]] = {}
             for v in c_vids:
-                if v.roll_type == "a_roll" and v.duration >= min_aroll_cutaway_dur and len(c_photos) >= 1:
+                eligible_for_cutaway = (
+                    (v.roll_type == "a_roll" and v.duration >= min_aroll_cutaway_dur and len(c_photos) >= 1)
+                    or (v.duration >= 6.0 and len(c_photos) >= 3 and not broll_anchor_map)
+                )
+                if eligible_for_cutaway:
                     cutaway_candidate = next(
                         (p for p in c_photos if p.subclip_id not in used_as_v2_cutaway),
                         None,

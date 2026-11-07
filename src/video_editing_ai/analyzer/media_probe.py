@@ -266,17 +266,39 @@ def _estimate_focal_point(img: Image.Image) -> tuple[float, float]:
     return (0.5, 0.5)
 
 
-def _extract_exif_datetime(img: Image.Image) -> Optional[str]:
+def _extract_exif_datetime(img: Image.Image, photo_path: Optional[Path] = None) -> Optional[str]:
+    raw_dt: Optional[str] = None
     try:
         exif = img.getexif()
-        if not exif:
-            return None
-        for tag_id, val in exif.items():
-            tag = ExifTags.TAGS.get(tag_id, tag_id)
-            if tag in ("DateTimeOriginal", "DateTime") and val:
-                return str(val)
+        if exif:
+            # 1. Check EXIF Sub-IFD (0x8769) for DateTimeOriginal (36867) or DateTimeDigitized (36868)
+            try:
+                exif_ifd = exif.get_ifd(0x8769)
+                if exif_ifd:
+                    raw_dt = exif_ifd.get(36867) or exif_ifd.get(36868)
+            except Exception:
+                pass
+            # 2. Fallback to top-level DateTimeOriginal (36867) or DateTime (306)
+            if not raw_dt:
+                for tag_id in (36867, 36868, 306):
+                    if exif.get(tag_id):
+                        raw_dt = str(exif.get(tag_id))
+                        break
     except Exception:
         pass
+
+    if raw_dt:
+        cleaned = str(raw_dt).strip()
+        # Normalize EXIF "YYYY:MM:DD HH:MM:SS" -> ISO "YYYY-MM-DDTHH:MM:SS"
+        if len(cleaned) >= 19 and cleaned[4] == ":" and cleaned[7] == ":":
+            cleaned = f"{cleaned[:4]}-{cleaned[5:7]}-{cleaned[8:10]}T{cleaned[11:19]}"
+        return cleaned
+
+    if photo_path is not None:
+        m = re.search(r"(20\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", photo_path.stem)
+        if m:
+            y, mo, d, hh, mm, ss = m.groups()
+            return f"{y}-{mo}-{d}T{hh}:{mm}:{ss}"
     return None
 
 
@@ -284,9 +306,24 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
     """Open a photo (.HEIC, .JPG, .PNG), extract EXIF/dimensions, save RGB preview JPEG, and compute focal point."""
     previews_dir.mkdir(parents=True, exist_ok=True)
     img = Image.open(photo_path)
-    creation_time = _extract_exif_datetime(img)
+    creation_time = _extract_exif_datetime(img, photo_path)
+    orig_w, orig_h = img.size
+    try:
+        exif_orient = img.getexif().get(274, 1)
+        if exif_orient in (5, 6, 7, 8):
+            orig_w, orig_h = orig_h, orig_w
+    except Exception:
+        pass
+
+    # Use DCT draft mode on large JPEGs for 15x faster decoding while preserving full-res path for 4K rendering
+    try:
+        if max(img.size) > 1920:
+            img.draft("RGB", (1280, 1280))
+    except Exception:
+        pass
+
     img = ImageOps.exif_transpose(img).convert("RGB")
-    w, h = img.size
+    w, h = orig_w, orig_h
 
     if w > h * 1.05:
         orientation = "landscape"
@@ -298,8 +335,8 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
     preview_path = previews_dir / f"{photo_path.stem}.jpg"
     if not preview_path.exists():
         prev = img.copy()
-        prev.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-        prev.save(preview_path, "JPEG", quality=90)
+        prev.thumbnail((1280, 1280), Image.Resampling.BILINEAR)
+        prev.save(preview_path, "JPEG", quality=88)
 
     focal = _estimate_focal_point(img)
     rec_effect = "gallery_ken_burns" if orientation == "portrait" else "zoom_in"
@@ -329,6 +366,7 @@ def generate_contact_sheets(
     rows: int = 4,
     cell_w: int = 480,
     cell_h: int = 270,
+    max_photo_samples: int = 48,
 ) -> list[str]:
     """Generate labeled contact sheet grids combining video keyframes and photo previews for rapid AI/user inspection."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -340,7 +378,12 @@ def generate_contact_sheets(
                 label = f"{v.filename} [{sc.start_time:.1f}-{sc.end_time:.1f}s]"
                 items.append((label, Path(sc.keyframe_path)))
 
-    for p in catalog.photos:
+    photos_to_show = catalog.photos
+    if len(photos_to_show) > max_photo_samples and max_photo_samples > 0:
+        step = len(photos_to_show) / max_photo_samples
+        photos_to_show = [photos_to_show[int(i * step)] for i in range(max_photo_samples)]
+
+    for p in photos_to_show:
         img_p = Path(p.preview_path) if p.preview_path and Path(p.preview_path).exists() else Path(p.path)
         if img_p.exists():
             label = f"{p.filename} ({p.orientation[0].upper()})"
@@ -383,22 +426,40 @@ def generate_contact_sheets(
     return sheet_paths
 
 
+def iter_media_files_recursive(media_root: Path) -> list[Path]:
+    """Recursively scan media_root for media files, ignoring cache/hidden directories."""
+    ignored_dirs = {"cache", "render_cache", ".git", "__pycache__", "node_modules"}
+    seen: set[Path] = set()
+    result: list[Path] = []
+    if not media_root.exists():
+        return result
+    for p in media_root.rglob("*"):
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(media_root).parts[:-1]
+        if any(part.lower() in ignored_dirs or part.startswith(".") for part in rel_parts):
+            continue
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            result.append(p)
+    result.sort(key=lambda p: p.name.lower())
+    return result
+
+
 def build_initial_catalog(
     media_dir: str | Path,
     cache_dir: str | Path,
     extra_audio_paths: Optional[list[str | Path]] = None,
 ) -> MediaCatalog:
-    """Scan media_dir for videos, photos, and audio; extract keyframes, previews, and contact sheets."""
+    """Scan media_dir (recursively) for videos, photos, and audio; extract keyframes, previews, and contact sheets."""
     media_root = Path(media_dir).resolve()
     cache_root = Path(cache_dir).resolve()
     keyframes_dir = cache_root / "keyframes"
     previews_dir = cache_root / "photos"
     sheets_dir = cache_root / "contact_sheets"
 
-    files = sorted(
-        [p for p in media_root.iterdir() if p.is_file()],
-        key=lambda p: p.name.lower(),
-    )
+    files = iter_media_files_recursive(media_root)
 
     videos: list[VideoAsset] = []
     photos: list[PhotoAsset] = []

@@ -52,12 +52,20 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
     broll_counter = 1
 
     # Opening card on Track V3
+    title_low = paper.project_title.lower()
+    if "louvre" in title_low or "paris" in title_low:
+        opening_sub = "PARIS · LOUVRE MUSEUM · 4K HDR FAMILY STORY | 巴黎卢浮宫 · 家庭旅行记忆"
+    elif "halloween" in title_low or "gilroy" in title_low:
+        opening_sub = "GILROY GARDENS · 4K HDR FAMILY MEMORIES | 万圣夜游园 · 温暖家庭时光"
+    else:
+        opening_sub = "4K 10-BIT HLG HDR · FAMILY TRAVEL STORY | 珍藏美好家庭时光"
+
     title_track.append(
         TitleOverlayItem(
             id="title_opening",
             style="opening_card",
             text=paper.project_title.replace("_", " ").upper(),
-            subtitle=brief.raw_user_prompt[:56] if (brief and brief.raw_user_prompt) else "4K HDR Family Travel Story",
+            subtitle=opening_sub,
             timeline_start=0.4,
             duration=3.8,
             fade_in=0.4,
@@ -367,15 +375,17 @@ class MontageEditorAgent(BaseEditingAgent):
             v2_parent_info.append((b_item, parent, rel_offset))
 
         # Snap B-roll and photo durations on Track V1 to musical beat intervals
+        v1_with_v2_cutaway = {p.id for _, p, _ in v2_parent_info if p is not None}
         snapped_count = 0
         scale_cycle = ["wide", "medium", "closeup"]
         for idx, item in enumerate(timeline.visual_track):
             if item.roll_type in ("b_roll", "still"):
-                target_d = min(max_broll, item.duration)
+                cap = max(max_broll, 7.0) if item.id in v1_with_v2_cutaway else max_broll
+                target_d = min(cap, item.duration)
                 if beat_grid is not None:
-                    snapped_d = beat_grid.snap_duration_to_beat(target_d, min_dur=2.2, max_dur=max_broll)
+                    snapped_d = beat_grid.snap_duration_to_beat(target_d, min_dur=2.2, max_dur=cap)
                 else:
-                    snapped_d = round(min(max_broll, max(2.4, target_d)), 2)
+                    snapped_d = round(min(cap, max(2.4, target_d)), 2)
 
                 item.duration = snapped_d
                 item.source_out = round(item.source_in + snapped_d, 2)

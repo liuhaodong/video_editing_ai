@@ -21,7 +21,9 @@ env/
 venv/
 
 # Generated project workspaces, caches, and heavy media outputs
+*_project/
 gilroy_halloween_project/
+louvre_day_trip_project/
 workspace_project/
 render_cache/
 cache/

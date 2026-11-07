@@ -45,9 +45,14 @@ class ShowrunnerAgent(BaseEditingAgent):
 
         entries: list[PacingAuditEntry] = []
 
-        # Rule 1: Trim any pure B-roll video clip exceeding max_broll_duration_sec
+        # Rule 1: Trim any pure B-roll video clip exceeding max_broll_duration_sec (unless covered by a V2 cutaway)
         for item in timeline.visual_track:
-            if item.roll_type == "b_roll" and item.duration > max_broll:
+            has_v2_cover = any(
+                item.timeline_start <= b.timeline_start < (item.timeline_start + item.duration)
+                for b in timeline.broll_track
+            )
+            effective_cap = max(max_broll, 7.0) if has_v2_cover else max_broll
+            if item.roll_type == "b_roll" and item.duration > effective_cap:
                 old_d = item.duration
                 new_d = (
                     beat_grid.snap_duration_to_beat(max_broll, min_dur=2.4, max_dur=max_broll)
