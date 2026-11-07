@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Optional
 
 from rich.console import Console
@@ -308,6 +309,39 @@ def cmd_serve(
     )
     web_app = create_app(default_project_dir=project_dir)
     uvicorn.run(web_app, host=host, port=port)
+
+
+def sync_skill_to_global(dest_root: Optional[Path] = None) -> Path:
+    """Synchronize the workspace .agent/skills/ai-video-editor skill to the global Antigravity skills folder."""
+    repo_root = Path(__file__).resolve().parents[2]
+    src_skill_dir = repo_root / ".agent" / "skills" / "ai-video-editor"
+    if not src_skill_dir.exists():
+        raise FileNotFoundError(f"Workspace skill directory not found: {src_skill_dir}")
+
+    target_base = dest_root or (Path.home() / ".gemini" / "config" / "skills")
+    target_skill_dir = target_base / "ai-video-editor"
+    target_base.mkdir(parents=True, exist_ok=True)
+    if target_skill_dir.exists():
+        shutil.rmtree(target_skill_dir)
+    shutil.copytree(src_skill_dir, target_skill_dir)
+    return target_skill_dir
+
+
+@app.command("sync-skill")
+def cmd_sync_skill(
+    dest_dir: Optional[Path] = typer.Option(
+        None,
+        "--dest-dir",
+        help="Optional custom global skills parent directory (defaults to ~/.gemini/config/skills)",
+    ),
+) -> None:
+    """Install / synchronize the ai-video-editor skill globally for Antigravity (~/.gemini/config/skills/ai-video-editor)."""
+    installed_path = sync_skill_to_global(dest_dir)
+    console.print(
+        f"[bold green][OK] Installed & synchronized Antigravity Skill globally![/bold green]\n"
+        f"  - Workspace Skill: [underline]{Path(__file__).resolve().parents[2] / '.agent/skills/ai-video-editor'}[/underline]\n"
+        f"  - Global Skill:    [underline]{installed_path}[/underline]"
+    )
 
 
 if __name__ == "__main__":

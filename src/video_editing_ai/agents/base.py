@@ -176,6 +176,78 @@ class PipelineBlackboard:
         snapshot_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
         return snapshot_path
 
+    def load_existing_contracts(self) -> None:
+        """Hydrate blackboard state from existing JSON/YAML contract files in project_dir."""
+        p = self.project_dir
+        if (p / "annotations.yaml").exists() and self.catalog is None:
+            try:
+                self.catalog = MediaCatalog.from_yaml(p / "annotations.yaml")
+            except Exception:
+                pass
+        if (p / "creative_brief.json").exists() and self.creative_brief is None:
+            try:
+                self.creative_brief = CreativeBrief.from_json_file(p / "creative_brief.json")
+                if not self.user_prompt and self.creative_brief.raw_user_prompt:
+                    self.user_prompt = self.creative_brief.raw_user_prompt
+            except Exception:
+                pass
+        if (p / "bgm_selection.json").exists() and self.bgm_selection is None:
+            try:
+                self.bgm_selection = BGMSelectionReport.from_json_file(p / "bgm_selection.json")
+            except Exception:
+                pass
+        if (p / "media_index.json").exists() and self.media_index is None:
+            try:
+                self.media_index = MediaIndex.from_json_file(p / "media_index.json")
+            except Exception:
+                pass
+        if (p / "photo_curation.json").exists() and self.photo_curation is None:
+            try:
+                self.photo_curation = PhotoCurationReport.from_json_file(p / "photo_curation.json")
+            except Exception:
+                pass
+        if (p / "beat_grid.json").exists() and self.beat_grid is None:
+            try:
+                self.beat_grid = BeatGrid.from_json_file(p / "beat_grid.json")
+            except Exception:
+                pass
+        if (p / "paper_edit.json").exists() and self.paper_edit is None:
+            try:
+                self.paper_edit = PaperEdit.from_json_file(p / "paper_edit.json")
+            except Exception:
+                pass
+        if (p / "timeline.yaml").exists() and self.timeline is None:
+            try:
+                self.timeline = EditTimeline.from_yaml(p / "timeline.yaml")
+            except Exception:
+                pass
+        if (p / "pacing_audit.json").exists() and self.pacing_audit is None:
+            try:
+                self.pacing_audit = PacingAuditReport.from_json_file(p / "pacing_audit.json")
+            except Exception:
+                pass
+        if (p / "director_review.json").exists() and self.director_review is None:
+            try:
+                self.director_review = DirectorReviewReport.from_json_file(p / "director_review.json")
+            except Exception:
+                pass
+        if (p / "vfx_manifest.json").exists() and "vfx_manifest.json" not in self.custom_artifacts:
+            try:
+                self.custom_artifacts["vfx_manifest.json"] = json.loads(
+                    (p / "vfx_manifest.json").read_text(encoding="utf-8")
+                )
+            except Exception:
+                pass
+        if (p / "blackboard.json").exists() and not self.messages:
+            try:
+                bb_doc = json.loads((p / "blackboard.json").read_text(encoding="utf-8"))
+                self.executed_agents = list(bb_doc.get("executed_agents") or [])
+                self.messages = [
+                    AgentCoordinationMessage.model_validate(m) for m in (bb_doc.get("messages") or [])
+                ]
+            except Exception:
+                pass
+
 
 class BaseEditingAgent(ABC):
     """Abstract base class for all core and pluggable video editing sub-agents."""

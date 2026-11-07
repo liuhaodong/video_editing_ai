@@ -419,3 +419,119 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
     assert r_reset.json()["removed_files_count"] >= 5
     assert not (job_proj / "timeline.yaml").exists()
     assert (job_proj / "project_meta.json").exists()
+
+
+def test_antigravity_skill_cli_and_global_sync(tmp_path: Path, sample_media_dir: Path) -> None:
+    """Verify the Antigravity Skill package (SKILL.md, references, scripts/ai_video_studio_skill.py, and global sync)."""
+    import sys
+    from video_editing_ai.cli import sync_skill_to_global
+
+    installed_skill = sync_skill_to_global(dest_root=tmp_path / "global_skills")
+    assert (installed_skill / "SKILL.md").exists()
+    script_path = installed_skill / "scripts" / "ai_video_studio_skill.py"
+    assert script_path.exists()
+    assert len(list((installed_skill / "references").glob("*.md"))) >= 11
+
+    skill_proj = tmp_path / "skill_cli_proj"
+
+    # 1. inspect-library
+    res_insp = subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "inspect-library",
+            "--media-dir",
+            str(sample_media_dir),
+            "--project-dir",
+            str(skill_proj),
+            "--prompt",
+            "Family museum trip",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "Director Recommends:" in res_insp.stdout
+    assert (skill_proj / "library_inspection.json").exists()
+
+    # 2. intake-refine
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "intake-refine",
+            "--media-dir",
+            str(sample_media_dir),
+            "--project-dir",
+            str(skill_proj),
+            "--prompt",
+            "Cinematic 3 minute museum keepsake with classical piano",
+            "--duration",
+            "180",
+            "--photo-mode",
+            "parallax_gallery",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (skill_proj / "creative_brief.json").exists()
+    assert (skill_proj / "intake_consultation.json").exists()
+
+    # 3. Modular run-stage (Part 1: Stages 00..15)
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "run-stage",
+            "--stage",
+            "client_intake,music_supervisor,culler,audio_vibe,photo_curator",
+            "--project-dir",
+            str(skill_proj),
+            "--media-dir",
+            str(sample_media_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (skill_proj / "bgm_selection.json").exists()
+    assert (skill_proj / "photo_curation.json").exists()
+
+    # 4. Modular run-stage (Part 2: Stages 20..60)
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "run-stage",
+            "--stage",
+            "story_producer,dialogue_editor,montage_editor,vfx_designer,showrunner,production_director",
+            "--project-dir",
+            str(skill_proj),
+            "--media-dir",
+            str(sample_media_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (skill_proj / "timeline.yaml").exists()
+    assert (skill_proj / "director_review.json").exists()
+
+    # 5. project reset
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "project",
+            "--action",
+            "reset",
+            "--project-dir",
+            str(skill_proj),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert not (skill_proj / "timeline.yaml").exists()
+    assert (skill_proj / "project_meta.json").exists()
