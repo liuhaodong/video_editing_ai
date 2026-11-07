@@ -39,14 +39,288 @@ function escapeHtml(str) {
 }
 
 // Tab switching
+function switchToTab(tabId) {
+  document.querySelectorAll(".tab-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === tabId);
+  });
+  document.querySelectorAll(".tab-panel").forEach((p) => {
+    p.classList.toggle("active", p.id === `tab-${tabId}`);
+  });
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
-    const target = document.getElementById(`tab-${btn.dataset.tab}`);
-    if (target) target.classList.add("active");
+    switchToTab(btn.dataset.tab);
   });
+});
+
+document.getElementById("btnNextToIntake")?.addEventListener("click", () => switchToTab("intake"));
+document.getElementById("btnBackToProjects")?.addEventListener("click", () => switchToTab("projects"));
+document.getElementById("btnGoToTheaterTab")?.addEventListener("click", () => switchToTab("deliverables"));
+document.getElementById("btnTopNewProject")?.addEventListener("click", () => {
+  switchToTab("projects");
+  const input = document.getElementById("newProjectNameInput");
+  if (input) input.focus();
+});
+document.getElementById("btnStartFromIntake")?.addEventListener("click", () => {
+  switchToTab("run");
+  document.getElementById("btnRunMultiAgent")?.click();
+});
+
+// ---------------------------------------------------------------------------
+// PROJECT MANAGEMENT (CREATE, LOAD, CLEAR / RESET, LIST)
+// ---------------------------------------------------------------------------
+let workspaceProjectsList = [];
+
+function renderProjectsList(projects, activeProjectDir = null) {
+  workspaceProjectsList = projects || [];
+  const currentProj = (
+    activeProjectDir ||
+    document.getElementById("projectDirInput")?.value ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+
+  // 1. Update Topbar Project Selector
+  const selector = document.getElementById("topProjectSelector");
+  if (selector) {
+    if (workspaceProjectsList.length === 0) {
+      selector.innerHTML = `<option value="">No projects yet</option>`;
+    } else {
+      selector.innerHTML = workspaceProjectsList
+        .map((p) => {
+          const isSelected = p.project_dir.toLowerCase() === currentProj;
+          const badge = p.has_rendered_video
+            ? `✓ MP4 Ready${p.quality_grade ? ` (${p.quality_grade})` : ""}`
+            : p.has_timeline
+            ? "📋 Plan Ready"
+            : "🆕 Empty";
+          return `<option value="${escapeHtml(p.project_dir)}" ${isSelected ? "selected" : ""}>${escapeHtml(
+            p.project_name
+          )} — ${badge}</option>`;
+        })
+        .join("");
+    }
+  }
+
+  // 2. Update Tab 1 Existing Projects Grid
+  const listEl = document.getElementById("existingProjectsList");
+  if (!listEl) return;
+  if (workspaceProjectsList.length === 0) {
+    listEl.innerHTML = `<div class="muted">No projects found in workspace. Create one above!</div>`;
+    return;
+  }
+
+  listEl.innerHTML = workspaceProjectsList
+    .map((p, idx) => {
+      const isActive = p.project_dir.toLowerCase() === currentProj;
+      let statusBadge = `<span class="stage-badge-mini">🆕 Empty Workspace</span>`;
+      if (p.has_rendered_video) {
+        statusBadge = `<span class="stage-badge-mini" style="color:#34d399; border-color:rgba(16,185,129,0.4);">🎬 MP4 Ready (${
+          p.rendered_video_size_mb || 0
+        } MB)${p.quality_grade ? ` • Grade ${escapeHtml(p.quality_grade)}` : ""}</span>`;
+      } else if (p.has_timeline) {
+        statusBadge = `<span class="stage-badge-mini" style="color:var(--accent);">📋 Timeline Ready</span>`;
+      }
+
+      const dlBtnHtml = p.has_rendered_video
+        ? `<a class="btn small success-btn" href="/api/projects/download-video?project_dir=${encodeURIComponent(
+            p.project_dir
+          )}&t=${p.rendered_video_mtime || Date.now()}" download style="text-decoration:none;">⬇️ MP4</a>`
+        : "";
+
+      return `
+        <div class="project-card ${isActive ? "active" : ""}" data-proj-idx="${idx}">
+          <div class="project-card-info">
+            <div class="project-card-title">
+              <span>🗂️ ${escapeHtml(p.project_name)}</span>
+              ${isActive ? `<span class="stage-badge-mini" style="background:rgba(0,229,255,0.16); color:var(--accent-cyan);">ACTIVE</span>` : ""}
+              ${statusBadge}
+            </div>
+            <div class="project-card-meta">
+              Updated: ${escapeHtml(p.updated_at || "Just now")}
+              ${p.media_dir ? ` &bull; Media: <code>${escapeHtml(p.media_dir)}</code>` : ""}
+            </div>
+            <div class="library-card-path" title="${escapeHtml(p.project_dir)}">${escapeHtml(p.project_dir)}</div>
+          </div>
+          <div class="project-card-actions">
+            <button type="button" class="btn small ${isActive ? "secondary" : "primary"} btn-load-proj" data-dir="${escapeHtml(
+        p.project_dir
+      )}">
+              ${isActive ? "✓ Loaded" : "📂 Load"}
+            </button>
+            ${dlBtnHtml}
+            <button type="button" class="btn small danger-outline btn-reset-proj" data-dir="${escapeHtml(
+              p.project_dir
+            )}" title="Clear all generated files in this project">
+              🧹 Reset
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  listEl.querySelectorAll(".btn-load-proj").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const dir = btn.dataset.dir;
+      if (dir) await loadProject(dir);
+    });
+  });
+
+  listEl.querySelectorAll(".btn-reset-proj").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const dir = btn.dataset.dir;
+      if (dir) await resetProject(dir);
+    });
+  });
+
+  listEl.querySelectorAll(".project-card").forEach((card) => {
+    card.addEventListener("click", async () => {
+      const idx = Number(card.dataset.projIdx);
+      const p = workspaceProjectsList[idx];
+      if (p) await loadProject(p.project_dir);
+    });
+  });
+}
+
+async function createNewProject() {
+  const nameInput = document.getElementById("newProjectNameInput");
+  const mediaInput = document.getElementById("mediaDirInput");
+  const rawName = (nameInput?.value || "").trim() || `New Story Project ${new Date().toLocaleTimeString()}`;
+  const mediaDir = (mediaInput?.value || "").trim();
+
+  setStatus(`Creating new project "${rawName}"...`);
+  const res = await fetch("/api/projects/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_name: rawName, media_dir: mediaDir }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    setStatus(`Error creating project: ${err.detail}`);
+    return;
+  }
+  const data = await res.json();
+  if (nameInput) nameInput.value = "";
+  const projInput = document.getElementById("projectDirInput");
+  if (projInput) projInput.value = data.project_dir;
+
+  clearProjectUiPanels();
+  if (data.projects) renderProjectsList(data.projects, data.project_dir);
+  await refreshProjectState();
+  setStatus(`Created & loaded new project: ${data.project?.project_name || rawName}`);
+}
+
+async function loadProject(projectDir) {
+  if (!projectDir) return;
+  setStatus(`Loading project ${projectDir}...`);
+  const res = await fetch("/api/projects/load", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_dir: projectDir }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    setStatus(`Error loading project: ${err.detail}`);
+    return;
+  }
+  const data = await res.json();
+  const projInput = document.getElementById("projectDirInput");
+  if (projInput) projInput.value = data.project_dir;
+
+  clearProjectUiPanels();
+  if (data.projects) renderProjectsList(data.projects, data.project_dir);
+
+  if (data.project && data.project.media_dir) {
+    await selectMediaLibrary(data.project.media_dir, null, false);
+  } else {
+    await refreshProjectState();
+  }
+  setStatus(`Loaded project: ${data.project?.project_name || projectDir}`);
+}
+
+function clearProjectUiPanels() {
+  const doingEl = document.getElementById("liveAgentDoingStream");
+  const doingCountEl = document.getElementById("agentDoingCount");
+  if (doingEl) {
+    doingEl.innerHTML = `<div class="muted">Click "Start Full AI Workflow" to watch each sub-agent's live actions, calculations, and blackboard handoffs...</div>`;
+  }
+  if (doingCountEl) doingCountEl.textContent = "0 actions";
+
+  const thinkingEl = document.getElementById("liveDirectorThinkingStream");
+  const thinkingCountEl = document.getElementById("directorThinkingCount");
+  if (thinkingEl) {
+    thinkingEl.innerHTML = `<div class="muted">The Executive Movie Production Director's stage-by-stage observations, aesthetic thoughts, and corrective directives will appear here live...</div>`;
+  }
+  if (thinkingCountEl) thinkingCountEl.textContent = "0 reviews";
+
+  const logEl = document.getElementById("liveActivityLog");
+  const logCountEl = document.getElementById("activityLogCount");
+  if (logEl) logEl.innerHTML = `<div class="muted">Pipeline telemetry will stream here in real time as each agent runs...</div>`;
+  if (logCountEl) logCountEl.textContent = "0 events";
+
+  const annEl = document.getElementById("annotationsYamlEditor");
+  if (annEl) annEl.value = "";
+  const tlEl = document.getElementById("timelineYamlEditor");
+  if (tlEl) tlEl.value = "";
+  const sbEl = document.getElementById("storyboardPreview");
+  if (sbEl) sbEl.textContent = "No storyboard generated yet.";
+
+  renderDefaultAgentStagesFromRegistry(registeredAgentsList);
+  updateVideoDownloadButtons({}, null);
+}
+
+async function resetProject(projectDir = null) {
+  const targetDir = (projectDir || document.getElementById("projectDirInput")?.value || "").trim();
+  if (!targetDir) return;
+
+  const confirmed = window.confirm(
+    `Clear and reset project workspace:\n${targetDir}\n\nThis removes generated timelines, JSON contracts, and rendered MP4s in this project folder so you can start fresh. Your source media files will NOT be touched.`
+  );
+  if (!confirmed) return;
+
+  setStatus(`Resetting project ${targetDir}...`);
+  const res = await fetch("/api/projects/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_dir: targetDir }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    setStatus(`Error resetting project: ${err.detail}`);
+    return;
+  }
+  const data = await res.json();
+  clearProjectUiPanels();
+  if (data.projects) renderProjectsList(data.projects, targetDir);
+  await refreshProjectState();
+  setStatus(`Project reset & cleared: ${data.project?.project_name || targetDir}`);
+}
+
+document.getElementById("btnCreateProject")?.addEventListener("click", createNewProject);
+document.getElementById("newProjectNameInput")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    createNewProject();
+  }
+});
+document.getElementById("topProjectSelector")?.addEventListener("change", async (e) => {
+  const dir = e.target.value;
+  if (dir) await loadProject(dir);
+});
+document.getElementById("btnTopResetProject")?.addEventListener("click", () => resetProject());
+document.getElementById("btnResetProjectCard")?.addEventListener("click", () => resetProject());
+document.getElementById("btnRefreshProjects")?.addEventListener("click", async () => {
+  const res = await fetch("/api/projects");
+  if (res.ok) {
+    const data = await res.json();
+    renderProjectsList(data.projects || []);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -123,7 +397,7 @@ async function selectMediaLibrary(mediaDir, suggestedProjectDir = null, updatePr
     const lib = data.library;
     if (lib) {
       updateLibraryBanner(lib);
-      if (projInput && (suggestedProjectDir || lib.suggested_project_dir)) {
+      if (projInput && !projInput.value.trim() && (suggestedProjectDir || lib.suggested_project_dir)) {
         projInput.value = suggestedProjectDir || lib.suggested_project_dir;
       }
       if (updatePrompt && lib.default_prompt) {
@@ -930,19 +1204,77 @@ function renderTimelineTracks(timeline) {
   `;
 }
 
-function renderExportsView(exportsMap) {
+function updateVideoDownloadButtons(exportsMap, projectSummary = null) {
+  const topBtn = document.getElementById("btnTopDownloadVideo");
+  const bannerBox = document.getElementById("runCompleteDownloadBanner");
+  const bannerBtn = document.getElementById("btnBannerDownloadMp4");
+  const bannerSub = document.getElementById("runCompleteBannerSubtext");
+  const heroBtn = document.getElementById("btnHeroDownloadMp4");
+
+  const hasMp4 = Boolean(exportsMap?.mp4 || projectSummary?.has_rendered_video);
+  const projDir = (
+    document.getElementById("projectDirInput")?.value ||
+    projectSummary?.project_dir ||
+    ""
+  ).trim();
+
+  if (!hasMp4 || !projDir) {
+    if (topBtn) topBtn.style.display = "none";
+    if (bannerBox) bannerBox.style.display = "none";
+    if (heroBtn) heroBtn.style.display = "none";
+    return null;
+  }
+
+  const mtime = projectSummary?.rendered_video_mtime || Date.now();
+  const sizeMb = projectSummary?.rendered_video_size_mb
+    ? ` (${projectSummary.rendered_video_size_mb} MB)`
+    : "";
+  const dlUrl = `/api/projects/download-video?project_dir=${encodeURIComponent(projDir)}&t=${mtime}`;
+
+  if (topBtn) {
+    topBtn.href = dlUrl;
+    topBtn.textContent = `⬇️ Download Video (.mp4)${sizeMb}`;
+    topBtn.style.display = "inline-flex";
+  }
+  if (bannerBtn) {
+    bannerBtn.href = dlUrl;
+    bannerBtn.textContent = `⬇️ Download Newly Rendered Video (.mp4)${sizeMb}`;
+  }
+  if (bannerSub) {
+    const fileLabel = exportsMap?.mp4 || projectSummary?.rendered_video_path || "final_story.mp4";
+    bannerSub.textContent = `Ready to download: ${fileLabel}${sizeMb}`;
+  }
+  if (bannerBox) {
+    bannerBox.style.display = "flex";
+  }
+  if (heroBtn) {
+    heroBtn.href = dlUrl;
+    heroBtn.textContent = `⬇️ Download Newly Rendered Video (.mp4)${sizeMb}`;
+    heroBtn.style.display = "inline-flex";
+  }
+  return dlUrl;
+}
+
+function renderExportsView(exportsMap, projectSummary = null) {
   const exBox = document.getElementById("exportsList");
   const vidBox = document.getElementById("videoPlayerContainer");
+  const mp4DlUrl = updateVideoDownloadButtons(exportsMap, projectSummary);
   if (!exBox || !vidBox) return;
 
   if (!exportsMap || Object.keys(exportsMap).length === 0) {
     exBox.innerHTML = "<p class='muted'>No exports generated yet.</p>";
-    vidBox.innerHTML = "<p class='muted'>Run the pipeline or load a rendered project to preview the final 4K HDR MP4 video here.</p>";
+    vidBox.innerHTML =
+      "<p class='muted'>Run the pipeline in Tab 3 or load a rendered project in Tab 1 to preview and download the 4K HDR MP4 video here.</p>";
     return;
   }
 
+  const mtime = projectSummary?.rendered_video_mtime || Date.now();
+  const sizeLabel = projectSummary?.rendered_video_size_mb
+    ? ` (${projectSummary.rendered_video_size_mb} MB)`
+    : "";
+
   const labels = {
-    mp4: "🎬 Final Rendered 4K HDR Video (.mp4)",
+    mp4: `🎬 Newly Rendered 4K HDR Video (.mp4)${sizeLabel}`,
     fcpxml: "🎞️ DaVinci Resolve / Final Cut Pro XML (.fcpxml)",
     edl: "📋 CMX 3600 Edit Decision List (.edl)",
     otio: "📐 OpenTimelineIO Project (.otio)",
@@ -952,14 +1284,23 @@ function renderExportsView(exportsMap) {
 
   exBox.innerHTML = Object.entries(exportsMap)
     .map(([ext, fullPath]) => {
-      const url = `/api/file?path=${encodeURIComponent(fullPath)}`;
-      return `<a class="export-link" href="${url}" target="_blank" download><span>${labels[ext] || ext.toUpperCase()}</span><span>Download &darr;</span></a>`;
+      const isMp4 = ext === "mp4";
+      const url =
+        isMp4 && mp4DlUrl
+          ? mp4DlUrl
+          : `/api/file?path=${encodeURIComponent(fullPath)}&download=true&t=${mtime}`;
+      return `<a class="export-link ${isMp4 ? "primary-mp4" : ""}" href="${url}" download><span>${
+        labels[ext] || ext.toUpperCase()
+      }</span><span>⬇️ Download ${ext.toUpperCase()}</span></a>`;
     })
     .join("");
 
   if (exportsMap.mp4) {
-    const videoUrl = `/api/file?path=${encodeURIComponent(exportsMap.mp4)}&t=${Date.now()}`;
+    const videoUrl = `/api/file?path=${encodeURIComponent(exportsMap.mp4)}&t=${mtime}`;
     vidBox.innerHTML = `<video controls preload="metadata" src="${videoUrl}"></video>`;
+  } else {
+    vidBox.innerHTML =
+      "<p class='muted'>Timeline exports are ready. Click 'Render 4K HDR Video' to generate the MP4 video file.</p>";
   }
 }
 
@@ -970,6 +1311,9 @@ async function refreshProjectState() {
   const data = await res.json();
   setStatus(data.last_status || "Ready");
 
+  if (data.projects) {
+    renderProjectsList(data.projects, projDir);
+  }
   if (data.registered_agents && registeredAgentsList.length === 0) {
     renderAgentRegistry(data.registered_agents);
   }
@@ -979,24 +1323,13 @@ async function refreshProjectState() {
   if (data.agent_contracts) {
     renderContractsAndBus(data.agent_contracts);
   }
-  if (data.annotations_yaml) {
-    document.getElementById("annotationsYamlEditor").value = data.annotations_yaml;
-  }
-  if (data.catalog) {
-    renderCatalogView(data.catalog);
-  }
-  if (data.timeline_yaml) {
-    document.getElementById("timelineYamlEditor").value = data.timeline_yaml;
-  }
-  if (data.timeline) {
-    renderTimelineTracks(data.timeline);
-  }
-  if (data.storyboard_md) {
-    document.getElementById("storyboardPreview").textContent = data.storyboard_md;
-  }
-  if (data.exports) {
-    renderExportsView(data.exports);
-  }
+  document.getElementById("annotationsYamlEditor").value = data.annotations_yaml || "";
+  renderCatalogView(data.catalog || null);
+  document.getElementById("timelineYamlEditor").value = data.timeline_yaml || "";
+  renderTimelineTracks(data.timeline || null);
+  document.getElementById("storyboardPreview").textContent =
+    data.storyboard_md || "No storyboard generated yet.";
+  renderExportsView(data.exports || {}, data.project_summary || null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,8 +1432,10 @@ async function pollActiveJob() {
       }
       await refreshProjectState();
       if (job.status === "completed") {
-        const showcase = document.getElementById("showcaseSection");
-        if (showcase) showcase.scrollIntoView({ behavior: "smooth", block: "start" });
+        const banner = document.getElementById("runCompleteDownloadBanner");
+        if (banner && banner.style.display !== "none") {
+          banner.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
       }
     }
   } catch (err) {

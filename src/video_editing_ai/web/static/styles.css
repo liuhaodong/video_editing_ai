@@ -31,12 +31,129 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 28px;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 12px 28px;
   background: #0f131c;
   border-bottom: 1px solid var(--panel-border);
   position: sticky;
   top: 0;
   z-index: 50;
+}
+
+.project-control-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #141a26;
+  border: 1px solid #263147;
+  padding: 6px 12px;
+  border-radius: 9px;
+}
+
+.project-bar-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.top-project-select {
+  width: auto !important;
+  min-width: 220px;
+  padding: 5px 10px !important;
+  font-size: 0.83rem !important;
+  font-weight: 600;
+}
+
+.btn.danger-outline {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #f87171;
+}
+
+.btn.danger-outline:hover {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: #ef4444;
+  color: #fff;
+}
+
+.btn.success-btn {
+  background: linear-gradient(135deg, #10b981, #059669);
+  border-color: #10b981;
+  color: #fff;
+  font-weight: 700;
+}
+
+.btn.success-btn:hover {
+  background: linear-gradient(135deg, #34d399, #10b981);
+}
+
+.new-project-box {
+  background: #0e1420;
+  border: 1px solid rgba(255, 200, 59, 0.35);
+  border-radius: 9px;
+  padding: 12px 14px;
+}
+
+.projects-list-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-height: 295px;
+  overflow-y: auto;
+}
+
+.project-card {
+  background: #0f1521;
+  border: 1.5px solid var(--panel-border);
+  border-radius: 9px;
+  padding: 11px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  transition: all 0.15s ease;
+}
+
+.project-card.active {
+  border-color: var(--accent);
+  background: rgba(255, 200, 59, 0.08);
+}
+
+.project-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.step-footer-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.completion-download-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1.5px solid rgba(16, 185, 129, 0.5);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.export-link.primary-mp4 {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: #10b981;
+  font-weight: 700;
+  color: #fff;
 }
 
 .brand {

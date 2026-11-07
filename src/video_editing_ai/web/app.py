@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
+import shutil
 import threading
 import time
 import uuid
@@ -84,6 +87,31 @@ class IntakeRefineRequest(BaseModel):
     chat_history: list[dict[str, str]] = Field(default_factory=list)
 
 
+class ProjectCreateRequest(BaseModel):
+    name: str = ""
+    project_name: str = ""
+    project_dir: Optional[str] = None
+    media_dir: str = ""
+    user_prompt: str = ""
+
+
+class ProjectDirRequest(BaseModel):
+    project_dir: str
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _slugify_project_name(name: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", (name or "").strip()).strip("_").lower()
+    if not slug:
+        slug = "story"
+    if not slug.endswith("_project"):
+        slug = f"{slug}_project"
+    return slug
+
+
 def _read_json_if_exists(path: Path) -> Optional[dict[str, Any]]:
     if path.exists():
         try:
@@ -91,6 +119,164 @@ def _read_json_if_exists(path: Path) -> Optional[dict[str, Any]]:
         except Exception:
             return None
     return None
+
+
+def _write_project_meta(proj_dir: Path, updates: dict[str, Any]) -> dict[str, Any]:
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = proj_dir / "project_meta.json"
+    existing = _read_json_if_exists(meta_path) or {}
+    now = _now_iso()
+    if "created_at" not in existing:
+        existing["created_at"] = now
+    existing.update(updates)
+    existing["project_dir"] = str(proj_dir.resolve())
+    existing["updated_at"] = now
+    meta_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+    return existing
+
+
+def _inspect_project_dir(proj_dir: Path) -> dict[str, Any]:
+    proj = proj_dir.resolve()
+    meta = _read_json_if_exists(proj / "project_meta.json") or {}
+    brief = _read_json_if_exists(proj / "creative_brief.json") or {}
+    bb = _read_json_if_exists(proj / "blackboard.json") or {}
+    dr = _read_json_if_exists(proj / "director_review.json") or {}
+
+    mp4_matches = sorted(proj.glob("*.mp4"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    mp4_file = (proj / "final_story.mp4") if (proj / "final_story.mp4").exists() else (mp4_matches[0] if mp4_matches else None)
+    has_video = mp4_file is not None and mp4_file.exists()
+    video_size_mb = round(mp4_file.stat().st_size / (1024 * 1024), 1) if has_video and mp4_file else 0.0
+    video_mtime = int(mp4_file.stat().st_mtime) if has_video and mp4_file else 0
+
+    has_timeline = (proj / "timeline.yaml").exists()
+    has_contracts = bool(brief or bb or dr or has_timeline)
+
+    if has_video:
+        status = "rendered"
+    elif has_contracts:
+        status = "planned"
+    else:
+        status = "empty"
+
+    name = (
+        meta.get("name")
+        or brief.get("project_title", "").replace("_", " ")
+        or proj.name.replace("_project", "").replace("_", " ").title()
+    )
+    media_dir = meta.get("media_dir") or bb.get("media_dir") or ""
+    user_prompt = meta.get("user_prompt") or brief.get("raw_user_prompt") or bb.get("user_prompt") or ""
+    target_dur = brief.get("target_duration_sec") or meta.get("target_duration_sec") or 155
+
+    # Updated timestamp fallback
+    updated_ts = 0.0
+    for candidate_f in (mp4_file, proj / "director_review.json", proj / "timeline.yaml", proj / "project_meta.json"):
+        if candidate_f and candidate_f.exists():
+            try:
+                updated_ts = max(updated_ts, candidate_f.stat().st_mtime)
+            except Exception:
+                pass
+
+    updated_str = (
+        datetime.fromtimestamp(updated_ts).strftime("%Y-%m-%d %H:%M")
+        if updated_ts > 0
+        else "Just now"
+    )
+    resolved_video_path = str(mp4_file.resolve()) if has_video and mp4_file else None
+
+    return {
+        "name": name,
+        "project_name": name,
+        "slug": proj.name,
+        "project_dir": str(proj),
+        "media_dir": media_dir,
+        "user_prompt": user_prompt,
+        "interview_answers": meta.get("interview_answers") or {},
+        "status": status,
+        "has_rendered_video": has_video,
+        "video_path": resolved_video_path,
+        "rendered_video_path": resolved_video_path,
+        "video_filename": mp4_file.name if has_video and mp4_file else None,
+        "video_size_mb": video_size_mb,
+        "rendered_video_size_mb": video_size_mb,
+        "video_mtime": video_mtime,
+        "rendered_video_mtime": video_mtime,
+        "has_timeline": has_timeline,
+        "has_contracts": has_contracts,
+        "director_grade": dr.get("quality_grade"),
+        "quality_grade": dr.get("quality_grade"),
+        "director_score": dr.get("overall_quality_score"),
+        "target_duration_sec": target_dur,
+        "updated_timestamp": updated_ts,
+        "updated_at": updated_str,
+    }
+
+
+def _list_workspace_projects(workspace_root: Path, active_proj_dir: str = "") -> list[dict[str, Any]]:
+    candidates: list[Path] = []
+    if active_proj_dir:
+        ap = Path(active_proj_dir)
+        if ap.exists() and ap.is_dir():
+            candidates.append(ap.resolve())
+
+    for sub in workspace_root.iterdir():
+        if sub.is_dir() and (sub.name.endswith("_project") or (sub / "project_meta.json").exists() or (sub / "timeline.yaml").exists()):
+            candidates.append(sub.resolve())
+
+    projects_subdir = workspace_root / "projects"
+    if projects_subdir.exists() and projects_subdir.is_dir():
+        for sub in projects_subdir.iterdir():
+            if sub.is_dir():
+                candidates.append(sub.resolve())
+
+    seen: set[str] = set()
+    results: list[dict[str, Any]] = []
+    for c in candidates:
+        key = str(c).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        info = _inspect_project_dir(c)
+        info["is_active"] = str(c).lower() == str(Path(active_proj_dir).resolve()).lower() if active_proj_dir else False
+        results.append(info)
+
+    results.sort(key=lambda r: (r["is_active"], r["has_rendered_video"], r["updated_timestamp"]), reverse=True)
+    return results
+
+
+def _reset_project_directory(proj_dir: Path) -> dict[str, Any]:
+    """Delete all generated artifacts, videos, and caches inside proj_dir while keeping project_meta.json."""
+    proj = proj_dir.resolve()
+    if not proj.exists() or not proj.is_dir():
+        proj.mkdir(parents=True, exist_ok=True)
+        return _inspect_project_dir(proj)
+
+    meta = _read_json_if_exists(proj / "project_meta.json") or {}
+    bb = _read_json_if_exists(proj / "blackboard.json") or {}
+    if not meta.get("media_dir") and bb.get("media_dir"):
+        meta["media_dir"] = bb["media_dir"]
+    if not meta.get("name"):
+        meta["name"] = proj.name.replace("_project", "").replace("_", " ").title()
+
+    removed_files: list[str] = []
+    exts_to_clear = {".json", ".yaml", ".yml", ".md", ".mp4", ".fcpxml", ".edl", ".otio", ".srt", ".ass", ".wav", ".mp3"}
+    for item in list(proj.iterdir()):
+        if item.is_file() and item.name != "project_meta.json" and item.suffix.lower() in exts_to_clear:
+            try:
+                item.unlink()
+                removed_files.append(item.name)
+            except Exception:
+                pass
+        elif item.is_dir() and item.name in ("render_cache", "previews", "bgm_library", "keyframes"):
+            try:
+                shutil.rmtree(item, ignore_errors=True)
+                removed_files.append(f"{item.name}/")
+            except Exception:
+                pass
+
+    _write_project_meta(proj, meta)
+    info = _inspect_project_dir(proj)
+    info["removed_items"] = removed_files
+    return info
 
 
 def _discover_local_media_libraries(workspace_root: Path) -> list[dict[str, Any]]:
@@ -251,6 +437,122 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
             "libraries": libs,
         }
 
+    @app.get("/api/projects")
+    def api_list_projects() -> dict:
+        projects = _list_workspace_projects(workspace_root, state["project_dir"])
+        return {
+            "active_project_dir": state["project_dir"],
+            "projects": projects,
+        }
+
+    @app.post("/api/projects/create")
+    def api_create_project(req: ProjectCreateRequest) -> dict:
+        raw_name = (req.project_name or req.name).strip()
+        slug = _slugify_project_name(raw_name or "new_story")
+        proj = Path(req.project_dir).resolve() if req.project_dir else (workspace_root / slug).resolve()
+        proj.mkdir(parents=True, exist_ok=True)
+
+        media_dir_str = req.media_dir.strip()
+        if media_dir_str and Path(media_dir_str).exists():
+            media_dir_str = str(Path(media_dir_str).resolve())
+
+        lib_info = inspect_media_library(media_dir_str, workspace_root=workspace_root) if media_dir_str else {}
+        prompt_str = req.user_prompt.strip() or lib_info.get("default_prompt", "")
+        display_name = raw_name or slug.replace("_project", "").replace("_", " ").title()
+
+        _write_project_meta(
+            proj,
+            {
+                "name": display_name,
+                "media_dir": media_dir_str,
+                "user_prompt": prompt_str,
+                "status": "empty",
+            },
+        )
+        state["project_dir"] = str(proj)
+        state["last_status"] = f"Created new project '{display_name}'"
+        state["progress"] = 0.0
+
+        with job_lock:
+            if job_state["status"] != "running":
+                job_state["status"] = "idle"
+                job_state["project_dir"] = str(proj)
+                job_state["media_dir"] = media_dir_str
+                job_state["progress"] = 0.0
+                job_state["progress_pct"] = 0
+                job_state["activity_log"] = []
+                job_state["agent_activities"] = []
+                job_state["director_thoughts"] = []
+
+        st_data = get_state(str(proj))
+        st_data["project"] = st_data["project_summary"]
+        return st_data
+
+    @app.post("/api/projects/load")
+    def api_load_project(req: ProjectDirRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        proj.mkdir(parents=True, exist_ok=True)
+        state["project_dir"] = str(proj)
+        info = _inspect_project_dir(proj)
+        state["last_status"] = f"Loaded project '{info['name']}'"
+        st_data = get_state(str(proj))
+        st_data["project"] = st_data["project_summary"]
+        return st_data
+
+    @app.post("/api/projects/reset")
+    def api_reset_project(req: ProjectDirRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        with job_lock:
+            if job_state["status"] == "running" and str(Path(job_state["project_dir"]).resolve()) == str(proj):
+                raise HTTPException(status_code=400, detail="Cannot reset project while a pipeline job is actively running.")
+            reset_info = _reset_project_directory(proj)
+            if job_state["status"] != "running":
+                job_state["status"] = "idle"
+                job_state["progress"] = 0.0
+                job_state["progress_pct"] = 0
+                job_state["current_stage_title"] = "Project Reset — Ready for a fresh edit"
+                job_state["last_status"] = f"Cleared generated artifacts from '{reset_info['name']}'"
+                job_state["activity_log"] = []
+                job_state["agent_activities"] = []
+                job_state["director_thoughts"] = []
+                for s in job_state.get("stages", []):
+                    s["status"] = "pending"
+                    s["duration_sec"] = None
+                    s["quality_score"] = None
+
+        state["project_dir"] = str(proj)
+        removed_count = len(reset_info.get("removed_items", []))
+        state["last_status"] = f"Reset project '{reset_info['name']}' ({removed_count} items cleared)"
+        state["progress"] = 0.0
+        st_data = get_state(str(proj))
+        st_data["project"] = st_data["project_summary"]
+        st_data["reset_summary"] = reset_info
+        st_data["removed_files_count"] = removed_count
+        return st_data
+
+    @app.get("/api/projects/download-video")
+    def api_download_project_video(project_dir: Optional[str] = Query(default=None)):
+        proj = Path(project_dir or state["project_dir"]).resolve()
+        mp4_path = proj / "final_story.mp4"
+        if not mp4_path.exists():
+            matches = sorted(proj.glob("*.mp4"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+            if matches:
+                mp4_path = matches[0]
+        if not mp4_path.exists() or not mp4_path.is_file():
+            raise HTTPException(status_code=404, detail=f"No rendered video (.mp4) found in project: {proj.name}")
+
+        clean_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", proj.name.replace("_project", "")).strip("_") or "story"
+        download_name = f"{clean_slug}_{mp4_path.name}"
+        return FileResponse(
+            str(mp4_path),
+            media_type="video/mp4",
+            filename=download_name,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
+
     @app.get("/api/fs/inspect")
     def api_inspect_media_library(media_dir: str = Query(..., description="Path to media folder")) -> dict:
         return inspect_media_library(media_dir, workspace_root=workspace_root)
@@ -386,6 +688,15 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
 
             proj = Path(req.project_dir).resolve()
             state["project_dir"] = str(proj)
+            _write_project_meta(
+                proj,
+                {
+                    "media_dir": str(media_path),
+                    "user_prompt": req.user_prompt,
+                    "interview_answers": req.interview_answers,
+                    "status": "running",
+                },
+            )
 
             orchestrator = MultiAgentOrchestrator(
                 enabled_optional_roles=req.enabled_optional_roles,
@@ -645,8 +956,13 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
         with job_lock:
             current_job = dict(job_state)
 
+        proj_summary = _inspect_project_dir(proj)
+        all_projects = _list_workspace_projects(workspace_root, str(proj))
+
         return {
             "project_dir": str(proj),
+            "project_summary": proj_summary,
+            "projects": all_projects,
             "last_status": state["last_status"],
             "progress": state["progress"],
             "job": current_job,
@@ -820,10 +1136,23 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
         }
 
     @app.get("/api/file")
-    def api_serve_file(path: str = Query(..., description="Absolute path to media or export file")):
+    def api_serve_file(
+        path: str = Query(..., description="Absolute path to media or export file"),
+        download: bool = Query(default=False, description="Force file attachment download"),
+    ):
         target = Path(path).resolve()
         if not target.exists() or not target.is_file():
             raise HTTPException(status_code=404, detail=f"File not found: {path}")
-        return FileResponse(str(target), filename=target.name)
+        if download:
+            return FileResponse(
+                str(target),
+                filename=target.name,
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+            )
+        return FileResponse(
+            str(target),
+            content_disposition_type="inline",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     return app

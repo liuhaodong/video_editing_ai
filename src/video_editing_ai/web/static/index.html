@@ -3,113 +3,171 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Photo &amp; Video Story Studio — Guided Multi-Agent Edition</title>
+  <title>AI Photo &amp; Video Story Studio — Project Edition</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
+  <!-- TOP HEADER + PERSISTENT PROJECT BAR -->
   <header class="topbar">
     <div class="brand">
       <span class="logo-dot"></span>
       <h1>AI Photo &amp; Video Story Studio</h1>
-      <span class="badge">11-Agent Pipeline • 2.5D Parallax &amp; Diptych • 4K HLG HDR</span>
+      <span class="badge">11-Agent Pipeline • 4K HLG HDR</span>
     </div>
+
+    <div class="project-control-bar">
+      <span class="project-bar-label">🗂️ Active Project:</span>
+      <select id="topProjectSelector" class="top-project-select" title="Switch Active Project">
+        <option value="">Loading projects...</option>
+      </select>
+      <button class="btn small secondary" id="btnTopNewProject" type="button" title="Create a new project">+ New Project</button>
+      <button class="btn small danger-outline" id="btnTopResetProject" type="button" title="Clear all generated files and reset this project">🧹 Reset Project</button>
+      <a class="btn small success-btn" id="btnTopDownloadVideo" href="#" style="display:none; text-decoration:none;" download>
+        ⬇️ Download Video (.mp4)
+      </a>
+    </div>
+
     <div class="topbar-right">
       <div class="status-pill" id="statusPill">Ready</div>
     </div>
   </header>
 
+  <!-- 5 CLEAN, FOCUSED WORKFLOW TABS -->
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="agents">✨ Guided AI Studio (Select Library &rarr; Intake &rarr; Run)</button>
-    <button class="tab-btn" data-tab="step2">🎞️ Timeline &amp; Storyboard Inspector</button>
-    <button class="tab-btn" data-tab="step1">🔍 Raw Media Catalog &amp; YAML</button>
-    <button class="tab-btn" data-tab="step3">🤖 Agent Contracts &amp; Message Bus</button>
+    <button class="tab-btn active" data-tab="projects">📂 1. Projects &amp; Media</button>
+    <button class="tab-btn" data-tab="intake">💬 2. Creative Intake &amp; Brief</button>
+    <button class="tab-btn" data-tab="run">🎬 3. Live Agent &amp; Director Studio</button>
+    <button class="tab-btn" data-tab="deliverables">🏆 4. Final Video &amp; Downloads</button>
+    <button class="tab-btn" data-tab="inspector">🛠️ 5. Advanced Inspector</button>
   </nav>
 
   <main class="container">
-    <!-- TAB 0: GUIDED 3-STEP AI STUDIO -->
-    <section id="tab-agents" class="tab-panel active">
+    <!-- =================================================================== -->
+    <!-- TAB 1: PROJECTS & MEDIA LIBRARY                                     -->
+    <!-- =================================================================== -->
+    <section id="tab-projects" class="tab-panel active">
+      <div class="split-grid">
+        <!-- LEFT COLUMN: PROJECT MANAGER (CREATE / LOAD / RESET) -->
+        <div class="card">
+          <div class="wizard-step-header">
+            <div class="step-badge">PROJECTS</div>
+            <div style="flex-grow:1;">
+              <h2>Manage Projects</h2>
+              <p class="muted">Create a new project, load an existing project workspace, or clear/reset a project to start fresh.</p>
+            </div>
+          </div>
 
-      <!-- STEP 1: SELECT MEDIA LIBRARY -->
-      <div class="card wizard-card">
-        <div class="wizard-step-header">
-          <div class="step-badge">STEP 1</div>
-          <div>
-            <h2>Select Your Media Library</h2>
-            <p class="muted">Click a discovered media folder below, browse your computer, or enter any folder path containing your videos and photos.</p>
+          <!-- CREATE NEW PROJECT BOX -->
+          <div class="new-project-box">
+            <div style="font-weight:700; font-size:0.88rem; margin-bottom:8px; color:var(--accent);">✨ Create a New Editing Project</div>
+            <div class="input-with-buttons">
+              <input id="newProjectNameInput" type="text" placeholder="Enter new project name (e.g., Paris Summer Trip, Kids Birthday)..." />
+              <button class="btn primary" id="btnCreateProject" type="button">+ Create Project</button>
+            </div>
+            <div class="muted" style="font-size:0.75rem; margin-top:5px;">
+              Links automatically to the selected Media Folder on the right and initializes a clean workspace.
+            </div>
+          </div>
+
+          <!-- EXISTING PROJECTS LIST -->
+          <div style="display:flex; justify-content:space-between; align-items:center; margin:14px 0 8px;">
+            <strong style="font-size:0.88rem; color:var(--accent-cyan);">📁 Existing Projects in Workspace</strong>
+            <button class="btn small secondary" id="btnRefreshProjects" type="button">🔄 Refresh List</button>
+          </div>
+          <div id="existingProjectsList" class="projects-list-grid">
+            <div class="muted">Loading workspace projects...</div>
+          </div>
+
+          <!-- ACTIVE PROJECT WORKSPACE PATH & RESET -->
+          <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--panel-border);">
+            <label for="projectDirInput">Active Project Directory Path</label>
+            <div class="input-with-buttons">
+              <input id="projectDirInput" type="text" value="C:\Users\hihao\Documents\projects\video_editing_ai\louvre_day_trip_project" />
+              <button class="btn secondary" id="btnRefreshState" type="button">📂 Load Path</button>
+              <button class="btn danger-outline" id="btnResetProjectCard" type="button">🧹 Clear / Reset</button>
+            </div>
           </div>
         </div>
 
-        <div id="discoveredLibrariesGrid" class="library-cards-grid">
-          <div class="muted">Scanning local media libraries...</div>
-        </div>
+        <!-- RIGHT COLUMN: MEDIA LIBRARY SELECTION -->
+        <div class="card">
+          <div class="wizard-step-header">
+            <div class="step-badge">MEDIA</div>
+            <div style="flex-grow:1;">
+              <h2>Select Source Media Library</h2>
+              <p class="muted">Choose the folder containing your raw videos and photos for this project.</p>
+            </div>
+          </div>
 
-        <div class="library-path-bar">
-          <div class="path-input-group">
+          <div id="discoveredLibrariesGrid" class="library-cards-grid">
+            <div class="muted">Scanning local media libraries...</div>
+          </div>
+
+          <div style="margin-bottom:14px;">
             <label for="mediaDirInput">Selected Media Folder</label>
             <div class="input-with-buttons">
               <input id="mediaDirInput" type="text" value="C:\Users\hihao\Documents\projects\clips\louvre" placeholder="Path to folder with videos &amp; photos..." />
-              <button class="btn secondary" id="btnBrowseModal" type="button">📂 Browse Folders</button>
-              <button class="btn secondary" id="btnPickNativeFolder" type="button">🪟 OS Folder Picker</button>
-              <button class="btn secondary" id="btnInspectFolder" type="button">🔄 Scan Folder</button>
+              <button class="btn secondary" id="btnBrowseModal" type="button">📂 Browse</button>
+              <button class="btn secondary" id="btnPickNativeFolder" type="button">🪟 OS Picker</button>
+              <button class="btn secondary" id="btnInspectFolder" type="button">🔄 Scan</button>
             </div>
           </div>
-          <div class="path-input-group">
-            <label for="projectDirInput">Project Output Workspace (Auto-Configured)</label>
-            <div class="input-with-buttons">
-              <input id="projectDirInput" type="text" value="C:\Users\hihao\Documents\projects\video_editing_ai\louvre_day_trip_project" />
-              <button class="btn secondary" id="btnRefreshState" type="button">📥 Load Existing Output</button>
-            </div>
-          </div>
-        </div>
 
-        <div id="mediaLibrarySummaryBanner" class="library-summary-banner">
-          <div class="summary-stat">
-            <span class="stat-label">Library</span>
-            <strong id="libTitleText">Louvre Museum Paris Family Day Trip</strong>
+          <div id="mediaLibrarySummaryBanner" class="library-summary-banner">
+            <div class="summary-stat">
+              <span class="stat-label">Library</span>
+              <strong id="libTitleText">Louvre Museum Paris Family Day Trip</strong>
+            </div>
+            <div class="summary-stat">
+              <span class="stat-label">Detected Media</span>
+              <strong id="libCountsText">🎬 4 Videos • 📸 349 Photos</strong>
+            </div>
+            <div class="summary-stat">
+              <span class="stat-label">Detected Cameras</span>
+              <strong id="libCamerasText">Sony A7C II • Google Pixel</strong>
+            </div>
+            <div class="summary-stat">
+              <span class="stat-label">Total Size</span>
+              <strong id="libSizeText">-- MB</strong>
+            </div>
           </div>
-          <div class="summary-stat">
-            <span class="stat-label">Detected Media</span>
-            <strong id="libCountsText">🎬 4 Videos • 📸 349 Photos</strong>
-          </div>
-          <div class="summary-stat">
-            <span class="stat-label">Detected Cameras</span>
-            <strong id="libCamerasText">Sony A7C II • Google Pixel</strong>
-          </div>
-          <div class="summary-stat">
-            <span class="stat-label">Total Size</span>
-            <strong id="libSizeText">-- MB</strong>
+
+          <div class="step-footer-bar">
+            <span class="muted" style="font-size:0.82rem;">Ready to shape your story with the Client Intake Agent &amp; Director?</span>
+            <button class="btn primary" id="btnNextToIntake" type="button">Next: Creative Intake &amp; Brief &rarr;</button>
           </div>
         </div>
       </div>
+    </section>
 
-      <!-- STEP 2: INTERACTIVE CLIENT INTAKE INTERVIEW -->
-      <div class="card wizard-card">
+    <!-- =================================================================== -->
+    <!-- TAB 2: CREATIVE INTAKE & BRIEF (LIVE CO-REFINEMENT)                 -->
+    <!-- =================================================================== -->
+    <section id="tab-intake" class="tab-panel">
+      <div class="card">
         <div class="wizard-step-header">
           <div class="step-badge">STEP 2</div>
           <div style="flex-grow:1;">
-            <h2>Interactive Client Intake &amp; Director Consultation (Live Co-Refinement)</h2>
-            <p class="muted">As soon as you type your vision or click a refinement chip below, the <strong>Client Intake Agent</strong> and <strong>Executive Movie Production Director</strong> kick off immediately to refine your brief and recommend the optimal video length.</p>
+            <h2>Interactive Client Intake &amp; Director Length Recommendation</h2>
+            <p class="muted">Type your story vision or click a refinement chip below — the <strong>Client Intake Agent</strong> and <strong>Executive Director</strong> respond immediately to refine your brief and recommend the ideal video duration.</p>
           </div>
           <span class="intake-live-pill" id="intakeAgentStatusPill">🟢 Intake Agent &amp; Director Active</span>
         </div>
 
-        <!-- LIVE PROMPT INPUT + INSTANT REFINE BUTTON -->
         <div class="intake-live-workbench">
+          <!-- LEFT: STORY INPUT + CHIPS + DIRECTOR DURATION SLIDER -->
           <div class="intake-input-column">
             <label for="agentPromptInput" style="font-weight:700; color:var(--text); display:flex; justify-content:space-between; align-items:center;">
-              <span>✍️ Your Story Vision, Feedback &amp; Must-Include Moments (Type to auto-trigger Intake Agent)</span>
-              <span class="muted" style="font-weight:400; font-size:0.76rem;">Auto-refines as you type</span>
+              <span>✍️ Your Story Vision, Feedback &amp; Must-Include Moments</span>
+              <span class="muted" style="font-weight:400; font-size:0.75rem;">Auto-refines as you type</span>
             </label>
             <div class="prompt-box-with-btn">
               <textarea id="agentPromptInput" rows="3" placeholder="Tell the Intake Agent &amp; Director what you want in your video, how long it should feel, or which moments matter most...">Create a cinematic, heartwarming 4-act family day trip highlight video at the Louvre Museum in Paris. Combine our Sony A7C2 mirrorless camera and Pixel phone clips and photos, showcase the Louvre Pyramid, iconic masterpieces, sculptures, and family portraits with museum annotations and 2.5D parallax motion.</textarea>
-              <button class="btn primary" id="btnRefineIntakeNow" type="button" style="align-self:stretch; display:flex; align-items:center; gap:6px;">
-                ✨ Refine with Intake Agent &amp; Director
-              </button>
+              <button class="btn primary" id="btnRefineIntakeNow" type="button">✨ Refine Brief</button>
             </div>
 
-            <!-- 1-CLICK INTERACTIVE REFINEMENT CHIPS -->
             <div style="margin-top:10px;">
-              <div class="muted" style="font-size:0.76rem; margin-bottom:5px;">💡 Quick Co-Refinement Prompts (Click to ask Intake Agent &amp; Director):</div>
+              <div class="muted" style="font-size:0.76rem; margin-bottom:5px;">💡 1-Click Co-Refinement Prompts:</div>
               <div id="intakeSuggestedChips" class="intake-chips-row"></div>
             </div>
 
@@ -118,7 +176,7 @@
               <div class="director-dur-header">
                 <div>
                   <span class="director-badge-gold">🎬 DIRECTOR'S LENGTH RECOMMENDATION</span>
-                  <strong id="directorRecDurationTitle" style="margin-left:8px; color:#fff;">Recommended: 155s (2m 35s) — No 2-Minute Ceiling</strong>
+                  <strong id="directorRecDurationTitle" style="margin-left:8px; color:#fff;">Recommended: 155s (2m 35s)</strong>
                 </div>
                 <button class="btn small primary" id="btnApplyDirectorDuration" type="button">Apply Director's Length</button>
               </div>
@@ -135,21 +193,19 @@
             </div>
           </div>
 
-          <!-- LIVE INTAKE AGENT + DIRECTOR CONVERSATION & DRAFT CREATIVE BRIEF -->
+          <!-- RIGHT: LIVE CHAT FEED + DRAFT CREATIVE BRIEF CARD -->
           <div class="intake-chat-column">
             <div id="intakeConversationBox" class="intake-conversation-box">
-              <div class="muted">Type above or select a library to start interactive refinement with the Client Intake Agent and Production Director...</div>
+              <div class="muted">Type on the left or click a refinement chip to co-design your video with the Client Intake Agent and Production Director...</div>
             </div>
             <div id="liveDraftBriefCard" class="draft-brief-card"></div>
           </div>
         </div>
 
-        <!-- Dynamic Interactive Question Cards rendered from /api/intake-questions -->
-        <div id="interactiveIntakeContainer" class="intake-questions-grid" style="margin-top:14px;"></div>
-
-        <!-- Hidden/Synced Selects for backward compatibility & direct form access -->
-        <details class="advanced-details">
-          <summary>⚙️ Advanced Options: Resolution, Custom BGM Override &amp; Pluggable Agent Roles</summary>
+        <!-- COLLAPSIBLE QUESTION CARDS & ADVANCED SETTINGS (KEEPS TAB 2 CLEAN) -->
+        <details class="advanced-details" style="margin-top:14px;">
+          <summary>🎛️ Fine-Tune Story Arc, Photo Effects, Soundtrack &amp; Resolution Options</summary>
+          <div id="interactiveIntakeContainer" class="intake-questions-grid" style="margin-top:12px;"></div>
           <div class="form-grid" style="margin-top:12px;">
             <div>
               <label>Narrative Arc Style (<code>narrative_style</code>)</label>
@@ -190,27 +246,39 @@
             </div>
             <div>
               <label>Optional Custom BGM Path (Leave blank for AI Music Supervisor auto-selection)</label>
-              <input id="bgmPathInput" type="text" value="" placeholder="Optional .mp3/.wav path (MusicSupervisorAgent auto-scouts if blank or mismatched)" />
+              <input id="bgmPathInput" type="text" value="" placeholder="Optional .mp3/.wav path" />
             </div>
           </div>
-
-          <h4 style="margin:16px 0 8px; font-size:0.88rem; color:var(--accent-cyan);">Registered Multi-Agent Pipeline Roles (Toggle Core &amp; Plugin Agents)</h4>
+          <h4 style="margin:14px 0 8px; font-size:0.86rem; color:var(--accent-cyan);">Registered Pipeline Agents</h4>
           <div id="agentRegistryList" class="agent-registry-list">Loading registered sub-agents...</div>
         </details>
-      </div>
 
-      <!-- STEP 3: RUN END-TO-END & LIVE PROGRESS DASHBOARD -->
-      <div class="card wizard-card">
+        <div class="step-footer-bar">
+          <button class="btn secondary" id="btnBackToProjects" type="button">&larr; Back to Projects &amp; Media</button>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <button class="btn primary btn-hero" id="btnStartFromIntake" type="button">
+              🚀 Start Full AI Workflow &amp; Open Live Studio &rarr;
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB 3: LIVE AGENT & DIRECTOR STUDIO (EXECUTION & REAL-TIME STREAMS) -->
+    <!-- =================================================================== -->
+    <section id="tab-run" class="tab-panel">
+      <div class="card">
         <div class="wizard-step-header">
           <div class="step-badge">STEP 3</div>
           <div style="flex-grow:1;">
-            <h2>Run End-to-End AI Editing &amp; Real-Time Agent + Director Studio Console</h2>
-            <p class="muted">Click Start to invoke all 11 specialized editing agents and watch in real time <strong>what every agent is doing</strong> and <strong>what the Executive Director is thinking</strong> of their work.</p>
+            <h2>Live Multi-Agent Execution &amp; Executive Director Studio</h2>
+            <p class="muted">Watch in real time <strong>what every editing agent is doing</strong> on the left and <strong>what the Executive Director is thinking</strong> on the right.</p>
           </div>
           <div class="run-controls-box">
             <label class="checkbox-label render-toggle-pill">
               <input type="checkbox" id="renderVideoCheckbox" checked />
-              <span>🎬 Render Final 4K HDR Video (<code>.mp4</code>)</span>
+              <span>🎬 Render 4K HDR Video (<code>.mp4</code>)</span>
             </label>
             <button class="btn primary btn-hero" id="btnRunMultiAgent" type="button">
               🚀 Start Full AI Workflow &amp; Render Video
@@ -218,7 +286,25 @@
           </div>
         </div>
 
-        <!-- LIVE PROGRESS TRACKER -->
+        <!-- COMPLETION & INSTANT VIDEO DOWNLOAD BANNER (SHOWN WHEN VIDEO IS READY) -->
+        <div id="runCompleteDownloadBanner" class="completion-download-banner" style="display:none;">
+          <div>
+            <strong style="color:#34d399; font-size:0.96rem;">🎉 Rendered 4K HDR Master Video Ready!</strong>
+            <div class="muted" id="runCompleteBannerSubtext" style="font-size:0.82rem; margin-top:2px;">
+              Your project's final_story.mp4 and NLE timelines have been generated.
+            </div>
+          </div>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <a id="btnBannerDownloadMp4" class="btn primary" href="#" download style="text-decoration:none;">
+              ⬇️ Download Newly Rendered Video (.mp4)
+            </a>
+            <button class="btn secondary" id="btnGoToTheaterTab" type="button">
+              🎬 Watch in Video Theater (Tab 4) &rarr;
+            </button>
+          </div>
+        </div>
+
+        <!-- PROGRESS BAR & STAGE STEPPER -->
         <div id="liveProgressPanel" class="live-progress-panel">
           <div class="progress-header-row">
             <div>
@@ -234,12 +320,12 @@
           <div class="progress-bar-track">
             <div id="liveProgressBarFill" class="progress-bar-fill" style="width: 0%;"></div>
           </div>
-          <div id="liveStatusSubtext" class="progress-subtext">Select your media library in Step 1, refine your brief with the Intake Agent &amp; Director in Step 2, and click "Start Full AI Workflow &amp; Render Video".</div>
+          <div id="liveStatusSubtext" class="progress-subtext">Click "Start Full AI Workflow &amp; Render Video" above to launch all 11 agents.</div>
 
           <!-- 12-STAGE VISUAL AGENT STEPPER -->
           <div id="liveAgentStagesGrid" class="agent-stages-grid"></div>
 
-          <!-- REAL-TIME DUAL-STREAM STUDIO CONSOLE: WHAT AGENTS ARE DOING vs WHAT THE DIRECTOR IS THINKING -->
+          <!-- REAL-TIME DUAL-STREAM STUDIO CONSOLE -->
           <div class="dual-stream-console">
             <div class="stream-panel">
               <div class="stream-panel-header cyan">
@@ -262,7 +348,6 @@
             </div>
           </div>
 
-          <!-- COMPACT RAW TELEMETRY LOG -->
           <details class="raw-telemetry-details">
             <summary>📡 Raw Pipeline Telemetry Log (<span id="activityLogCount">0 events</span>)</summary>
             <div id="liveActivityLog" class="activity-log-box">
@@ -271,31 +356,38 @@
           </details>
         </div>
       </div>
+    </section>
 
-      <!-- STEP 4: INLINE FINAL SHOWCASE (VIDEO PLAYER + CURATED HIGHLIGHTS + DOWNLOADS) -->
-      <div class="card wizard-card" id="showcaseSection">
+    <!-- =================================================================== -->
+    <!-- TAB 4: FINAL VIDEO & DOWNLOADS (THEATER & DELIVERABLES)             -->
+    <!-- =================================================================== -->
+    <section id="tab-deliverables" class="tab-panel">
+      <div class="card" id="showcaseSection">
         <div class="wizard-step-header">
           <div class="step-badge success">RESULT</div>
-          <div>
-            <h2>Final 4K HDR Video, Curated Highlights &amp; NLE Deliverables</h2>
-            <p class="muted">Preview your rendered 4K 10-bit HLG HDR master cut, inspect the Director's Sign-Off, and download FCPXML / EDL / OTIO / MP4 files.</p>
+          <div style="flex-grow:1;">
+            <h2>Final 4K HDR Video Theater, Downloads &amp; Curated Gallery</h2>
+            <p class="muted">Preview your rendered 4K 10-bit HLG HDR master cut, download the newly rendered <code>.mp4</code> to your computer, and inspect the Director's Sign-Off.</p>
           </div>
+          <a id="btnHeroDownloadMp4" class="btn primary btn-hero" href="#" download style="display:none; text-decoration:none;">
+            ⬇️ Download Newly Rendered Video (.mp4)
+          </a>
         </div>
 
         <div class="split-grid">
           <div>
             <h3>🎬 Rendered 4K HDR Master Video Preview</h3>
             <div id="videoPlayerContainer" class="video-container">
-              <p class="muted">Run the pipeline or load an existing project to preview the rendered MP4 video here.</p>
+              <p class="muted">Run the pipeline in Tab 3 or load a rendered project in Tab 1 to preview and download the MP4 video here.</p>
             </div>
-            <div style="margin-top:14px;">
-              <h3>📦 Download Deliverables &amp; NLE Interchange Files</h3>
+            <div style="margin-top:16px;">
+              <h3>📦 Download Video &amp; NLE Interchange Files</h3>
               <div id="exportsList" class="exports-list">No exports available yet.</div>
             </div>
           </div>
 
           <div>
-            <h3>🏆 Executive Director Sign-Off, BGM &amp; Curated Gallery Highlights</h3>
+            <h3>🏆 Executive Director Sign-Off, Soundtrack &amp; Curated Gallery</h3>
             <div id="directorHighlightsBox" class="director-highlights-box">
               <p class="muted">Director review, BGM selection, and curated museum photo annotations will appear here.</p>
             </div>
@@ -304,11 +396,14 @@
       </div>
     </section>
 
-    <!-- TAB 2: MULTI-TRACK TIMELINE & STORYBOARD INSPECTOR -->
-    <section id="tab-step2" class="tab-panel">
+    <!-- =================================================================== -->
+    <!-- TAB 5: ADVANCED INSPECTOR (TIMELINE YAML, CATALOG & JSON CONTRACTS) -->
+    <!-- =================================================================== -->
+    <section id="tab-inspector" class="tab-panel">
+      <!-- SUB-SECTION A: MULTI-TRACK TIMELINE & STORYBOARD -->
       <div class="card">
         <div class="card-header-row">
-          <h2>Multi-Track Timeline Overview (V3 Titles / V2 B-Roll Cutaways / V1 Storyline / Stage-40 VFX / A3 Auto-Ducked BGM)</h2>
+          <h2>🎞️ Multi-Track Timeline &amp; Storyboard Inspector</h2>
           <div class="inline-controls">
             <select id="photoModeSelect" style="width:auto;">
               <option value="parallax_gallery" selected>2.5D Parallax Gallery + Museum Plaque</option>
@@ -321,63 +416,27 @@
         </div>
         <textarea id="storyPromptInput" rows="2" style="display:none;"></textarea>
         <div id="visualTimelineTracks" class="timeline-tracks-box">Generate or load a timeline to view tracks.</div>
-      </div>
 
-      <div class="split-grid">
-        <div class="card">
-          <div class="card-header-row">
-            <h3>Editable Text Timeline (<code>timeline.yaml</code>)</h3>
-            <button class="btn small primary" id="btnSaveTimeline">Save &amp; Validate timeline.yaml</button>
+        <div class="split-grid" style="margin-top:16px;">
+          <div>
+            <div class="card-header-row">
+              <h3>Editable Text Timeline (<code>timeline.yaml</code>)</h3>
+              <button class="btn small primary" id="btnSaveTimeline">Save &amp; Validate timeline.yaml</button>
+            </div>
+            <textarea id="timelineYamlEditor" class="code-editor" style="height:340px;" spellcheck="false" placeholder="# timeline.yaml will appear here..."></textarea>
           </div>
-          <textarea id="timelineYamlEditor" class="code-editor" spellcheck="false" placeholder="# timeline.yaml will appear here..."></textarea>
-        </div>
-        <div class="card">
-          <h3>Story Script, Pacing Audit &amp; Director Screening Report (<code>storyboard.md</code>)</h3>
-          <pre id="storyboardPreview" class="markdown-preview">No storyboard generated yet.</pre>
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 1: RAW MEDIA CATALOG & YAML -->
-    <section id="tab-step1" class="tab-panel">
-      <div class="card">
-        <div class="card-header-row">
-          <h2>Raw Media Analysis &amp; Timestamped Catalog</h2>
-          <div class="inline-controls">
-            <select id="whisperModelSelect" style="width:auto;">
-              <option value="small" selected>faster-whisper: small</option>
-              <option value="base">faster-whisper: base</option>
-            </select>
-            <label class="checkbox-label">
-              <input type="checkbox" id="useAgStep1" />
-              Use Antigravity SDK
-            </label>
-            <button class="btn primary small" id="btnAnalyze">Run Standalone Media Analysis</button>
+          <div>
+            <h3>Story Script &amp; Director Screening Report (<code>storyboard.md</code>)</h3>
+            <pre id="storyboardPreview" class="markdown-preview" style="height:340px;">No storyboard generated yet.</pre>
           </div>
         </div>
       </div>
 
-      <div class="split-grid">
-        <div class="card">
-          <h3>Analyzed Videos, Dialogues &amp; Photos</h3>
-          <div id="catalogSummary" class="catalog-summary">No catalog loaded yet.</div>
-        </div>
-        <div class="card">
-          <div class="card-header-row">
-            <h3>Editable <code>annotations.yaml</code></h3>
-            <button class="btn small" id="btnSaveAnnotations">Save Annotations YAML</button>
-          </div>
-          <textarea id="annotationsYamlEditor" class="code-editor" spellcheck="false" placeholder="# annotations.yaml will appear here..."></textarea>
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 3: AGENT CONTRACTS & BLACKBOARD MESSAGE BUS -->
-    <section id="tab-step3" class="tab-panel">
+      <!-- SUB-SECTION B: AGENT JSON CONTRACTS & BLACKBOARD MESSAGE BUS -->
       <div class="card">
         <div class="card-header-row">
           <div>
-            <h2>Multi-Agent JSON Contracts &amp; Blackboard Message Bus</h2>
+            <h2>🤖 Multi-Agent JSON Contracts &amp; Blackboard Message Bus</h2>
             <p class="muted" style="margin:2px 0 0;">Inspect the deterministic JSON artifacts produced at each stage gate (Stages 00 &rarr; 60).</p>
           </div>
           <div class="inline-controls">
@@ -397,7 +456,34 @@
           </div>
         </div>
         <div id="messageBusSummary" class="message-bus-box">Run the Multi-Agent Pipeline or load a project to inspect inter-agent coordination messages.</div>
-        <pre id="contractJsonViewer" class="markdown-preview" style="height:440px; margin-top:12px;">Select a JSON contract above to inspect.</pre>
+        <pre id="contractJsonViewer" class="markdown-preview" style="height:340px; margin-top:12px;">Select a JSON contract above to inspect.</pre>
+      </div>
+
+      <!-- SUB-SECTION C: RAW MEDIA CATALOG & ANNOTATIONS YAML -->
+      <div class="card">
+        <div class="card-header-row">
+          <h2>🔍 Raw Media Catalog &amp; <code>annotations.yaml</code></h2>
+          <div class="inline-controls">
+            <select id="whisperModelSelect" style="width:auto;">
+              <option value="small" selected>faster-whisper: small</option>
+              <option value="base">faster-whisper: base</option>
+            </select>
+            <label class="checkbox-label">
+              <input type="checkbox" id="useAgStep1" />
+              Use Antigravity SDK
+            </label>
+            <button class="btn primary small" id="btnAnalyze">Run Standalone Media Analysis</button>
+            <button class="btn small secondary" id="btnSaveAnnotations">Save Annotations YAML</button>
+          </div>
+        </div>
+        <div class="split-grid">
+          <div>
+            <div id="catalogSummary" class="catalog-summary" style="max-height:320px;">No catalog loaded yet.</div>
+          </div>
+          <div>
+            <textarea id="annotationsYamlEditor" class="code-editor" style="height:320px;" spellcheck="false" placeholder="# annotations.yaml will appear here..."></textarea>
+          </div>
+        </div>
       </div>
     </section>
   </main>

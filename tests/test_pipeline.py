@@ -383,3 +383,39 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
     assert st["agent_contracts"]["pacing_audit"] is not None
     assert st["agent_contracts"]["director_review"] is not None
     assert st["agent_contracts"]["vfx_manifest"] is not None
+    assert st["project_summary"]["has_rendered_video"] is True
+
+    # Verify dedicated newly-rendered video download endpoint
+    r_dl = client.get("/api/projects/download-video", params={"project_dir": str(proj_dir)})
+    assert r_dl.status_code == 200
+    assert "attachment" in r_dl.headers.get("content-disposition", "").lower()
+    assert "no-store" in r_dl.headers.get("cache-control", "").lower()
+    assert len(r_dl.content) > 1000
+
+    # Verify project management endpoints (list, create, load, reset)
+    r_projs = client.get("/api/projects")
+    assert r_projs.status_code == 200
+    assert "projects" in r_projs.json()
+
+    custom_proj_dir = tmp_path / "custom_trip_project"
+    r_create = client.post(
+        "/api/projects/create",
+        json={
+            "project_name": "Custom Trip",
+            "media_dir": str(sample_media_dir),
+            "project_dir": str(custom_proj_dir),
+        },
+    )
+    assert r_create.status_code == 200
+    assert (custom_proj_dir / "project_meta.json").exists()
+
+    r_load = client.post("/api/projects/load", json={"project_dir": str(proj_dir)})
+    assert r_load.status_code == 200
+    assert r_load.json()["project"]["has_rendered_video"] is True
+
+    assert (job_proj / "timeline.yaml").exists()
+    r_reset = client.post("/api/projects/reset", json={"project_dir": str(job_proj)})
+    assert r_reset.status_code == 200
+    assert r_reset.json()["removed_files_count"] >= 5
+    assert not (job_proj / "timeline.yaml").exists()
+    assert (job_proj / "project_meta.json").exists()
