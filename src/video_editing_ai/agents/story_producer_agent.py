@@ -257,6 +257,11 @@ class StoryProducerAgent(BaseEditingAgent):
         out_path = blackboard.project_dir / "paper_edit.json"
         paper_edit.to_json_file(out_path)
         blackboard.paper_edit = paper_edit
+        blackboard.emit_activity(
+            self.role_id,
+            f"Architected {len(paper_edit.chapters)}-Act Paper Edit with {sum(len(c.selected_subclip_ids) for c in paper_edit.chapters)} sequenced story beats",
+            detail="Chapters: " + " | ".join(f"{c.title} ({len(c.selected_subclip_ids)} clips)" for c in paper_edit.chapters),
+        )
 
         blackboard.send_message(
             sender_role=self.role_id,

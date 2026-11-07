@@ -200,6 +200,12 @@ class CullerAgent(BaseEditingAgent):
         subclips: list[CulledSubClip] = []
         discarded_count = 0
 
+        blackboard.emit_activity(
+            self.role_id,
+            f"Ingesting & probing {len(catalog.videos)} videos and {len(catalog.photos)} photos (Whisper ASR + scene boundaries)",
+            detail=f"Matching against {len(must_topics)} client must-have topics",
+        )
+
         # 1. Process Videos -> A-Roll Dialogue vs B-Roll Golden Windows
         sorted_videos: list[VideoAsset] = sorted(
             catalog.videos, key=lambda v: (v.creation_time or "", v.filename)
@@ -348,7 +354,11 @@ class CullerAgent(BaseEditingAgent):
                 )
             )
 
-        max_photos_cap = 16 if len(photo_candidates) >= 30 else 14
+        video_dur_sum = sum(s.duration for s in subclips if s.media_type == "video" and not s.is_discarded)
+        target_dur = blackboard.creative_brief.target_duration_sec if blackboard.creative_brief else 110.0
+        rem_photo_sec = max(24.0, target_dur - video_dur_sum)
+        dynamic_photo_cap = max(14, min(60, int(round(rem_photo_sec / 3.1))))
+        max_photos_cap = dynamic_photo_cap if len(photo_candidates) >= 15 else len(photo_candidates)
         target_active_photos = min(len(photo_candidates), max_photos_cap)
         if len(photo_candidates) > target_active_photos and target_active_photos > 0:
             bucket_size = len(photo_candidates) / target_active_photos
@@ -369,6 +379,11 @@ class CullerAgent(BaseEditingAgent):
 
         subclips.extend(photo_candidates)
         kept_count = sum(1 for s in subclips if not s.is_discarded)
+        blackboard.emit_activity(
+            self.role_id,
+            f"Culled {len(subclips)} raw subclips -> kept {kept_count} active selects ({discarded_count} burst/low-score discards)",
+            detail=f"Video spine: {video_dur_sum:.1f}s | Initial photo budget for {target_dur:.0f}s target: {target_active_photos} plates",
+        )
 
         media_index = MediaIndex(
             source_directory=str(blackboard.media_dir),

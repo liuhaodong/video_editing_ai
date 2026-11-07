@@ -86,19 +86,66 @@
       <div class="card wizard-card">
         <div class="wizard-step-header">
           <div class="step-badge">STEP 2</div>
-          <div>
-            <h2>Interactive Client Intake &amp; Creative Direction</h2>
-            <p class="muted">Customize how the 11 AI agents curate your photos, select background music, structure the 4-act story, and frame 4K HDR visuals.</p>
+          <div style="flex-grow:1;">
+            <h2>Interactive Client Intake &amp; Director Consultation (Live Co-Refinement)</h2>
+            <p class="muted">As soon as you type your vision or click a refinement chip below, the <strong>Client Intake Agent</strong> and <strong>Executive Movie Production Director</strong> kick off immediately to refine your brief and recommend the optimal video length.</p>
+          </div>
+          <span class="intake-live-pill" id="intakeAgentStatusPill">🟢 Intake Agent &amp; Director Active</span>
+        </div>
+
+        <!-- LIVE PROMPT INPUT + INSTANT REFINE BUTTON -->
+        <div class="intake-live-workbench">
+          <div class="intake-input-column">
+            <label for="agentPromptInput" style="font-weight:700; color:var(--text); display:flex; justify-content:space-between; align-items:center;">
+              <span>✍️ Your Story Vision, Feedback &amp; Must-Include Moments (Type to auto-trigger Intake Agent)</span>
+              <span class="muted" style="font-weight:400; font-size:0.76rem;">Auto-refines as you type</span>
+            </label>
+            <div class="prompt-box-with-btn">
+              <textarea id="agentPromptInput" rows="3" placeholder="Tell the Intake Agent &amp; Director what you want in your video, how long it should feel, or which moments matter most...">Create a cinematic, heartwarming 4-act family day trip highlight video at the Louvre Museum in Paris. Combine our Sony A7C2 mirrorless camera and Pixel phone clips and photos, showcase the Louvre Pyramid, iconic masterpieces, sculptures, and family portraits with museum annotations and 2.5D parallax motion.</textarea>
+              <button class="btn primary" id="btnRefineIntakeNow" type="button" style="align-self:stretch; display:flex; align-items:center; gap:6px;">
+                ✨ Refine with Intake Agent &amp; Director
+              </button>
+            </div>
+
+            <!-- 1-CLICK INTERACTIVE REFINEMENT CHIPS -->
+            <div style="margin-top:10px;">
+              <div class="muted" style="font-size:0.76rem; margin-bottom:5px;">💡 Quick Co-Refinement Prompts (Click to ask Intake Agent &amp; Director):</div>
+              <div id="intakeSuggestedChips" class="intake-chips-row"></div>
+            </div>
+
+            <!-- DIRECTOR'S LENGTH RECOMMENDATION & CUSTOM DURATION SLIDER (30s - 600s) -->
+            <div id="directorDurationBanner" class="director-duration-banner">
+              <div class="director-dur-header">
+                <div>
+                  <span class="director-badge-gold">🎬 DIRECTOR'S LENGTH RECOMMENDATION</span>
+                  <strong id="directorRecDurationTitle" style="margin-left:8px; color:#fff;">Recommended: 155s (2m 35s) — No 2-Minute Ceiling</strong>
+                </div>
+                <button class="btn small primary" id="btnApplyDirectorDuration" type="button">Apply Director's Length</button>
+              </div>
+              <p id="directorRecRationaleText" class="director-dur-rationale">
+                Analyzing your media library's video clips and distinct photo clusters to recommend the ideal narrative runtime...
+              </p>
+              <div class="duration-slider-row">
+                <label for="customDurationSlider" style="margin:0; color:var(--text); font-weight:600; min-width:210px;">
+                  ⏱️ Target Duration: <span id="customDurationLabel" style="color:var(--accent);">155s (2m 35s)</span>
+                </label>
+                <input id="customDurationSlider" type="range" min="30" max="600" step="5" value="155" />
+                <span class="muted" style="font-size:0.75rem; white-space:nowrap;">30s &ndash; 10m (600s)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- LIVE INTAKE AGENT + DIRECTOR CONVERSATION & DRAFT CREATIVE BRIEF -->
+          <div class="intake-chat-column">
+            <div id="intakeConversationBox" class="intake-conversation-box">
+              <div class="muted">Type above or select a library to start interactive refinement with the Client Intake Agent and Production Director...</div>
+            </div>
+            <div id="liveDraftBriefCard" class="draft-brief-card"></div>
           </div>
         </div>
 
-        <div class="full-span" style="margin-bottom: 16px;">
-          <label for="agentPromptInput" style="font-weight:600; color:var(--text);">Story Vision &amp; Must-Include Moments (Auto-Tailored to Your Library — Edit Freely)</label>
-          <textarea id="agentPromptInput" rows="2">Create a cinematic, heartwarming 4-act family day trip highlight video at the Louvre Museum in Paris. Combine our Sony A7C2 mirrorless camera and Pixel phone clips and photos, showcase the Louvre Pyramid, iconic masterpieces, sculptures, and family portraits with museum annotations and 2.5D parallax motion.</textarea>
-        </div>
-
         <!-- Dynamic Interactive Question Cards rendered from /api/intake-questions -->
-        <div id="interactiveIntakeContainer" class="intake-questions-grid"></div>
+        <div id="interactiveIntakeContainer" class="intake-questions-grid" style="margin-top:14px;"></div>
 
         <!-- Hidden/Synced Selects for backward compatibility & direct form access -->
         <details class="advanced-details">
@@ -130,12 +177,8 @@
               </select>
             </div>
             <div>
-              <label>Target Duration &amp; Pacing</label>
-              <select id="intakeTargetDuration">
-                <option value="90" selected>~70-90s Cinematic Highlight Cut (Max 4.5s B-Roll)</option>
-                <option value="60">~60s Fast Highlight Reel (Max 3.5s B-Roll)</option>
-                <option value="120">~120s Extended Family Documentary</option>
-              </select>
+              <label>Target Duration &amp; Pacing (Seconds)</label>
+              <input id="intakeTargetDuration" type="text" value="155" />
             </div>
             <div>
               <label>Output Resolution &amp; HDR Mastering</label>
@@ -161,8 +204,8 @@
         <div class="wizard-step-header">
           <div class="step-badge">STEP 3</div>
           <div style="flex-grow:1;">
-            <h2>Run End-to-End AI Editing &amp; Live Progress Tracker</h2>
-            <p class="muted">Executes all 11 specialized editing agents under the Executive Movie Production Director and renders the final 4K 10-bit HLG HDR video.</p>
+            <h2>Run End-to-End AI Editing &amp; Real-Time Agent + Director Studio Console</h2>
+            <p class="muted">Click Start to invoke all 11 specialized editing agents and watch in real time <strong>what every agent is doing</strong> and <strong>what the Executive Director is thinking</strong> of their work.</p>
           </div>
           <div class="run-controls-box">
             <label class="checkbox-label render-toggle-pill">
@@ -170,7 +213,7 @@
               <span>🎬 Render Final 4K HDR Video (<code>.mp4</code>)</span>
             </label>
             <button class="btn primary btn-hero" id="btnRunMultiAgent" type="button">
-              🚀 Run Full AI Edit &amp; Render Video
+              🚀 Start Full AI Workflow &amp; Render Video
             </button>
           </div>
         </div>
@@ -191,21 +234,41 @@
           <div class="progress-bar-track">
             <div id="liveProgressBarFill" class="progress-bar-fill" style="width: 0%;"></div>
           </div>
-          <div id="liveStatusSubtext" class="progress-subtext">Select your media library in Step 1, review your preferences in Step 2, and click "Run Full AI Edit &amp; Render Video".</div>
+          <div id="liveStatusSubtext" class="progress-subtext">Select your media library in Step 1, refine your brief with the Intake Agent &amp; Director in Step 2, and click "Start Full AI Workflow &amp; Render Video".</div>
 
           <!-- 12-STAGE VISUAL AGENT STEPPER -->
           <div id="liveAgentStagesGrid" class="agent-stages-grid"></div>
 
-          <!-- LIVE ACTIVITY LOG -->
-          <div class="activity-log-wrapper">
-            <div class="activity-log-header">
-              <span>📡 Live Pipeline Activity &amp; Director Supervision Feed</span>
-              <span class="muted" id="activityLogCount">0 events</span>
+          <!-- REAL-TIME DUAL-STREAM STUDIO CONSOLE: WHAT AGENTS ARE DOING vs WHAT THE DIRECTOR IS THINKING -->
+          <div class="dual-stream-console">
+            <div class="stream-panel">
+              <div class="stream-panel-header cyan">
+                <span>🤖 What the Agents Are Doing (Live Sub-Steps &amp; Blackboard Bus)</span>
+                <span class="muted" id="agentDoingCount">0 actions</span>
+              </div>
+              <div id="liveAgentDoingStream" class="stream-panel-body">
+                <div class="muted">Click "Start Full AI Workflow" to watch each sub-agent's live actions, calculations, and blackboard handoffs...</div>
+              </div>
             </div>
+
+            <div class="stream-panel">
+              <div class="stream-panel-header gold">
+                <span>🎬 What the Director Is Thinking (Live Observation, Reasoning &amp; Directives)</span>
+                <span class="muted" id="directorThinkingCount">0 reviews</span>
+              </div>
+              <div id="liveDirectorThinkingStream" class="stream-panel-body">
+                <div class="muted">The Executive Movie Production Director's stage-by-stage observations, aesthetic thoughts, and corrective directives will appear here live...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- COMPACT RAW TELEMETRY LOG -->
+          <details class="raw-telemetry-details">
+            <summary>📡 Raw Pipeline Telemetry Log (<span id="activityLogCount">0 events</span>)</summary>
             <div id="liveActivityLog" class="activity-log-box">
               <div class="muted">Pipeline telemetry will stream here in real time as each agent runs...</div>
             </div>
-          </div>
+          </details>
         </div>
       </div>
 

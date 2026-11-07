@@ -298,6 +298,11 @@ class MusicSupervisorAgent(BaseEditingAgent):
 
         bgm_dir = blackboard.project_dir / "bgm_library"
         bgm_dir.mkdir(parents=True, exist_ok=True)
+        blackboard.emit_activity(
+            self.role_id,
+            f"Scouting royalty-free soundtrack for mood profile '{target_profile}'",
+            detail="Evaluating destination cultural tone, tempo, and instrumentation fit",
+        )
 
         # Check if user passed an existing BGM and whether it clashes with the target mood profile
         user_bgm: Optional[Path] = blackboard.extra_audio_paths[0] if blackboard.extra_audio_paths else None
@@ -414,6 +419,11 @@ class MusicSupervisorAgent(BaseEditingAgent):
         out_path = blackboard.project_dir / "bgm_selection.json"
         report.to_json_file(out_path)
         blackboard.bgm_selection = report
+        blackboard.emit_activity(
+            self.role_id,
+            f"Locked soundtrack: '{report.track_title}' by {report.composer_or_artist} (mood match {report.mood_match_score}/10)",
+            detail=report.selection_rationale,
+        )
 
         blackboard.send_message(
             sender_role=self.role_id,

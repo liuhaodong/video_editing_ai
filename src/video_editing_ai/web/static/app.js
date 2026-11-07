@@ -7,12 +7,24 @@ let currentIntakeAnswers = {
   photo_mode: "parallax_gallery",
   bgm_mood: "auto_match",
   dialogue_preference: "keep_full_sentences_with_broll_cutaways",
-  target_duration_sec: "90",
+  target_duration_sec: "155",
   must_include_topics: "",
 };
+let intakeChatHistory = [];
+let intakeDebounceTimer = null;
+let latestDirectorRecommendedSec = 155;
 let activePollTimer = null;
 let currentBrowserPath = "";
 let currentBrowserParent = null;
+
+function formatMmSs(seconds) {
+  const sec = Math.max(1, Math.round(Number(seconds) || 90));
+  const mins = Math.floor(sec / 60);
+  const rem = sec % 60;
+  if (mins > 0 && rem > 0) return `${mins}m ${String(rem).padStart(2, "0")}s`;
+  if (mins > 0) return `${mins}m 00s`;
+  return `${rem}s`;
+}
 
 function setStatus(text) {
   if (statusPill) statusPill.textContent = text;
@@ -123,6 +135,10 @@ async function selectMediaLibrary(mediaDir, suggestedProjectDir = null, updatePr
     if (data.questions) {
       renderInteractiveIntakeQuestions(data.questions);
     }
+    if (data.initial_refinement) {
+      intakeChatHistory = [];
+      applyIntakeRefinementResult(data.initial_refinement, null);
+    }
   }
 
   renderDiscoveredLibraries(discoveredLibraries);
@@ -130,8 +146,174 @@ async function selectMediaLibrary(mediaDir, suggestedProjectDir = null, updatePr
 }
 
 // ---------------------------------------------------------------------------
-// STEP 2: DYNAMIC INTERACTIVE CLIENT INTAKE WIZARD
+// STEP 2: LIVE INTERACTIVE CLIENT INTAKE & DIRECTOR CONSULTATION
 // ---------------------------------------------------------------------------
+function updateDurationControlsUI(targetSec, recInfo = null) {
+  const sec = Math.max(30, Math.min(600, Math.round(Number(targetSec) || 155)));
+  currentIntakeAnswers.target_duration_sec = String(sec);
+
+  const sliderEl = document.getElementById("customDurationSlider");
+  const labelEl = document.getElementById("customDurationLabel");
+  const hiddenInput = document.getElementById("intakeTargetDuration");
+  if (sliderEl) sliderEl.value = String(sec);
+  if (labelEl) labelEl.textContent = `${sec}s (${formatMmSs(sec)})`;
+  if (hiddenInput) hiddenInput.value = String(sec);
+
+  if (recInfo) {
+    latestDirectorRecommendedSec = recInfo.director_recommended_duration_sec || sec;
+    const titleEl = document.getElementById("directorRecDurationTitle");
+    const ratEl = document.getElementById("directorRecRationaleText");
+    if (titleEl) {
+      titleEl.textContent = `Director Recommends: ${recInfo.director_recommended_duration_sec}s (${recInfo.director_recommended_mmss}) — ~${recInfo.recommended_photo_plates} Curated Gallery Plates`;
+    }
+    if (ratEl) {
+      ratEl.textContent = recInfo.director_duration_rationale || "";
+    }
+  }
+
+  // Highlight matching duration radio pill if present
+  const container = document.getElementById("interactiveIntakeContainer");
+  if (container) {
+    container.querySelectorAll(`.intake-option-pill[data-qid="target_duration_sec"]`).forEach((p) => {
+      const isMatch = Number(p.dataset.val) === sec;
+      p.classList.toggle("active", isMatch);
+      const r = p.querySelector("input[type='radio']");
+      if (r) r.checked = isMatch;
+    });
+  }
+}
+
+function applyIntakeRefinementResult(refData, userMsgText = null) {
+  if (!refData) return;
+
+  if (refData.updated_answers) {
+    Object.assign(currentIntakeAnswers, refData.updated_answers);
+  }
+  const durRec = refData.duration_recommendation;
+  const draft = refData.draft_brief || {};
+  const chosenDur = draft.target_duration_sec || currentIntakeAnswers.target_duration_sec || 155;
+  updateDurationControlsUI(chosenDur, durRec);
+
+  // Sync underlying selects & radio pills
+  ["narrative_style", "photo_mode", "bgm_mood", "dialogue_preference"].forEach((qId) => {
+    const val = (currentIntakeAnswers[qId] || "").split(" ")[0].trim();
+    if (!val) return;
+    const container = document.getElementById("interactiveIntakeContainer");
+    if (container) {
+      container.querySelectorAll(`.intake-option-pill[data-qid="${qId}"]`).forEach((p) => {
+        const isMatch = p.dataset.val === val;
+        p.classList.toggle("active", isMatch);
+        const r = p.querySelector("input[type='radio']");
+        if (r) r.checked = isMatch;
+      });
+    }
+  });
+
+  // Update conversation feed
+  if (userMsgText) {
+    intakeChatHistory.push({ role: "user", text: userMsgText });
+  }
+  if (refData.agent_reply) {
+    intakeChatHistory.push({ role: "intake", text: refData.agent_reply });
+  }
+  if (refData.director_note) {
+    intakeChatHistory.push({ role: "director", text: refData.director_note });
+  }
+  if (intakeChatHistory.length > 9) {
+    intakeChatHistory = intakeChatHistory.slice(-9);
+  }
+
+  const chatBox = document.getElementById("intakeConversationBox");
+  if (chatBox) {
+    chatBox.innerHTML = intakeChatHistory
+      .map((item) => {
+        const cleanHtml = escapeHtml(item.text)
+          .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+          .replace(/`(.*?)`/g, "<code>$1</code>");
+        return `<div class="chat-bubble ${escapeHtml(item.role)}">${cleanHtml}</div>`;
+      })
+      .join("");
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  // Render Live Draft CreativeBrief Card
+  const briefCard = document.getElementById("liveDraftBriefCard");
+  if (briefCard && draft.project_title) {
+    const topicsHtml = (draft.must_include_topics || [])
+      .slice(0, 6)
+      .map((t) => `<span class="brief-tag">${escapeHtml(t)}</span>`)
+      .join("");
+    briefCard.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+        <strong style="color:var(--accent-cyan);">📄 Live Draft <code>creative_brief.json</code></strong>
+        <span class="stage-badge-mini">⏱️ ${Math.round(draft.target_duration_sec)}s (${formatMmSs(draft.target_duration_sec)}) • ~${refData.estimated_photo_plates || 22} Photos</span>
+      </div>
+      <div style="font-size:0.76rem; color:#cbd5e1; margin-bottom:5px;">
+        <strong>Arc:</strong> <code>${escapeHtml(draft.narrative_style)}</code> &bull;
+        <strong>Photos:</strong> <code>${escapeHtml(draft.photo_mode)}</code> &bull;
+        <strong>Audio:</strong> <code>${escapeHtml(currentIntakeAnswers.bgm_mood || "auto_match")}</code> (-14dB Ducking)
+      </div>
+      <div>${topicsHtml}</div>
+    `;
+  }
+
+  // Render 1-Click Suggested Refinement Chips
+  const chipsBox = document.getElementById("intakeSuggestedChips");
+  if (chipsBox && Array.isArray(refData.suggested_chips)) {
+    chipsBox.innerHTML = refData.suggested_chips
+      .map((chip) => `<button type="button" class="intake-chip-btn" data-chip="${escapeHtml(chip)}">${escapeHtml(chip)}</button>`)
+      .join("");
+    chipsBox.querySelectorAll(".intake-chip-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const chipText = btn.dataset.chip || "";
+        const promptEl = document.getElementById("agentPromptInput");
+        if (promptEl && !promptEl.value.includes(chipText)) {
+          promptEl.value = `${promptEl.value.trim()} — ${chipText}`;
+        }
+        await runLiveIntakeRefinement(chipText);
+      });
+    });
+  }
+}
+
+async function runLiveIntakeRefinement(customUserAction = null) {
+  const mediaDir = document.getElementById("mediaDirInput")?.value.trim();
+  const promptEl = document.getElementById("agentPromptInput");
+  if (!mediaDir || !promptEl) return;
+
+  const pillEl = document.getElementById("intakeAgentStatusPill");
+  if (pillEl) {
+    pillEl.textContent = "⏳ Intake Agent & Director Refining...";
+    pillEl.classList.add("busy");
+  }
+
+  const msgToSend = customUserAction || promptEl.value.trim();
+  currentIntakeAnswers.must_include_topics = promptEl.value.trim();
+
+  try {
+    const res = await fetch("/api/intake/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        media_dir: mediaDir,
+        user_message: msgToSend,
+        interview_answers: currentIntakeAnswers,
+        chat_history: intakeChatHistory,
+      }),
+    });
+    if (res.ok) {
+      const refData = await res.json();
+      applyIntakeRefinementResult(refData, customUserAction || "Updated story vision & intake preferences");
+    }
+  } catch (err) {
+    console.warn("Live intake refine error:", err);
+  } finally {
+    if (pillEl) {
+      pillEl.textContent = "🟢 Intake Agent & Director Synchronized";
+      pillEl.classList.remove("busy");
+    }
+  }
+}
 function renderInteractiveIntakeQuestions(questions) {
   const container = document.getElementById("interactiveIntakeContainer");
   if (!container) return;
@@ -196,15 +378,54 @@ function renderInteractiveIntakeQuestions(questions) {
         const el = document.getElementById("intakeDialoguePref");
         if (el) el.value = val;
       } else if (qId === "target_duration_sec") {
-        const el = document.getElementById("intakeTargetDuration");
-        if (el) el.value = val;
+        updateDurationControlsUI(val);
+        runLiveIntakeRefinement(`Set target duration to ${val}s`);
       } else if (qId === "must_include_topics") {
         const promptEl = document.getElementById("agentPromptInput");
         if (promptEl) promptEl.value = val;
+        runLiveIntakeRefinement(`Prioritize highlights: ${val}`);
+      }
+      if (qId !== "target_duration_sec" && qId !== "must_include_topics") {
+        runLiveIntakeRefinement(`Selected ${qId} = ${val}`);
       }
     });
   });
 }
+
+// Live listeners for Step 2 interactive prompt box, refine button, and duration slider
+document.getElementById("agentPromptInput")?.addEventListener("input", () => {
+  const pillEl = document.getElementById("intakeAgentStatusPill");
+  if (pillEl) {
+    pillEl.textContent = "✍️ Listening... Intake Agent preparing refinement";
+    pillEl.classList.add("busy");
+  }
+  if (intakeDebounceTimer) clearTimeout(intakeDebounceTimer);
+  intakeDebounceTimer = setTimeout(() => {
+    runLiveIntakeRefinement();
+  }, 650);
+});
+
+document.getElementById("btnRefineIntakeNow")?.addEventListener("click", () => {
+  if (intakeDebounceTimer) clearTimeout(intakeDebounceTimer);
+  runLiveIntakeRefinement();
+});
+
+document.getElementById("customDurationSlider")?.addEventListener("input", (e) => {
+  updateDurationControlsUI(e.target.value);
+});
+
+document.getElementById("customDurationSlider")?.addEventListener("change", (e) => {
+  const sec = Number(e.target.value);
+  updateDurationControlsUI(sec);
+  runLiveIntakeRefinement(`Set custom target duration to ${sec} seconds (${formatMmSs(sec)})`);
+});
+
+document.getElementById("btnApplyDirectorDuration")?.addEventListener("click", () => {
+  updateDurationControlsUI(latestDirectorRecommendedSec);
+  runLiveIntakeRefinement(
+    `Use Director's Recommended Length of ${latestDirectorRecommendedSec} seconds (${formatMmSs(latestDirectorRecommendedSec)})`
+  );
+});
 
 // ---------------------------------------------------------------------------
 // STEP 3: LIVE PIPELINE PROGRESS & 12-STAGE AGENT STEPPER
@@ -255,10 +476,10 @@ function renderJobProgress(job) {
   if (runBtn) {
     if (st === "running") {
       runBtn.disabled = true;
-      runBtn.textContent = `⏳ Running Pipeline (${pct}%)...`;
+      runBtn.textContent = `⏳ Running Multi-Agent Workflow (${pct}%)...`;
     } else {
       runBtn.disabled = false;
-      runBtn.textContent = "🚀 Run Full AI Edit & Render Video";
+      runBtn.textContent = "🚀 Start Full AI Workflow & Render Video";
     }
   }
 
@@ -289,6 +510,49 @@ function renderJobProgress(job) {
         `;
       })
       .join("");
+  }
+
+  // Render Left Stream: What the Agents Are Doing
+  const doingEl = document.getElementById("liveAgentDoingStream");
+  const doingCountEl = document.getElementById("agentDoingCount");
+  if (doingEl && Array.isArray(job.agent_activities) && job.agent_activities.length > 0) {
+    if (doingCountEl) doingCountEl.textContent = `${job.agent_activities.length} actions`;
+    doingEl.innerHTML = job.agent_activities
+      .map(
+        (act) => `
+        <div class="agent-action-card ${escapeHtml(act.event_type || "agent_action")}">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong style="color:var(--accent-cyan);">[${escapeHtml(act.role_id)}]</strong>
+            <span class="muted" style="font-size:0.7rem;">${escapeHtml(act.time_str || "")}</span>
+          </div>
+          <div style="margin-top:2px; font-weight:600;">${escapeHtml(act.action)}</div>
+          ${act.detail ? `<div class="muted" style="font-size:0.73rem; margin-top:2px;">${escapeHtml(act.detail)}</div>` : ""}
+        </div>`
+      )
+      .join("");
+    doingEl.scrollTop = doingEl.scrollHeight;
+  }
+
+  // Render Right Stream: What the Director Is Thinking
+  const thinkingEl = document.getElementById("liveDirectorThinkingStream");
+  const thinkingCountEl = document.getElementById("directorThinkingCount");
+  if (thinkingEl && Array.isArray(job.director_thoughts) && job.director_thoughts.length > 0) {
+    if (thinkingCountEl) thinkingCountEl.textContent = `${job.director_thoughts.length} stage reviews`;
+    thinkingEl.innerHTML = job.director_thoughts
+      .map(
+        (th) => `
+        <div class="director-thought-card ${escapeHtml(th.status || "approved")}">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>🎬 Reviewing <code>${escapeHtml(th.reviewed_role)}</code></strong>
+            <span class="stage-badge-mini">${escapeHtml(String(th.status || "approved").toUpperCase())} • ${Number(th.quality_score || 9.5).toFixed(1)}/10</span>
+          </div>
+          ${th.observation ? `<div class="thought-row"><span class="thought-label">👁️ Observation:</span> ${escapeHtml(th.observation)}</div>` : ""}
+          ${th.thinking ? `<div class="thought-row"><span class="thought-label">🧠 Thinking:</span> ${escapeHtml(th.thinking)}</div>` : ""}
+          <div class="thought-row"><span class="thought-label">⚖️ Verdict:</span> ${escapeHtml(th.decision || th.critique || "")}</div>
+        </div>`
+      )
+      .join("");
+    thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
 
   if (logEl && Array.isArray(job.activity_log)) {
@@ -478,6 +742,69 @@ function renderContractsAndBus(contracts) {
     viewer.textContent = doc
       ? JSON.stringify(doc, null, 2)
       : `// ${key}.json has not been generated yet in this project workspace.`;
+  }
+
+  // If Dual-Stream Console is currently empty (e.g. loaded existing completed project), populate from contracts
+  const doingEl = document.getElementById("liveAgentDoingStream");
+  const doingCountEl = document.getElementById("agentDoingCount");
+  if (doingEl && bb && Array.isArray(bb.executed_agents) && doingCountEl?.textContent === "0 actions") {
+    const synthActions = [];
+    bb.executed_agents.forEach((ea) => {
+      synthActions.push({
+        role_id: ea.role_id,
+        action: `Executed ${ea.display_name} (Stage ${ea.stage_order})`,
+        detail: JSON.stringify(ea.summary || {}).slice(0, 140),
+        event_type: "agent_action",
+      });
+    });
+    (bb.messages || []).forEach((m) => {
+      synthActions.push({
+        role_id: m.sender_role,
+        action: `[${String(m.message_type).toUpperCase()}] -> ${m.recipient_role}: ${m.subject}`,
+        detail: JSON.stringify(m.payload || {}).slice(0, 140),
+        event_type: "bus_message",
+      });
+    });
+    if (synthActions.length > 0) {
+      if (doingCountEl) doingCountEl.textContent = `${synthActions.length} actions (loaded)`;
+      doingEl.innerHTML = synthActions
+        .map(
+          (act) => `
+          <div class="agent-action-card ${escapeHtml(act.event_type)}">
+            <div><strong style="color:var(--accent-cyan);">[${escapeHtml(act.role_id)}]</strong> ${escapeHtml(act.action)}</div>
+            <div class="muted" style="font-size:0.72rem; margin-top:2px;">${escapeHtml(act.detail)}</div>
+          </div>`
+        )
+        .join("");
+    }
+  }
+
+  const thinkingEl = document.getElementById("liveDirectorThinkingStream");
+  const thinkingCountEl = document.getElementById("directorThinkingCount");
+  if (thinkingEl && dr && Array.isArray(dr.stage_reviews) && thinkingCountEl?.textContent === "0 reviews") {
+    if (thinkingCountEl) thinkingCountEl.textContent = `${dr.stage_reviews.length + 1} reviews (loaded)`;
+    const cardsHtml = dr.stage_reviews
+      .map(
+        (sr) => `
+        <div class="director-thought-card ${escapeHtml(sr.status)}">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>🎬 Stage ${sr.stage_order} • <code>${escapeHtml(sr.reviewed_agent_role)}</code></strong>
+            <span class="stage-badge-mini">${escapeHtml(String(sr.status).toUpperCase())} • ${Number(sr.quality_score).toFixed(1)}/10</span>
+          </div>
+          <div class="thought-row"><span class="thought-label">🧠 Critique:</span> ${escapeHtml(sr.critique)}</div>
+          ${sr.directive_sent ? `<div class="thought-row"><span class="thought-label">⚡ Directive:</span> ${escapeHtml(sr.directive_sent)}</div>` : ""}
+        </div>`
+      )
+      .join("");
+    const finalCard = `
+      <div class="director-thought-card approved">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <strong>🏆 Final Executive Screening Sign-Off</strong>
+          <span class="stage-badge-mini">GRADE ${escapeHtml(dr.quality_grade)} • ${dr.overall_quality_score}/10</span>
+        </div>
+        <div class="thought-row"><span class="thought-label">🧠 Vision:</span> ${escapeHtml(dr.director_vision_statement)}</div>
+      </div>`;
+    thinkingEl.innerHTML = cardsHtml + finalCard;
   }
 }
 

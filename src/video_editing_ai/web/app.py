@@ -19,6 +19,7 @@ from ..agents import (
     MultiAgentOrchestrator,
     generate_intake_questions,
     inspect_media_library,
+    refine_intake_interactively,
     run_multi_agent_pipeline,
 )
 from ..analyzer.ag_annotator import analyze_media_directory
@@ -74,6 +75,13 @@ class MultiAgentRunRequest(BaseModel):
 class RenderRequest(BaseModel):
     project_dir: str = "workspace_project"
     output_filename: str = "final_story.mp4"
+
+
+class IntakeRefineRequest(BaseModel):
+    media_dir: str
+    user_message: str = ""
+    interview_answers: dict[str, str] = Field(default_factory=dict)
+    chat_history: list[dict[str, str]] = Field(default_factory=list)
 
 
 def _read_json_if_exists(path: Path) -> Optional[dict[str, Any]]:
@@ -158,23 +166,71 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
         "elapsed_sec": 0.0,
         "stages": [],
         "activity_log": [],
+        "agent_activities": [],
+        "director_thoughts": [],
     }
 
-    def _append_log(role_id: str, message: str, level: str = "info") -> None:
+    def _elapsed_str() -> tuple[str, float]:
         started = job_state.get("started_at") or time.monotonic()
         elapsed = max(0.0, time.monotonic() - started)
         mm = int(elapsed // 60)
         ss = int(elapsed % 60)
+        return f"{mm:02d}:{ss:02d}", round(elapsed, 1)
+
+    def _append_log(role_id: str, message: str, level: str = "info") -> None:
+        t_str, elapsed = _elapsed_str()
         entry = {
-            "time_str": f"{mm:02d}:{ss:02d}",
-            "elapsed_sec": round(elapsed, 1),
+            "time_str": t_str,
+            "elapsed_sec": elapsed,
             "role_id": role_id,
             "message": message,
             "level": level,
         }
         job_state["activity_log"].append(entry)
-        if len(job_state["activity_log"]) > 120:
-            job_state["activity_log"] = job_state["activity_log"][-120:]
+        if len(job_state["activity_log"]) > 160:
+            job_state["activity_log"] = job_state["activity_log"][-160:]
+
+    def _append_agent_activity(
+        role_id: str,
+        action: str,
+        detail: str = "",
+        event_type: str = "agent_action",
+        extra: Optional[dict[str, Any]] = None,
+    ) -> None:
+        t_str, elapsed = _elapsed_str()
+        item: dict[str, Any] = {
+            "time_str": t_str,
+            "elapsed_sec": elapsed,
+            "role_id": role_id,
+            "action": action,
+            "detail": detail,
+            "event_type": event_type,
+        }
+        if extra:
+            item.update(extra)
+        job_state["agent_activities"].append(item)
+        if len(job_state["agent_activities"]) > 180:
+            job_state["agent_activities"] = job_state["agent_activities"][-180:]
+
+    def _append_director_thought(ev: dict[str, Any]) -> None:
+        t_str, elapsed = _elapsed_str()
+        thought = {
+            "time_str": t_str,
+            "elapsed_sec": elapsed,
+            "reviewed_role": ev.get("reviewed_role", ev.get("role_id", "")),
+            "reviewed_display_name": ev.get("reviewed_display_name", ev.get("reviewed_role", "")),
+            "stage_order": ev.get("stage_order", 0),
+            "status": ev.get("status", "approved"),
+            "quality_score": ev.get("quality_score", 9.5),
+            "observation": ev.get("observation", ""),
+            "thinking": ev.get("thinking", ""),
+            "decision": ev.get("decision", ev.get("detail", "")),
+            "critique": ev.get("critique", ""),
+            "directive_sent": ev.get("directive_sent"),
+        }
+        job_state["director_thoughts"].append(thought)
+        if len(job_state["director_thoughts"]) > 80:
+            job_state["director_thoughts"] = job_state["director_thoughts"][-80:]
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -291,10 +347,25 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
     ) -> dict:
         lib_info = inspect_media_library(media_dir, workspace_root=workspace_root)
         questions = generate_intake_questions(media_dir=media_dir, initial_prompt=prompt)
+        initial_refinement = refine_intake_interactively(
+            media_dir=media_dir,
+            user_message=prompt or lib_info.get("default_prompt", ""),
+            interview_answers={q.id: q.default_answer for q in questions},
+        )
         return {
             "library": lib_info,
             "questions": [q.model_dump(mode="json") for q in questions],
+            "initial_refinement": initial_refinement,
         }
+
+    @app.post("/api/intake/refine")
+    def api_intake_refine(req: IntakeRefineRequest) -> dict:
+        return refine_intake_interactively(
+            media_dir=req.media_dir,
+            user_message=req.user_message,
+            interview_answers=req.interview_answers,
+            chat_history=req.chat_history,
+        )
 
     @app.get("/api/jobs/status")
     def api_job_status() -> dict:
@@ -367,9 +438,17 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
                     "elapsed_sec": 0.0,
                     "stages": stages_init,
                     "activity_log": [],
+                    "agent_activities": [],
+                    "director_thoughts": [],
                 }
             )
             _append_log("system", f"Started job {job_id} on media library '{media_path.name}' -> '{proj.name}'")
+            _append_agent_activity(
+                "orchestrator",
+                f"Launched Multi-Agent Pipeline ({len(stages_init)} stages) on '{media_path.name}'",
+                detail=f"Output project: {proj.name} | 4K 10-bit HLG HDR: {req.hdr}",
+                event_type="stage_started",
+            )
 
         def _worker() -> None:
             extra_audio = (
@@ -406,6 +485,24 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
                         if stage_obj is not None:
                             stage_obj["status"] = "running"
                         _append_log(rid, msg)
+                        _append_agent_activity(
+                            rid,
+                            f"▶ Started {ev.get('display_name', rid)}",
+                            detail=stage_obj["critique"] if stage_obj else "",
+                            event_type="stage_started",
+                        )
+                    elif etype in ("agent_action", "bus_message"):
+                        act_str = ev.get("action", msg)
+                        det_str = ev.get("detail", "")
+                        _append_agent_activity(rid, act_str, detail=det_str, event_type=etype)
+                        _append_log(rid, f"{act_str}" + (f" ({det_str})" if det_str else ""))
+                    elif etype == "director_thought":
+                        _append_director_thought(ev)
+                        _append_log(
+                            "production_director",
+                            f"[Director Thought on {ev.get('reviewed_role', '')}] {ev.get('decision', '')}",
+                            level="directive" if ev.get("directive_sent") else "info",
+                        )
                     elif etype == "director_directive":
                         if stage_obj is not None:
                             stage_obj["status"] = "directed_improvement"
@@ -413,6 +510,12 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
                             stage_obj["critique"] = ev.get("critique", stage_obj["critique"])
                             stage_obj["quality_score"] = ev.get("quality_score")
                         _append_log("production_director", msg, level="directive")
+                        _append_agent_activity(
+                            rid,
+                            f"🔄 Re-running {ev.get('display_name', rid)} per Executive Director Directive",
+                            detail=str(ev.get("directive_sent", "")),
+                            event_type="director_directive",
+                        )
                     elif etype == "stage_completed":
                         if stage_obj is not None:
                             rev_status = ev.get("review_status", "approved")
@@ -434,8 +537,10 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
                             stage_obj["status"] = "running"
                             stage_obj["critique"] = msg
                         _append_log("renderer", msg)
+                        _append_agent_activity("renderer", msg, detail="4K 3840x2160 10-bit HLG HDR synthesis", event_type="render_progress")
                     elif etype == "pipeline_complete":
                         _append_log("complete", msg, level="success")
+                        _append_agent_activity("complete", msg, detail="All deliverables & NLE exports ready", event_type="pipeline_complete")
 
             try:
                 bb = run_multi_agent_pipeline(

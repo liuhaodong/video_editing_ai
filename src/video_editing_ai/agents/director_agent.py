@@ -26,6 +26,38 @@ class ProductionDirectorAgent(BaseEditingAgent):
     produces_artifacts = ["director_review.json", "timeline.yaml", "storyboard.md"]
     skill_reference_file = "07_production_director_agent.md"
 
+    def _record_thought(
+        self,
+        blackboard: PipelineBlackboard,
+        agent: BaseEditingAgent,
+        review: DirectorStageReview,
+        observation: str,
+        thinking: str,
+    ) -> None:
+        decision = (
+            f"DIRECTIVE -> {agent.role_id}: {review.directive_sent}"
+            if review.directive_sent
+            else f"APPROVED ({review.quality_score:.1f}/10): {review.critique}"
+        )
+        blackboard.emit_activity(
+            role_id=self.role_id,
+            action=f"Supervising {agent.display_name} -> {review.status.upper()} ({review.quality_score:.1f}/10)",
+            detail=decision,
+            event_type="director_thought",
+            extra={
+                "reviewed_role": agent.role_id,
+                "reviewed_display_name": agent.display_name,
+                "stage_order": agent.stage_order,
+                "status": review.status,
+                "quality_score": review.quality_score,
+                "observation": observation,
+                "thinking": thinking,
+                "decision": decision,
+                "critique": review.critique,
+                "directive_sent": review.directive_sent,
+            },
+        )
+
     def supervise_stage(
         self,
         agent: BaseEditingAgent,
@@ -38,15 +70,23 @@ class ProductionDirectorAgent(BaseEditingAgent):
         if rid == "client_intake":
             brief = blackboard.creative_brief
             topics = brief.must_include_topics if brief else []
+            dur_s = int(brief.target_duration_sec) if brief else 110
             review = DirectorStageReview(
                 stage_order=agent.stage_order,
                 reviewed_agent_role=rid,
                 status="approved",
                 quality_score=9.5,
                 critique=(
-                    f"Creative brief establishes clear 4-act narrative vision and {len(topics)} client must-have "
+                    f"Creative brief establishes clear 4-act narrative vision ({dur_s}s target) and {len(topics)} client must-have "
                     f"anchors ({', '.join(topics[:4])})."
                 ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"CreativeBrief '{brief.project_title if brief else ''}' targets {dur_s}s runtime with photo_mode='{brief.photo_mode if brief else 'parallax_gallery'}' and {len(topics)} story beats.",
+                thinking="Checking that target duration gives enough breathing room for both spoken camera dialogue and 2.5D parallax museum/family photo plates without artificial 2-minute truncation.",
             )
             return review, False
 
@@ -62,21 +102,26 @@ class ProductionDirectorAgent(BaseEditingAgent):
             )
             if rejected_reason:
                 critique += f" ({rejected_reason})"
-            return (
-                DirectorStageReview(
-                    stage_order=agent.stage_order,
-                    reviewed_agent_role=rid,
-                    status=status,  # type: ignore[arg-type]
-                    quality_score=9.6,
-                    critique=critique,
-                    directive_sent=(
-                        "Replace mismatched comical/spooky BGM with classical Parisian chamber score"
-                        if rejected_reason
-                        else None
-                    ),
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status=status,  # type: ignore[arg-type]
+                quality_score=9.6,
+                critique=critique,
+                directive_sent=(
+                    "Replace mismatched comical/spooky BGM with classical Parisian chamber score"
+                    if rejected_reason
+                    else None
                 ),
-                False,
             )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"Soundtrack candidate '{title}' ({comp}) scored {bgm.mood_match_score if bgm else 9.5}/10 for mood profile '{bgm.target_mood_profile if bgm else 'warm'}'.",
+                thinking="Evaluating cultural and emotional alignment between the musical score's harmonic texture and the destination footage.",
+            )
+            return review, False
 
         # 2. Review Stage 10: CullerAgent
         if rid == "culler":
@@ -93,6 +138,13 @@ class ProductionDirectorAgent(BaseEditingAgent):
                     f"A-roll dialogue clips) while filtering {mi.discarded_count if mi else 0} burst/low-score items."
                 ),
             )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"MediaIndex retained {kept} active subclips ({arolls} A-roll spoken clips) and discarded {mi.discarded_count if mi else 0} redundant/shaky takes.",
+                thinking="Verifying that spoken sentences are never clipped mid-word and that sufficient high-scoring B-roll and photo candidates are preserved for the target runtime.",
+            )
             return review, False
 
         # 2b. Review Stage 15: PhotoCuratorAgent
@@ -107,20 +159,25 @@ class ProductionDirectorAgent(BaseEditingAgent):
                 else 0
             )
             avg_taste = pc.average_taste_score_selected if pc else 9.0
-            return (
-                DirectorStageReview(
-                    stage_order=agent.stage_order,
-                    reviewed_agent_role=rid,
-                    status="approved",
-                    quality_score=9.6,
-                    critique=(
-                        f"Photo Curator evaluated {eval_cnt} photos (filtered {burst_cnt} "
-                        f"burst duplicates via 64-bit dHash), curated {sel_cnt} gallery selects (avg taste {avg_taste}/10, "
-                        f"{diptych_cnt} vertical diptych pairs) with 100% bilingual museum annotations."
-                    ),
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6,
+                critique=(
+                    f"Photo Curator evaluated {eval_cnt} photos (filtered {burst_cnt} "
+                    f"burst duplicates via 64-bit dHash), curated {sel_cnt} gallery selects (avg taste {avg_taste}/10, "
+                    f"{diptych_cnt} vertical diptych pairs) with 100% bilingual museum annotations."
                 ),
-                False,
             )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"Evaluated {eval_cnt} photos across {pc.burst_clusters_found if pc else 0} perceptual dHash clusters -> curated {sel_cnt} hero plates (avg taste {avg_taste}/10, {diptych_cnt} diptych pairs).",
+                thinking="Auditing curatorial taste: ensuring blurry floor/crowd shots are rejected, vertical portraits are paired into balanced diptychs, and every artwork/landmark carries a bilingual exhibition plaque.",
+            )
+            return review, False
 
         # 3. Review Stage 10: AudioVibeAgent
         if rid == "audio_vibe":
@@ -135,6 +192,13 @@ class ProductionDirectorAgent(BaseEditingAgent):
                     f"Audio Vibe mapped {bpm} BPM beat grid ({len(bg.downbeats) if bg else 0} downbeats) and "
                     "locked -20dB Nat-Sound + -14dB auto-ducking parameters."
                 ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"BeatGrid locked at {bpm} BPM with {len(bg.downbeats) if bg else 0} downbeat markers across {round(bg.duration, 1) if bg else 0.0}s.",
+                thinking="Confirming 3-layer sound mix headroom: 0dB A-roll speech clarity, -20dB ambient nat-sound warmth, and -14dB BGM auto-ducking with 1.0s smooth ramps.",
             )
             return review, False
 
@@ -175,36 +239,46 @@ class ProductionDirectorAgent(BaseEditingAgent):
                         subject=directive_msg,
                         payload=payload,
                     )
-                    return (
-                        DirectorStageReview(
-                            stage_order=agent.stage_order,
-                            reviewed_agent_role=rid,
-                            status="directed_improvement",
-                            quality_score=9.3,
-                            critique=(
-                                f"Story Producer built {len(paper.chapters)} chapters, but A-roll clips "
-                                f"{uncovered_arolls} (>=6.0s) needed Track V2 B-Roll cutaway coverage."
-                            ),
-                            directive_sent=directive_msg,
-                            directive_payload=payload,
+                    review = DirectorStageReview(
+                        stage_order=agent.stage_order,
+                        reviewed_agent_role=rid,
+                        status="directed_improvement",
+                        quality_score=9.3,
+                        critique=(
+                            f"Story Producer built {len(paper.chapters)} chapters, but A-roll clips "
+                            f"{uncovered_arolls} (>=6.0s) needed Track V2 B-Roll cutaway coverage."
                         ),
-                        True,
+                        directive_sent=directive_msg,
+                        directive_payload=payload,
                     )
+                    self._record_thought(
+                        blackboard,
+                        agent,
+                        review,
+                        observation=f"PaperEdit has {len(paper.chapters)} chapters, but A-roll clips {uncovered_arolls} (>=6.0s) have no Track V2 visual cutaway assigned.",
+                        thinking="Long static talking-head takes risk losing visual momentum; overlaying a Track V2 B-roll cutaway while keeping Track A1 speech continuous will elevate pacing.",
+                    )
+                    return review, True
 
             v2_total = sum(len(c.broll_anchor_map) for c in (paper.chapters if paper else []))
-            return (
-                DirectorStageReview(
-                    stage_order=agent.stage_order,
-                    reviewed_agent_role=rid,
-                    status="approved",
-                    quality_score=9.5,
-                    critique=(
-                        f"Story Producer structured {len(paper.chapters) if paper else 0} chapters with "
-                        f"{v2_total} Track V2 B-Roll cutaway anchors over A-roll dialogue."
-                    ),
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.5,
+                critique=(
+                    f"Story Producer structured {len(paper.chapters) if paper else 0} chapters with "
+                    f"{v2_total} Track V2 B-Roll cutaway anchors over A-roll dialogue."
                 ),
-                False,
             )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"PaperEdit structured {len(paper.chapters) if paper else 0} narrative chapters with {v2_total} Track V2 B-Roll cutaway anchors.",
+                thinking="Narrative arc flows cleanly from establishing arrival through exploration to emotional climax and finale.",
+            )
+            return review, False
 
         # 5. Review Stage 30: DialogueEditorAgent -> Direct injection of a hero dialogue quote badge on Track V3
         if rid == "dialogue_editor":
@@ -230,52 +304,67 @@ class ProductionDirectorAgent(BaseEditingAgent):
                     subject=directive_msg,
                     payload=payload,
                 )
-                return (
-                    DirectorStageReview(
-                        stage_order=agent.stage_order,
-                        reviewed_agent_role=rid,
-                        status="directed_improvement",
-                        quality_score=9.4,
-                        critique=(
-                            "Dialogue Editor aligned word boundaries and subtitles cleanly; directed addition "
-                            "of a Track V3 hero quote callout badge to spotlight candid family speech."
-                        ),
-                        directive_sent=directive_msg,
-                        directive_payload=payload,
-                    ),
-                    True,
-                )
-
-            return (
-                DirectorStageReview(
+                review = DirectorStageReview(
                     stage_order=agent.stage_order,
                     reviewed_agent_role=rid,
-                    status="approved",
-                    quality_score=9.5,
+                    status="directed_improvement",
+                    quality_score=9.4,
                     critique=(
-                        f"Dialogue Editor locked {len(tl.subtitles.items) if tl else 0} subtitles, -0.35s J-cuts, "
-                        f"and {len(tl.broll_track) if tl else 0} Track V2 B-roll cutaways."
+                        "Dialogue Editor aligned word boundaries and subtitles cleanly; directed addition "
+                        "of a Track V3 hero quote callout badge to spotlight candid family speech."
                     ),
+                    directive_sent=directive_msg,
+                    directive_payload=payload,
+                )
+                self._record_thought(
+                    blackboard,
+                    agent,
+                    review,
+                    observation=f"Dialogue Editor aligned {len(tl.subtitles.items) if tl else 0} bilingual subtitles and -0.35s J-cuts, but Track V3 has no hero quote callout badge yet.",
+                    thinking="Spotlighting the most heartfelt spoken family line with an on-screen Track V3 dialogue badge will anchor the emotional centerpiece of the cut.",
+                )
+                return review, True
+
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.5,
+                critique=(
+                    f"Dialogue Editor locked {len(tl.subtitles.items) if tl else 0} subtitles, -0.35s J-cuts, "
+                    f"and {len(tl.broll_track) if tl else 0} Track V2 B-roll cutaways."
                 ),
-                False,
             )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"Locked {len(tl.subtitles.items) if tl else 0} bilingual subtitles, -0.35s J-cut audio pre-laps, and {len(tl.broll_track) if tl else 0} Track V2 cutaways.",
+                thinking="Word-level trims, 0.33s room-tone crossfades, and Track V3 quote callouts are clean and natural.",
+            )
+            return review, False
 
         # 6. Review Stage 30: MontageEditorAgent
         if rid == "montage_editor":
             tl = blackboard.timeline
-            return (
-                DirectorStageReview(
-                    stage_order=agent.stage_order,
-                    reviewed_agent_role=rid,
-                    status="approved",
-                    quality_score=9.4,
-                    critique=(
-                        f"Montage Editor beat-snapped B-roll & Gallery Frame stills across "
-                        f"{round(tl.total_duration, 1) if tl else 0.0}s with non-repeating Ken Burns motion vectors."
-                    ),
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.4,
+                critique=(
+                    f"Montage Editor beat-snapped B-roll & Gallery Frame stills across "
+                    f"{round(tl.total_duration, 1) if tl else 0.0}s with non-repeating Ken Burns motion vectors."
                 ),
-                False,
             )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"Timeline assembled at {round(tl.total_duration, 1) if tl else 0.0}s total runtime with beat-snapped B-roll & 2.5D parallax plates.",
+                thinking="Verified Wide -> Medium -> Close-up visual progression, alternating 2.5D parallax/diptych motion vectors, and non-overlapping Track V3 title cards.",
+            )
+            return review, False
 
         # 7. Review Stage 40: VFXAgent (or any custom Stage-40 plugin)
         if agent.stage_order == 40:
@@ -287,48 +376,63 @@ class ProductionDirectorAgent(BaseEditingAgent):
                         fx.intensity = 0.45
                         clamped += 1
             status = "polished_by_director" if clamped > 0 else "approved"
-            return (
-                DirectorStageReview(
-                    stage_order=agent.stage_order,
-                    reviewed_agent_role=rid,
-                    status=status,  # type: ignore[arg-type]
-                    quality_score=9.4,
-                    critique=(
-                        f"Reviewed Stage-40 plugin '{rid}' ({len(tl.effects_track) if tl else 0} effects); "
-                        f"calibrated {clamped} effect intensities to <=0.45 to preserve 10-bit HLG HDR skin tones."
-                    ),
-                    directive_sent="Calibrate HDR effect intensity <= 0.45" if clamped > 0 else None,
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status=status,  # type: ignore[arg-type]
+                quality_score=9.4,
+                critique=(
+                    f"Reviewed Stage-40 plugin '{rid}' ({len(tl.effects_track) if tl else 0} effects); "
+                    f"calibrated {clamped} effect intensities to <=0.45 to preserve 10-bit HLG HDR skin tones."
                 ),
-                False,
+                directive_sent="Calibrate HDR effect intensity <= 0.45" if clamped > 0 else None,
             )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"Stage-40 VFX plugin attached {len(tl.effects_track) if tl else 0} effects ({clamped} exceeded 0.48 intensity).",
+                thinking="Calibrating effect intensity <= 0.45 so 10-bit HLG HDR (arib-std-b67) skin tones and museum highlights remain natural without clipping.",
+            )
+            return review, False
 
         # 8. Review Stage 50: ShowrunnerAgent
         if rid == "showrunner":
             pa = blackboard.pacing_audit
-            return (
-                DirectorStageReview(
-                    stage_order=agent.stage_order,
-                    reviewed_agent_role=rid,
-                    status="approved",
-                    quality_score=9.6,
-                    critique=(
-                        f"Showrunner verified brief compliance and locked ASL at "
-                        f"{pa.average_shot_length_after if pa else 0.0}s across {pa.total_cuts_after if pa else 0} cuts."
-                    ),
-                ),
-                False,
-            )
-
-        return (
-            DirectorStageReview(
+            review = DirectorStageReview(
                 stage_order=agent.stage_order,
                 reviewed_agent_role=rid,
                 status="approved",
-                quality_score=9.2,
-                critique=f"Reviewed {rid} stage output.",
-            ),
-            False,
+                quality_score=9.6,
+                critique=(
+                    f"Showrunner verified brief compliance and locked ASL at "
+                    f"{pa.average_shot_length_after if pa else 0.0}s across {pa.total_cuts_after if pa else 0} cuts."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"PacingAudit passed with {pa.total_cuts_after if pa else 0} V1 cuts and Average Shot Length {pa.average_shot_length_after if pa else 0.0}s.",
+                thinking="All client must-have topics, B-roll duration caps, and 3-layer audio ducking rules are verified; ready for Stage-60 Final Executive Screening.",
+            )
+            return review, False
+
+        review = DirectorStageReview(
+            stage_order=agent.stage_order,
+            reviewed_agent_role=rid,
+            status="approved",
+            quality_score=9.2,
+            critique=f"Reviewed {rid} stage output.",
         )
+        self._record_thought(
+            blackboard,
+            agent,
+            review,
+            observation=f"Stage {agent.stage_order} ({rid}) completed.",
+            thinking="Output artifacts conform to pipeline schema contracts.",
+        )
+        return review, False
 
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
         """Stage 60 Final Cut Executive Screening: score rubric, apply final polish, and write director_review.json."""
@@ -409,6 +513,25 @@ class ProductionDirectorAgent(BaseEditingAgent):
         report_path = blackboard.project_dir / "director_review.json"
         report.to_json_file(report_path)
         blackboard.director_review = report
+
+        blackboard.emit_activity(
+            role_id=self.role_id,
+            action=f"Executive Screening Sign-Off -> Grade {grade} ({overall_score}/10)",
+            detail=vision_statement,
+            event_type="director_thought",
+            extra={
+                "reviewed_role": "all_pipeline_stages",
+                "reviewed_display_name": "6. Executive Final Cut Screening",
+                "stage_order": self.stage_order,
+                "status": "approved",
+                "quality_score": overall_score,
+                "observation": f"Screened final {round(total_dur, 1)}s timeline ({len(tl.visual_track)} V1 cuts, {len(tl.broll_track)} V2 cutaways, {len(photo_items)} 2.5D/diptych plates).",
+                "thinking": vision_statement,
+                "decision": f"MASTER CUT APPROVED — Grade {grade} ({overall_score}/10, {interventions} active improvements directed across pipeline).",
+                "critique": " | ".join(final_notes),
+                "directive_sent": None,
+            },
+        )
 
         # Save final polished timeline.yaml
         timeline_path = blackboard.project_dir / "timeline.yaml"

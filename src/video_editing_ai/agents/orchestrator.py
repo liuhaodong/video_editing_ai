@@ -58,6 +58,16 @@ class MultiAgentOrchestrator:
         stage_reviews: list[DirectorStageReview] = []
         setattr(blackboard, "_director_stage_reviews", stage_reviews)
 
+        if event_callback is not None:
+            def _on_bb_activity(entry: dict[str, Any]) -> None:
+                event_callback(
+                    {
+                        "event": entry.get("event_type", "agent_action"),
+                        **entry,
+                    }
+                )
+            blackboard.activity_callback = _on_bb_activity
+
         agent_pct_span = 75 if render_video else 95
 
         for idx, agent in enumerate(plan):

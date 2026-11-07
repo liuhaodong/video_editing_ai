@@ -243,6 +243,11 @@ class ShowrunnerAgent(BaseEditingAgent):
 
         storyboard_path = blackboard.project_dir / "storyboard.md"
         storyboard_path.write_text(base_md + "\n".join(agent_lines) + "\n", encoding="utf-8")
+        blackboard.emit_activity(
+            self.role_id,
+            f"Completed Pacing Audit: {cuts_after} V1 cuts, {len(timeline.broll_track)} V2 cutaways, ASL {asl_after:.2f}s (total {timeline.total_duration:.1f}s)",
+            detail=f"Locked timeline.yaml and storyboard.md ({len(entries)} audit rules verified)",
+        )
 
         return {
             "pacing_audit_path": str(audit_path),

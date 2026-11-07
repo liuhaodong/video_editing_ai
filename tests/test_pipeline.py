@@ -322,7 +322,25 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
     assert r_browse.status_code == 200
     assert any(sub["name"] == "raw_media" for sub in r_browse.json()["subdirectories"])
 
-    # Verify live job start + status tracking endpoint
+    # Verify live interactive intake refinement endpoint (POST /api/intake/refine) and >2m duration support
+    r_refine = client.post(
+        "/api/intake/refine",
+        json={
+            "media_dir": str(sample_media_dir),
+            "user_message": "Make it a 3 minutes extended documentary with classical piano music and 2.5D parallax",
+            "interview_answers": {},
+            "chat_history": [],
+        },
+    )
+    assert r_refine.status_code == 200
+    ref_body = r_refine.json()
+    assert "agent_reply" in ref_body
+    assert "director_note" in ref_body
+    assert ref_body["draft_brief"]["target_duration_sec"] == 180.0
+    assert ref_body["updated_answers"]["bgm_mood"] == "classical_chamber"
+    assert len(ref_body["suggested_chips"]) >= 3
+
+    # Verify live job start + status tracking endpoint with agent_activities & director_thoughts
     job_proj = tmp_path / "async_job_proj"
     r_job = client.post(
         "/api/jobs/start?wait=true",
@@ -333,6 +351,7 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
             "interview_answers": {
                 "narrative_style": "family_keepsake_4act",
                 "photo_mode": "parallax_gallery",
+                "target_duration_sec": "155",
             },
             "enabled_optional_roles": ["vfx_designer"],
             "width": 640,
@@ -349,6 +368,9 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
     assert job_data["progress_pct"] == 100
     assert len(job_data["stages"]) >= 10
     assert len(job_data["activity_log"]) >= 5
+    assert len(job_data["agent_activities"]) >= 10
+    assert len(job_data["director_thoughts"]) >= 8
+    assert any(th["observation"] and th["thinking"] for th in job_data["director_thoughts"])
 
     r_job_status = client.get("/api/jobs/status")
     assert r_job_status.status_code == 200

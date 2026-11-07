@@ -179,6 +179,11 @@ class AudioVibeAgent(BaseEditingAgent):
         out_path = blackboard.project_dir / "beat_grid.json"
         beat_grid.to_json_file(out_path)
         blackboard.beat_grid = beat_grid
+        blackboard.emit_activity(
+            self.role_id,
+            f"Extracted musical beat grid at {beat_grid.tempo_bpm} BPM ({len(beat_grid.beats)} beats, {len(beat_grid.downbeats)} downbeats)",
+            detail="Configured 3-layer audio mix: Track A1 Speech (0dB), Track A2 Nat-Sound (-20dB), Track A3 BGM (-14dB auto-duck)",
+        )
 
         blackboard.send_message(
             sender_role=self.role_id,

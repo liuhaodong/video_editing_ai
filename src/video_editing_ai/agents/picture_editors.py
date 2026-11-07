@@ -314,6 +314,11 @@ class DialogueEditorAgent(BaseEditingAgent):
                         sub_counter += 1
 
         timeline.subtitles.items = sub_items
+        blackboard.emit_activity(
+            self.role_id,
+            f"Cut {aroll_clips_processed} A-Roll dialogue clips with -0.35s J-cuts, {len(sub_items)} bilingual subtitles & {len(timeline.broll_track)} V2 cutaways",
+            detail="Applied 0.33s room-tone audio crossfades across all dialogue boundaries",
+        )
 
         # Check if ProductionDirectorAgent directed a dialogue highlight badge on Track V3
         inject_badge = any(
@@ -497,6 +502,11 @@ class MontageEditorAgent(BaseEditingAgent):
                 "total_duration": round(timeline.total_duration, 2),
                 "has_bgm": bool(timeline.audio_tracks),
             },
+        )
+        blackboard.emit_activity(
+            self.role_id,
+            f"Beat-snapped {snapped_count} B-Roll & 2.5D photo plates -> Total timeline runtime: {timeline.total_duration:.1f}s",
+            detail="Alternated Wide -> Medium -> Close-up shot scales and diversified 2.5D parallax & diptych vectors",
         )
 
         return {

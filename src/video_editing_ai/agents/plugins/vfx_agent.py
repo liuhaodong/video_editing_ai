@@ -89,6 +89,11 @@ class VFXAgent(BaseEditingAgent):
             "effects": [e.model_dump(mode="json") for e in effects],
         }
         manifest_path = blackboard.set_custom_artifact("vfx_manifest.json", manifest)
+        blackboard.emit_activity(
+            self.role_id,
+            f"Applied {len(effects)} non-destructive VFX polish items (warm_glow, vignette_focus, contrast_pop)",
+            detail=f"Saved vfx_manifest.json ({len(effects)} track effects)",
+        )
 
         blackboard.send_message(
             sender_role=self.role_id,

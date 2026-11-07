@@ -429,13 +429,23 @@ class PhotoCuratorAgent(BaseEditingAgent):
         photo_subclips = [s for s in media_index.subclips if s.media_type == "photo"]
         total_photos = len(photo_subclips)
 
-        # Target number of curated photos (e.g., 17 for Louvre / large sets so 1 diptych pair = 16 timeline plates)
-        target_select_count = min(total_photos, 17 if total_photos >= 30 else 14)
+        # Scale number of curated photos dynamically from brief.target_duration_sec (no artificial 2-min / 16-photo cap)
+        video_dur_sum = sum(s.duration for s in media_index.subclips if s.media_type == "video" and not s.is_discarded)
+        target_dur = brief.target_duration_sec if brief else 110.0
+        rem_photo_sec = max(24.0, target_dur - video_dur_sum)
+        dynamic_select_count = max(14, min(60, int(round(rem_photo_sec / 3.1))))
+        target_select_count = min(total_photos, dynamic_select_count if total_photos >= 15 else total_photos)
         min_taste_floor = 7.8
         for msg in blackboard.get_messages_for(self.role_id):
             if msg.message_type == "director_directive":
                 if "min_taste_score" in msg.payload:
                     min_taste_floor = float(msg.payload["min_taste_score"])
+
+        blackboard.emit_activity(
+            self.role_id,
+            f"Evaluating {total_photos} photos for aesthetic taste (saliency, rule-of-thirds, portrait warmth & 64-bit dHash clusters)",
+            detail=f"Target duration {target_dur:.0f}s (video spine {video_dur_sum:.1f}s) -> curating top {target_select_count} gallery plates (floor >= {min_taste_floor})",
+        )
 
         curated_items: list[CuratedPhotoItem] = []
         subclip_by_id: dict[str, CulledSubClip] = {s.subclip_id: s for s in photo_subclips}
@@ -623,6 +633,13 @@ class PhotoCuratorAgent(BaseEditingAgent):
         out_path = blackboard.project_dir / "photo_curation.json"
         report.to_json_file(out_path)
         blackboard.photo_curation = report
+
+        sample_titles = ", ".join(it.annotation_title.split("—")[0].strip() for it in selected_items[:4])
+        blackboard.emit_activity(
+            self.role_id,
+            f"Curated {len(selected_items)} high-taste photos (avg {avg_taste}/10 across {cluster_id} burst clusters) + bilingual museum plaques",
+            detail=f"Featured plates: {sample_titles}...",
+        )
 
         blackboard.send_message(
             sender_role=self.role_id,

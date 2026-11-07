@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
-from typing import Any, Optional, Type
+from typing import Any, Callable, Optional, Type
 
 from ..models.schema import (
     AgentCoordinationMessage,
@@ -88,7 +88,35 @@ class PipelineBlackboard:
         self.custom_artifacts: dict[str, Any] = {}
         self.messages: list[AgentCoordinationMessage] = []
         self.executed_agents: list[dict[str, Any]] = []
+        self.activity_log: list[dict[str, Any]] = []
+        self.activity_callback: Optional[Callable[[dict[str, Any]], None]] = None
         self.revision_round: int = 0
+
+    def emit_activity(
+        self,
+        role_id: str,
+        action: str,
+        detail: str = "",
+        event_type: str = "agent_action",
+        extra: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Broadcast a real-time sub-step activity or Director thought to the blackboard and live listener."""
+        entry: dict[str, Any] = {
+            "timestamp": _now_iso(),
+            "role_id": role_id,
+            "action": action,
+            "detail": detail,
+            "event_type": event_type,
+        }
+        if extra:
+            entry.update(extra)
+        self.activity_log.append(entry)
+        if self.activity_callback is not None:
+            try:
+                self.activity_callback(entry)
+            except Exception:
+                pass
+        return entry
 
     def send_message(
         self,
@@ -107,6 +135,18 @@ class PipelineBlackboard:
             payload=payload or {},
         )
         self.messages.append(msg)
+        self.emit_activity(
+            role_id=sender_role,
+            action=f"[{message_type.upper()}] -> {recipient_role}: {subject}",
+            detail=json.dumps(payload or {}, ensure_ascii=False)[:180] if payload else "",
+            event_type="bus_message",
+            extra={
+                "sender_role": sender_role,
+                "recipient_role": recipient_role,
+                "message_type": message_type,
+                "subject": subject,
+            },
+        )
         return msg
 
     def get_messages_for(self, recipient_role: str) -> list[AgentCoordinationMessage]:
