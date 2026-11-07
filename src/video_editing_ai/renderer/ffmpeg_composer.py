@@ -1,4 +1,4 @@
-"""Multi-track FFmpeg video/audio compositor with title overlays and automatic dialogue ducking."""
+"""Multi-track FFmpeg video/audio compositor with Track V2 B-Roll cutaways, pluggable VFX, and auto-ducking."""
 
 from __future__ import annotations
 
@@ -9,10 +9,29 @@ import subprocess
 from typing import Callable, Optional
 
 from ..analyzer.media_probe import probe_video_file
-from ..models.schema import EditTimeline, VisualTrackItem
+from ..models.schema import EditTimeline, EffectTrackItem, VisualTrackItem
 from .ken_burns import has_hevc_nvenc, render_photo_clip
 from .subtitles import export_ass_subtitles, export_srt_subtitles
 from .titles import render_title_png
+
+
+# Extensible registry mapping Stage-40 EffectTrackItem.effect_type -> FFmpeg filter builder
+EFFECT_FILTER_BUILDERS: dict[str, Callable[[EffectTrackItem], str]] = {
+    "warm_glow": lambda fx: (
+        f"eq=saturation={float(fx.parameters.get('saturation', 1.08)):.2f}:"
+        f"brightness={float(fx.parameters.get('brightness', 0.02)):.3f}"
+    ),
+    "vignette_focus": lambda fx: f"vignette=angle={float(fx.parameters.get('angle_rad', 0.42)):.2f}",
+    "contrast_pop": lambda fx: (
+        f"eq=contrast={float(fx.parameters.get('contrast', 1.06)):.2f}:"
+        f"saturation={float(fx.parameters.get('saturation', 1.05)):.2f}"
+    ),
+}
+
+
+def register_effect_filter(effect_type: str, builder: Callable[[EffectTrackItem], str]) -> None:
+    """Register a custom FFmpeg filter builder for a Stage-40 EffectTrackItem."""
+    EFFECT_FILTER_BUILDERS[effect_type] = builder
 
 
 def _video_encoder_args(hdr: bool) -> list[str]:
@@ -79,8 +98,9 @@ def _render_video_segment(
     height: int,
     fps: int,
     hdr: bool = True,
+    attached_effects: Optional[list[EffectTrackItem]] = None,
 ) -> Path:
-    """Trim, scale/pad, fade, and normalize a single video clip to match master timeline settings."""
+    """Trim, scale/pad, apply pluggable VFX, fade, and normalize a single video clip."""
     info = probe_video_file(Path(item.source))
     has_audio = bool(info.get("has_audio", False))
     src_trc = str(info.get("color_transfer", "bt709"))
@@ -95,6 +115,12 @@ def _render_video_segment(
     ]
     if item.speed != 1.0 and item.speed > 0:
         vf_parts.insert(0, f"setpts={1.0 / item.speed:.4f}*PTS")
+
+    # Apply any pluggable Stage-40 effects attached to this clip
+    for fx in attached_effects or []:
+        builder = EFFECT_FILTER_BUILDERS.get(fx.effect_type)
+        if builder is not None:
+            vf_parts.append(builder(fx))
 
     if item.transition_in.type == "fade_black" and item.transition_in.duration > 0:
         fd = min(dur * 0.45, item.transition_in.duration)
@@ -151,10 +177,12 @@ def _render_video_segment(
             "aformat=sample_fmts=fltp:channel_layouts=stereo",
             f"volume={item.volume:.3f}",
         ]
-        if item.transition_in.duration > 0:
-            af_parts.append(f"afade=t=in:st=0:d={min(0.4, item.transition_in.duration):.3f}")
-        if item.transition_out.duration > 0:
-            fd = min(0.4, item.transition_out.duration)
+        cf_in = max(item.audio_crossfade_sec, item.transition_in.duration)
+        cf_out = max(item.audio_crossfade_sec, item.transition_out.duration)
+        if cf_in > 0:
+            af_parts.append(f"afade=t=in:st=0:d={min(0.45, cf_in):.3f}")
+        if cf_out > 0:
+            fd = min(0.45, cf_out)
             af_parts.append(f"afade=t=out:st={max(0.0, dur - fd):.3f}:d={fd:.3f}")
         cmd.extend(
             [
@@ -196,26 +224,24 @@ def _build_ducking_volume_expr(
     base_vol: float,
     duck_vol: float,
 ) -> str:
-    """Build an FFmpeg volume expression that ducks BGM during subtitle/dialogue windows and video clips."""
+    """Build an FFmpeg volume expression that ducks BGM during subtitle/dialogue windows and A-roll clips."""
     windows: list[tuple[float, float]] = []
     for sub in timeline.subtitles.items:
-        windows.append((max(0.0, sub.start - 0.25), sub.end + 0.35))
+        windows.append((max(0.0, sub.start - 0.35), sub.end + 0.45))
 
-    # Also duck slightly if a video clip has active camera audio and no explicit subtitles
     if not windows:
         for clip in timeline.visual_track:
-            if clip.type == "video" and clip.volume > 0.1:
+            if clip.type == "video" and clip.volume > 0.25:
                 windows.append((clip.timeline_start, clip.timeline_start + clip.duration))
 
     if not windows:
         return f"{base_vol:.3f}"
 
-    # Merge overlapping windows
     windows.sort(key=lambda w: w[0])
     merged: list[tuple[float, float]] = [windows[0]]
     for s, e in windows[1:]:
         prev_s, prev_e = merged[-1]
-        if s <= prev_e + 0.3:
+        if s <= prev_e + 0.4:
             merged[-1] = (prev_s, max(prev_e, e))
         else:
             merged.append((s, e))
@@ -231,7 +257,7 @@ def render_timeline(
     work_dir: Optional[str | Path] = None,
     progress_callback: Optional[Callable[[str, float], None]] = None,
 ) -> dict[str, Path]:
-    """Render an EditTimeline into a final MP4 video along with SRT and ASS subtitle files."""
+    """Render an EditTimeline (Track V1 + Track V2 B-Roll Cutaways + Track V3 Titles + 3-Layer Audio) into MP4."""
     if not timeline.visual_track:
         raise ValueError("Cannot render an empty visual_track.")
 
@@ -243,7 +269,6 @@ def render_timeline(
     seg_dir.mkdir(parents=True, exist_ok=True)
     titles_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure sequential start times are consistent
     timeline.recalculate_sequential_starts()
 
     width = timeline.settings.width
@@ -258,18 +283,25 @@ def render_timeline(
     export_srt_subtitles(timeline, srt_path)
     export_ass_subtitles(timeline, ass_path)
 
-    # 2. Render each visual clip (video or Ken Burns / Gallery Frame photo) to normalized segment MP4
+    effects_by_clip: dict[str, list[EffectTrackItem]] = {}
+    for fx in timeline.effects_track:
+        if fx.target_clip_id:
+            effects_by_clip.setdefault(fx.target_clip_id, []).append(fx)
+
+    # 2. Render each Track V1 visual clip to normalized segment MP4
     segment_files: list[Path] = []
     num_clips = len(timeline.visual_track)
     for idx, item in enumerate(timeline.visual_track):
         if progress_callback:
             progress_callback(
-                f"Rendering clip {idx + 1}/{num_clips} ({Path(item.source).name})",
-                (idx / max(1, num_clips)) * 0.70,
+                f"Rendering V1 clip {idx + 1}/{num_clips} ({Path(item.source).name})",
+                (idx / max(1, num_clips)) * 0.65,
             )
+        clip_fxs = effects_by_clip.get(item.id, [])
         sig_payload = json.dumps(
             {
                 "item": item.model_dump(mode="json"),
+                "fx": [f.model_dump(mode="json") for f in clip_fxs],
                 "w": width,
                 "h": height,
                 "fps": fps,
@@ -301,12 +333,54 @@ def render_timeline(
                     height=height,
                     fps=fps,
                     hdr=hdr,
+                    attached_effects=clip_fxs,
                 )
         segment_files.append(seg_mp4)
 
-    # 3. Concatenate normalized segments into base visual + camera audio stream
+    # 2b. Render Track V2 B-Roll Cutaway segments (laid over V1 A-roll dialogue)
+    active_broll = [b for b in timeline.broll_track if b.timeline_start < total_dur]
+    broll_files: list[Path] = []
+    for b_idx, b_item in enumerate(active_broll):
+        sig_payload = json.dumps(
+            {
+                "b_item": b_item.model_dump(mode="json"),
+                "w": width,
+                "h": height,
+                "fps": fps,
+                "hdr": hdr,
+            },
+            sort_keys=True,
+        )
+        sig_hash = hashlib.sha1(sig_payload.encode("utf-8")).hexdigest()[:8]
+        b_mp4 = seg_dir / f"broll_{b_idx + 1:03d}_{b_item.id}_{sig_hash}.mp4"
+        if not b_mp4.exists() or b_mp4.stat().st_size < 1024:
+            if b_item.type == "photo":
+                render_photo_clip(
+                    photo_path=b_item.source,
+                    output_mp4=b_mp4,
+                    duration=b_item.duration,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    hdr=hdr,
+                    ken_burns=b_item.ken_burns,
+                    transition_in=b_item.transition_in,
+                    transition_out=b_item.transition_out,
+                )
+            else:
+                _render_video_segment(
+                    item=b_item,
+                    output_mp4=b_mp4,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    hdr=hdr,
+                )
+        broll_files.append(b_mp4)
+
+    # 3. Concatenate normalized V1 segments into base visual + camera audio stream
     if progress_callback:
-        progress_callback("Concatenating visual storyline segments...", 0.75)
+        progress_callback("Concatenating Track V1 storyline segments...", 0.75)
 
     concat_list_path = w_dir / "segments_concat.txt"
     concat_lines = [f"file '{p.as_posix()}'" for p in segment_files]
@@ -333,9 +407,9 @@ def render_timeline(
     if proc.returncode != 0:
         raise RuntimeError(f"FFmpeg concat failed: {proc.stderr}")
 
-    # 4. Render RGBA PNG plates for title_track and composite with BGM audio ducking
+    # 4. Render RGBA PNG plates for title_track and composite V2 B-Roll + V3 Titles + BGM audio ducking
     if progress_callback:
-        progress_callback("Compositing titles, overlays, and mixing auto-ducked audio...", 0.85)
+        progress_callback("Compositing Track V2 B-Roll cutaways, Track V3 titles, and auto-ducked audio...", 0.85)
 
     active_titles = [t for t in timeline.title_track if t.timeline_start < total_dur]
     title_pngs: list[Path] = []
@@ -346,8 +420,7 @@ def render_timeline(
 
     active_bgm = [a for a in timeline.audio_tracks if Path(a.source).exists()]
 
-    # If no titles and no external BGM, just copy base_concat_mp4 to out_path
-    if not active_titles and not active_bgm:
+    if not active_broll and not active_titles and not active_bgm:
         out_path.write_bytes(base_concat_mp4.read_bytes())
         if progress_callback:
             progress_callback("Render complete!", 1.0)
@@ -363,18 +436,38 @@ def render_timeline(
         str(base_concat_mp4),
     ]
 
+    for b_mp4 in broll_files:
+        final_cmd.extend(["-i", str(b_mp4)])
+
+    title_input_start_idx = 1 + len(active_broll)
     for t_item, png_path in zip(active_titles, title_pngs):
         final_cmd.extend(["-loop", "1", "-t", f"{t_item.duration:.3f}", "-i", str(png_path)])
 
-    bgm_input_start_idx = 1 + len(active_titles)
+    bgm_input_start_idx = title_input_start_idx + len(active_titles)
     for a_item in active_bgm:
         final_cmd.extend(["-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
 
     filter_parts: list[str] = []
     cur_v = "[0:v]"
     ov_fmt = "yuv420p10" if hdr else "auto"
+
+    # Composite Track V2 B-Roll Cutaways over Track V1 (keeping V1's A-roll audio untouched)
+    for b_idx, b_item in enumerate(active_broll):
+        in_idx = 1 + b_idx
+        st = b_item.timeline_start
+        dur = b_item.duration
+        end_t = st + dur
+        bv_label = f"[bv{b_idx}]"
+        next_v = f"[vb{b_idx + 1}]"
+        filter_parts.append(f"[{in_idx}:v]setpts=PTS+{st:.3f}/TB{bv_label}")
+        filter_parts.append(
+            f"{cur_v}{bv_label}overlay=0:0:format={ov_fmt}:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
+        )
+        cur_v = next_v
+
+    # Composite Track V3 RGBA Title Overlays
     for idx, t_item in enumerate(active_titles):
-        in_idx = 1 + idx
+        in_idx = title_input_start_idx + idx
         st = t_item.timeline_start
         dur = t_item.duration
         end_t = st + dur
@@ -382,7 +475,7 @@ def render_timeline(
         fo = min(dur * 0.4, t_item.fade_out)
         fo_st = max(0.0, dur - fo)
         ov_label = f"[ov{idx}]"
-        next_v = f"[v{idx + 1}]"
+        next_v = f"[vt{idx + 1}]"
         filter_parts.append(
             f"[{in_idx}:v]format=rgba,"
             f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
@@ -394,7 +487,7 @@ def render_timeline(
         )
         cur_v = next_v
 
-    if hdr and active_titles:
+    if hdr and (active_broll or active_titles):
         filter_parts.append(
             f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc[vhdr]"
         )

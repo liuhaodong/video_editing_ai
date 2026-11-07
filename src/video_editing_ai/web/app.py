@@ -1,16 +1,17 @@
-"""FastAPI backend for inspecting annotations, editing text timelines, and rendering videos."""
+"""FastAPI backend for inspecting annotations, running the Modular Multi-Agent Pipeline, and rendering 4K HDR videos."""
 
 from __future__ import annotations
 
-import os
+import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from ..agents import AgentRegistry, generate_intake_questions, run_multi_agent_pipeline
 from ..analyzer.ag_annotator import analyze_media_directory
 from ..exporters.nle_export import export_all_nle_formats
 from ..models.schema import EditTimeline, MediaCatalog
@@ -44,13 +45,38 @@ class PlanRequest(BaseModel):
     use_antigravity: bool = True
 
 
+class MultiAgentRunRequest(BaseModel):
+    media_dir: str
+    project_dir: str = "gilroy_halloween_project"
+    user_prompt: str = ""
+    extra_audio_path: Optional[str] = None
+    interview_answers: dict[str, str] = Field(default_factory=dict)
+    enabled_optional_roles: list[str] = Field(default_factory=list)
+    disabled_roles: list[str] = Field(default_factory=list)
+    width: int = 3840
+    height: int = 2160
+    fps: int = 30
+    hdr: bool = True
+    use_antigravity: bool = True
+    render_video: bool = False
+
+
 class RenderRequest(BaseModel):
     project_dir: str = "workspace_project"
     output_filename: str = "final_story.mp4"
 
 
+def _read_json_if_exists(path: Path) -> Optional[dict[str, Any]]:
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
 def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI:
-    app = FastAPI(title="AI Photo & Video Editing Studio", version="0.1.0")
+    app = FastAPI(title="AI Photo & Video Editing Studio (Modular Multi-Agent Edition)", version="0.2.0")
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
@@ -64,6 +90,22 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
     def index() -> str:
         index_file = static_dir / "index.html"
         return index_file.read_text(encoding="utf-8")
+
+    @app.get("/api/agents")
+    def api_list_agents() -> dict:
+        return {
+            "agents": [cls.to_metadata_dict() for cls in AgentRegistry.list_all()],
+        }
+
+    @app.get("/api/intake-questions")
+    def api_intake_questions(
+        media_dir: str = Query(default="C:/Users/hihao/Documents/projects/ai_editor/raw_media"),
+        prompt: str = Query(default=""),
+    ) -> dict:
+        questions = generate_intake_questions(media_dir=media_dir, initial_prompt=prompt)
+        return {
+            "questions": [q.model_dump(mode="json") for q in questions],
+        }
 
     @app.get("/api/state")
     def get_state(project_dir: Optional[str] = None) -> dict:
@@ -101,10 +143,22 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
             if matches:
                 exports[ext.lstrip(".")] = str(matches[0].resolve())
 
+        agent_contracts = {
+            "creative_brief": _read_json_if_exists(proj / "creative_brief.json"),
+            "media_index": _read_json_if_exists(proj / "media_index.json"),
+            "beat_grid": _read_json_if_exists(proj / "beat_grid.json"),
+            "paper_edit": _read_json_if_exists(proj / "paper_edit.json"),
+            "pacing_audit": _read_json_if_exists(proj / "pacing_audit.json"),
+            "vfx_manifest": _read_json_if_exists(proj / "vfx_manifest.json"),
+            "blackboard": _read_json_if_exists(proj / "blackboard.json"),
+        }
+
         return {
             "project_dir": str(proj),
             "last_status": state["last_status"],
             "progress": state["progress"],
+            "registered_agents": [cls.to_metadata_dict() for cls in AgentRegistry.list_all()],
+            "agent_contracts": agent_contracts,
             "has_annotations": ann_path.exists(),
             "annotations_yaml": annotations_yaml,
             "catalog": catalog_data,
@@ -115,6 +169,44 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
             "has_rendered_video": mp4_path.exists() or ("mp4" in exports),
             "exports": exports,
         }
+
+    @app.post("/api/agents/run")
+    def api_run_multi_agent(req: MultiAgentRunRequest) -> dict:
+        media_path = Path(req.media_dir).resolve()
+        if not media_path.exists() or not media_path.is_dir():
+            raise HTTPException(status_code=400, detail=f"Media directory not found: {req.media_dir}")
+
+        proj = Path(req.project_dir).resolve()
+        state["project_dir"] = str(proj)
+
+        extra_audio = [req.extra_audio_path] if req.extra_audio_path and Path(req.extra_audio_path).exists() else None
+
+        def _on_prog(role_id: str, msg: str, pct: int) -> None:
+            state["last_status"] = f"[{role_id}] {msg}"
+            state["progress"] = round(pct / 100.0, 2)
+
+        blackboard = run_multi_agent_pipeline(
+            media_dir=media_path,
+            project_dir=proj,
+            user_prompt=req.user_prompt,
+            extra_audio_paths=extra_audio,
+            interview_answers=req.interview_answers,
+            enabled_optional_roles=req.enabled_optional_roles,
+            disabled_roles=req.disabled_roles,
+            width=req.width,
+            height=req.height,
+            fps=req.fps,
+            hdr=req.hdr,
+            use_antigravity=req.use_antigravity,
+            render_video=req.render_video,
+            progress_callback=_on_prog,
+        )
+
+        state["last_status"] = (
+            f"Multi-Agent Pipeline Complete ({len(blackboard.executed_agents)} agents executed)"
+        )
+        state["progress"] = 1.0
+        return get_state(str(proj))
 
     @app.post("/api/analyze")
     def api_analyze(req: AnalyzeRequest) -> dict:

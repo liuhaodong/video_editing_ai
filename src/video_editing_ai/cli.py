@@ -10,6 +10,7 @@ from rich.panel import Panel
 import typer
 import uvicorn
 
+from .agents import AgentRegistry, generate_intake_questions, run_multi_agent_pipeline
 from .analyzer.ag_annotator import analyze_media_directory
 from .exporters.nle_export import export_all_nle_formats
 from .models.schema import EditTimeline, MediaCatalog
@@ -19,10 +20,112 @@ from .web.app import create_app
 
 app = typer.Typer(
     name="ai-editor",
-    help="AI-powered photo and video analysis, story timeline planning, and open-source programmatic video renderer.",
+    help="AI-powered photo and video analysis, modular multi-agent story editing, and 4K HDR video renderer.",
     add_completion=False,
 )
 console = Console()
+
+
+@app.command("agents-list")
+def cmd_agents_list() -> None:
+    """List all registered core and pluggable sub-agent roles in the Multi-Agent Architecture."""
+    console.print(Panel("[bold cyan]Modular Multi-Agent Editing Roles (AgentRegistry)[/bold cyan]"))
+    for agent_cls in AgentRegistry.list_all():
+        meta = agent_cls.to_metadata_dict()
+        status = "[green]ENABLED BY DEFAULT[/green]" if meta["enabled_by_default"] else "[yellow]OPTIONAL PLUGIN[/yellow]"
+        console.print(
+            f"  - [bold]{meta['role_id']}[/bold] (Stage {meta['stage_order']:02d}) - {meta['display_name']} [{status}]\n"
+            f"    Description: {meta['description']}\n"
+            f"    Requires: {meta['requires_artifacts']} -> Produces: {meta['produces_artifacts']}\n"
+            f"    Skill Prompt: .agent/skills/ai-video-editor/references/{meta['skill_reference_file']}"
+        )
+
+
+@app.command("agents-run")
+def cmd_agents_run(
+    media_dir: Path = typer.Argument(..., help="Directory containing raw videos (.MOV, .MP4) and photos (.HEIC, .JPG)"),
+    prompt: str = typer.Option(..., "-p", "--prompt", help="Client story idea and must-have moments"),
+    project_dir: Path = typer.Option(Path("workspace_project"), "-o", "--project-dir", help="Project output folder"),
+    bgm: Optional[Path] = typer.Option(None, "--bgm", help="Optional background music file (.mp3, .wav)"),
+    enable_agent: Optional[list[str]] = typer.Option(
+        None,
+        "--enable-agent",
+        help="Enable optional plugin agent role_id (e.g. --enable-agent vfx_designer)",
+    ),
+    disable_agent: Optional[list[str]] = typer.Option(
+        None,
+        "--disable-agent",
+        help="Disable specific agent role_id",
+    ),
+    interactive_intake: bool = typer.Option(
+        False,
+        "--interactive-intake",
+        help="Interactively answer ClientIntakeAgent discovery questions in the terminal",
+    ),
+    width: int = typer.Option(3840, "--width", help="Output video width (default 3840 for 4K UHD)"),
+    height: int = typer.Option(2160, "--height", help="Output video height (default 2160 for 2160p 4K UHD)"),
+    fps: int = typer.Option(30, "--fps", help="Output frame rate"),
+    hdr: bool = typer.Option(True, "--hdr/--sdr", help="Render in 10-bit HLG HDR (Rec.2020 / arib-std-b67)"),
+    render: bool = typer.Option(False, "--render/--no-render", help="Also render final_story.mp4 after Showrunner lock"),
+    use_antigravity: bool = typer.Option(True, "--antigravity/--no-antigravity", help="Use Google Antigravity SDK"),
+) -> None:
+    """Run the Coordinated Multi-Agent Vlog & Family Travel Editing Pipeline (Stage 0 -> Stage 50)."""
+    console.print(
+        Panel(
+            f"[bold cyan]Running Modular Multi-Agent Video Editing Pipeline[/bold cyan]\n"
+            f"Media Dir: {media_dir}\n"
+            f"Project Dir: {project_dir}\n"
+            f"Client Prompt: {prompt}"
+        )
+    )
+
+    answers: dict[str, str] = {}
+    if interactive_intake:
+        questions = generate_intake_questions(media_dir, prompt)
+        console.print("[bold yellow]Stage 0 Client Intake Interview:[/bold yellow]")
+        for q in questions:
+            console.print(f"\n[bold]{q.question}[/bold]")
+            for opt in q.options:
+                console.print(f"  * {opt}")
+            ans = typer.prompt("Your answer", default=q.default_answer)
+            answers[q.id] = ans
+
+    extra_audio = [bgm] if bgm and bgm.exists() else None
+
+    def _on_progress(role_id: str, msg: str, pct: int) -> None:
+        console.print(f"  [{pct:3d}%] [{role_id}] {msg}")
+
+    blackboard = run_multi_agent_pipeline(
+        media_dir=media_dir,
+        project_dir=project_dir,
+        user_prompt=prompt,
+        extra_audio_paths=extra_audio,
+        interview_answers=answers,
+        enabled_optional_roles=list(enable_agent or []),
+        disabled_roles=list(disable_agent or []),
+        width=width,
+        height=height,
+        fps=fps,
+        hdr=hdr,
+        use_antigravity=use_antigravity,
+        render_video=render,
+        progress_callback=_on_progress,
+    )
+
+    tl = blackboard.timeline
+    console.print(
+        f"[bold green][OK] Multi-Agent Pipeline Complete![/bold green]\n"
+        f"  - Executed Roles: {', '.join(a['role_id'] for a in blackboard.executed_agents)}\n"
+        f"  - Creative Brief: [underline]{project_dir / 'creative_brief.json'}[/underline]\n"
+        f"  - Media Index:    [underline]{project_dir / 'media_index.json'}[/underline]\n"
+        f"  - Beat Grid:      [underline]{project_dir / 'beat_grid.json'}[/underline]\n"
+        f"  - Paper Edit:     [underline]{project_dir / 'paper_edit.json'}[/underline]\n"
+        f"  - Pacing Audit:   [underline]{project_dir / 'pacing_audit.json'}[/underline]\n"
+        f"  - Blackboard Bus: [underline]{project_dir / 'blackboard.json'}[/underline]\n"
+        f"  - Final Timeline: [underline]{project_dir / 'timeline.yaml'}[/underline] "
+        f"({len(tl.visual_track) if tl else 0} V1 cuts, {len(tl.broll_track) if tl else 0} V2 cutaways, "
+        f"{len(tl.effects_track) if tl else 0} VFX items)"
+    )
 
 
 @app.command("analyze")
@@ -152,8 +255,9 @@ def cmd_run(
     prompt: str = typer.Option(..., "-p", "--prompt", help="Rough story idea for the final video"),
     project_dir: Path = typer.Option(Path("workspace_project"), "-o", "--project-dir", help="Project output folder"),
     bgm: Optional[Path] = typer.Option(None, "--bgm", help="Optional background music file"),
-    width: int = typer.Option(1920, "--width"),
-    height: int = typer.Option(1080, "--height"),
+    width: int = typer.Option(3840, "--width"),
+    height: int = typer.Option(2160, "--height"),
+    hdr: bool = typer.Option(True, "--hdr/--sdr"),
     use_antigravity: bool = typer.Option(True, "--antigravity/--no-antigravity"),
 ) -> None:
     """Run Steps 1 -> 2 -> 3 end-to-end (Analyze -> Plan -> Render)."""
@@ -173,6 +277,7 @@ def cmd_run(
         width=width,
         height=height,
         fps=30,
+        hdr=hdr,
         photo_mode="gallery_frame",
         use_antigravity=use_antigravity,
     )

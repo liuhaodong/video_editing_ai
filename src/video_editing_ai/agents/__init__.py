@@ -1,0 +1,29 @@
+"""Modular Multi-Agent Video Editing Architecture (Stage 0 -> Stage 50 + Pluggable Slots)."""
+
+from .audio_vibe_agent import AudioVibeAgent
+from .base import AgentRegistry, BaseEditingAgent, PipelineBlackboard, register_agent
+from .culler_agent import CullerAgent
+from .intake_agent import ClientIntakeAgent, generate_intake_questions
+from .orchestrator import MultiAgentOrchestrator, run_multi_agent_pipeline
+from .picture_editors import DialogueEditorAgent, MontageEditorAgent
+from .plugins.vfx_agent import VFXAgent
+from .showrunner_agent import ShowrunnerAgent
+from .story_producer_agent import StoryProducerAgent
+
+__all__ = [
+    "AgentRegistry",
+    "AudioVibeAgent",
+    "BaseEditingAgent",
+    "ClientIntakeAgent",
+    "CullerAgent",
+    "DialogueEditorAgent",
+    "MontageEditorAgent",
+    "MultiAgentOrchestrator",
+    "PipelineBlackboard",
+    "ShowrunnerAgent",
+    "StoryProducerAgent",
+    "VFXAgent",
+    "generate_intake_questions",
+    "register_agent",
+    "run_multi_agent_pipeline",
+]

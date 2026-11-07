@@ -53,7 +53,7 @@ def export_fcpxml(timeline: EditTimeline, output_fcpxml: str | Path) -> Path:
     ]
 
     next_res_idx = 2
-    for clip in timeline.visual_track:
+    for clip in list(timeline.visual_track) + list(timeline.broll_track):
         if clip.source not in resource_map:
             rid = f"r{next_res_idx}"
             next_res_idx += 1
@@ -103,6 +103,22 @@ def export_fcpxml(timeline: EditTimeline, output_fcpxml: str | Path) -> Path:
                 inner_elements.append(
                     f'                            <marker start="{m_start}" duration="100/{fps * 100}s" '
                     f'value="{escape(m.name)}" note="{escape(m.note)}"/>'
+                )
+
+        # Attach Track V2 B-Roll cutaways that fall inside this primary spine clip on lane="1"
+        for b_clip in timeline.broll_track:
+            if clip.timeline_start <= b_clip.timeline_start < (clip.timeline_start + clip.duration):
+                brid = resource_map[b_clip.source]
+                bname = escape(Path(b_clip.source).name)
+                b_offset = _sec_to_fcpxml_rational(
+                    (clip.source_in if clip.type == "video" else 0.0) + (b_clip.timeline_start - clip.timeline_start),
+                    fps,
+                )
+                b_start = _sec_to_fcpxml_rational(b_clip.source_in if b_clip.type == "video" else 0.0, fps)
+                b_dur = _sec_to_fcpxml_rational(b_clip.duration, fps)
+                inner_elements.append(
+                    f'                            <asset-clip name="{bname}" lane="1" '
+                    f'offset="{b_offset}" ref="{brid}" start="{b_start}" duration="{b_dur}" format="r1"/>'
                 )
 
         # Attach BGM on the very first spine clip as lane -1
@@ -233,6 +249,42 @@ def export_otio(timeline: EditTimeline, output_otio: str | Path) -> Path:
             }
         )
 
+    v2_children: list[dict] = []
+    for b_clip in timeline.broll_track:
+        src_in = b_clip.source_in if b_clip.type == "video" else 0.0
+        v2_children.append(
+            {
+                "OTIO_SCHEMA": "Clip.2",
+                "name": Path(b_clip.source).name,
+                "metadata": {
+                    "id": b_clip.id,
+                    "type": b_clip.type,
+                    "track_lane": 2,
+                    "timeline_start": b_clip.timeline_start,
+                    "narrative_note": b_clip.narrative_note,
+                },
+                "source_range": {
+                    "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": {
+                        "OTIO_SCHEMA": "RationalTime.1",
+                        "value": round(src_in * fps, 2),
+                        "rate": fps,
+                    },
+                    "duration": {
+                        "OTIO_SCHEMA": "RationalTime.1",
+                        "value": round(b_clip.duration * fps, 2),
+                        "rate": fps,
+                    },
+                },
+                "media_references": {
+                    "DEFAULT_MEDIA": {
+                        "OTIO_SCHEMA": "ExternalReference.1",
+                        "target_url": _path_to_file_uri(b_clip.source),
+                    }
+                },
+            }
+        )
+
     a1_children: list[dict] = []
     for aud in timeline.audio_tracks:
         a_dur = aud.duration or timeline.total_duration
@@ -276,6 +328,12 @@ def export_otio(timeline: EditTimeline, output_otio: str | Path) -> Path:
                     "name": "V1_Primary_Visual",
                     "kind": "Video",
                     "children": v1_children,
+                },
+                {
+                    "OTIO_SCHEMA": "Track.1",
+                    "name": "V2_BRoll_Cutaways",
+                    "kind": "Video",
+                    "children": v2_children,
                 },
                 {
                     "OTIO_SCHEMA": "Track.1",
