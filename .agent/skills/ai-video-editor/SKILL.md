@@ -80,6 +80,19 @@ C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao
      ```powershell
      C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-story-plan --project-dir "<project_dir>" --overrides-json "{\"cold_open_subclip_id\":\"sub_002\",\"cold_open_hook_caption\":\"Inside the Louvre · A Family Day in Paris\"}" --reassemble-timeline
      ```
+- **Option D — Dedicated Royalty-Free BGM Scouting & Full-Length Mastering Agent (`scout-bgm` & `apply-bgm-plan`)**:
+  1. **Mechanical Step**: Search and download royalty-free candidate tracks from online catalogs (Pixabay Music / Incompetech 1,443-track CC-BY API / Public Domain) and measure each candidate's exact `duration_sec`, `mean_volume_db`, and `tempo_bpm`:
+     ```powershell
+     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py scout-bgm --project-dir "<project_dir>" --keywords "paris,accordion,waltz,cafe,piano" --mood-profile parisian_classical_museum
+     ```
+  2. **AI Agent Creative Step**: Read `<project_dir>/bgm_candidates.json` (or delegate to a dedicated BGM subagent via `invoke_subagent`) to pick the best single track or **Multi-Chapter BGM Suite** matching the emotional progression of the chapters.
+  3. **Mechanical Mastering Step**: Chain/crossfade the selected tracks and master to **100% of `timeline.total_duration`** with broadcast **EBU R128 (`-14.0 LUFS`)** loudness normalization so the music never ends early and sits at a warm, vibrant volume:
+     ```powershell
+     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-bgm-plan --project-dir "<project_dir>" --tracks "parisian_accordion.mp3,valse_gymnopedie.mp3,evening_debussy_chamber.mp3,jazz_brunch_bistro.mp3" --target-lufs -14.0 --bgm-volume 0.90
+     ```
+- **Documentary Reading-Paced Scene Durations & Unified Frosted-Glass Captions**:
+  - For annotated educational/travel scenes, give viewers comfortable reading time (`160–180 WPM` + visual appreciation): **`5.5s–6.8s`** per photo plate and **`6.5s–9.0s`** per video clip.
+  - Attach `caption_title`, `caption_subtitle`, and `camera_badge` directly to `item.ken_burns` on both `photo` and `video` clips so the renderer composites a single unified **Apple TV+ / National Geographic Frosted-Glass Documentary Lower-Third Card** (avoiding redundant overlapping Track V3 subtitle boxes).
 
 ### Phase 4: Surgical Timeline Revisions (`edit-cut`) & Fast 2-Second Segment Previews (`render-segment`)
 When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *"drop clip_005"*, *"change the plaque on clip_003"*, *"lower BGM volume under speech"*), **never re-run the entire 11-agent pipeline**:

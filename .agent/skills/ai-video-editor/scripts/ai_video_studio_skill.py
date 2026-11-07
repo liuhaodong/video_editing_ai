@@ -657,6 +657,102 @@ def cmd_project(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_scout_bgm(args: argparse.Namespace) -> int:
+    """Mechanically search & download royalty-free BGM candidates and measure acoustic diagnostics for the AI BGM Agent."""
+    from video_editing_ai.agents.music_supervisor_agent import scout_bgm_candidates_for_project
+
+    proj = Path(args.project_dir).resolve()
+    proj.mkdir(parents=True, exist_ok=True)
+    keywords = [k.strip() for k in (args.keywords or "").split(",") if k.strip()]
+    payload = scout_bgm_candidates_for_project(
+        project_dir=proj,
+        query_keywords=keywords or ["paris", "accordion", "waltz", "cafe", "piano"],
+        mood_profile=args.mood_profile or "parisian_classical_museum",
+        target_duration_sec=float(args.target_duration or 240.0),
+        download_limit=int(args.download_limit or 5),
+    )
+    out_path = Path(args.output).resolve() if args.output else (proj / "bgm_candidates.json")
+    _write_json(out_path, payload)
+    dl_count = sum(1 for c in payload.get("candidates", []) if c.get("downloaded"))
+    print(f"Success! Scouted {len(payload.get('candidates', []))} royalty-free BGM candidates ({dl_count} downloaded). Written to: {out_path}")
+    return 0
+
+
+def cmd_apply_bgm_plan(args: argparse.Namespace) -> int:
+    """Mechanically master the AI BGM Agent's selected track(s) to full timeline duration at -14 LUFS and update timeline.yaml."""
+    from video_editing_ai.agents.music_supervisor_agent import master_bgm_soundtrack, probe_audio_diagnostics
+    from video_editing_ai.models.schema import AudioTrackItem, EditTimeline
+
+    proj = Path(args.project_dir).resolve()
+    tl_path = proj / "timeline.yaml"
+    target_dur = float(args.target_duration or 0.0)
+    tl: Optional[EditTimeline] = None
+    if tl_path.exists():
+        tl = EditTimeline.from_yaml_file(tl_path)
+        if target_dur <= 0.0:
+            target_dur = max(60.0, float(tl.total_duration))
+    if target_dur <= 0.0:
+        target_dur = 240.0
+
+    bgm_dir = proj / "bgm_library"
+    bgm_dir.mkdir(parents=True, exist_ok=True)
+    raw_tracks = [t.strip() for t in (args.tracks or "").split(",") if t.strip()]
+    track_paths: list[Path] = []
+    for t_str in raw_tracks:
+        p = Path(t_str)
+        if not p.exists():
+            p = bgm_dir / (t_str if t_str.endswith(".mp3") else f"{t_str}.mp3")
+        if p.exists():
+            track_paths.append(p.resolve())
+
+    if not track_paths:
+        print("Error: No valid track files found for --tracks", file=sys.stderr)
+        return 1
+
+    mastered_mp3 = bgm_dir / "mastered_soundtrack.mp3"
+    out_mp3 = master_bgm_soundtrack(
+        track_paths=track_paths,
+        target_duration_sec=target_dur,
+        output_mp3=mastered_mp3,
+        target_lufs=float(args.target_lufs or -14.0),
+        crossfade_sec=float(args.crossfade_sec or 3.5),
+    )
+    diag = probe_audio_diagnostics(out_mp3)
+
+    if tl is not None:
+        tl.audio_tracks = [
+            AudioTrackItem(
+                id="bgm_master_01",
+                source=str(out_mp3.resolve()),
+                timeline_start=0.0,
+                source_in=0.0,
+                duration=round(tl.total_duration, 2),
+                volume=float(args.bgm_volume or 0.85),
+                duck_under_dialogue=True,
+                duck_volume=float(args.duck_volume or 0.35),
+                fade_in=1.5,
+                fade_out=3.0,
+            )
+        ]
+        tl.to_yaml_file(tl_path)
+
+    report_data = {
+        "mastered_soundtrack_path": str(out_mp3.resolve()),
+        "source_tracks": [str(p) for p in track_paths],
+        "target_duration_sec": round(target_dur, 2),
+        "mastered_duration_sec": diag["duration_sec"],
+        "mean_volume_db": diag["mean_volume_db"],
+        "max_volume_db": diag["max_volume_db"],
+        "selection_rationale": args.rationale or "AI BGM Agent curated multi-track royalty-free soundtrack suite.",
+    }
+    out_json = Path(args.output).resolve() if args.output else (proj / "bgm_mastering_report.json")
+    _write_json(out_json, report_data)
+    print(
+        f"Success! Mastered full-length BGM ({diag['duration_sec']:.1f}s, mean {diag['mean_volume_db']:.1f} dB) -> {out_mp3}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai_video_studio_skill",
@@ -839,6 +935,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_rs.add_argument("--output-mp4", default=None, help="Optional output segment MP4 path")
     p_rs.add_argument("--extract-frames", default=None, help="Optional comma-separated timestamps to extract as JPEGs")
     p_rs.set_defaults(func=cmd_render_segment)
+
+    # 13. scout-bgm
+    p_sb = sub.add_parser(
+        "scout-bgm",
+        help="Mechanically search & download royalty-free BGM tracks (Pixabay/Incompetech/CC0) and measure loudness & duration",
+    )
+    p_sb.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_sb.add_argument("--keywords", default="paris,accordion,waltz,cafe,piano", help="Comma-separated search keywords")
+    p_sb.add_argument("--mood-profile", default="parisian_classical_museum", help="Target mood profile")
+    p_sb.add_argument("--target-duration", type=float, default=240.0, help="Target video duration in seconds")
+    p_sb.add_argument("--download-limit", type=int, default=5, help="Max candidate tracks to download")
+    p_sb.add_argument("--output", default=None, help="Optional output bgm_candidates.json path")
+    p_sb.set_defaults(func=cmd_scout_bgm)
+
+    # 14. apply-bgm-plan
+    p_ab = sub.add_parser(
+        "apply-bgm-plan",
+        help="Mechanically master the AI BGM Agent's selected track(s) to cover 100% of timeline duration at -14 LUFS",
+    )
+    p_ab.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_ab.add_argument("--tracks", required=True, help="Comma-separated track filenames or paths to chain/crossfade")
+    p_ab.add_argument("--target-duration", type=float, default=0.0, help="Target duration in seconds (defaults to timeline.total_duration)")
+    p_ab.add_argument("--target-lufs", type=float, default=-14.0, help="Target EBU R128 loudness in LUFS (default -14.0)")
+    p_ab.add_argument("--crossfade-sec", type=float, default=3.5, help="Crossfade duration between tracks in seconds")
+    p_ab.add_argument("--bgm-volume", type=float, default=0.85, help="Timeline BGM volume multiplier (default 0.85)")
+    p_ab.add_argument("--duck-volume", type=float, default=0.35, help="Timeline BGM ducking volume (default 0.35)")
+    p_ab.add_argument("--rationale", default="", help="AI BGM Agent's curatorial rationale")
+    p_ab.add_argument("--output", default=None, help="Optional output JSON report path")
+    p_ab.set_defaults(func=cmd_apply_bgm_plan)
 
     return parser
 
