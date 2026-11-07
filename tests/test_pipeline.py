@@ -179,6 +179,7 @@ def test_modular_agent_registry_and_custom_plugin(tmp_path: Path, sample_media_d
         "montage_editor",
         "vfx_designer",
         "showrunner",
+        "production_director",
     ):
         assert expected in role_ids
 
@@ -269,6 +270,7 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
         "paper_edit.json",
         "vfx_manifest.json",
         "pacing_audit.json",
+        "director_review.json",
         "blackboard.json",
         "timeline.yaml",
         "storyboard.md",
@@ -281,6 +283,9 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
     assert bb.beat_grid is not None
     assert bb.paper_edit is not None
     assert bb.pacing_audit is not None
+    assert bb.director_review is not None
+    assert bb.director_review.approved_for_master_render is True
+    assert bb.director_review.overall_quality_score >= 9.0
     assert bb.timeline is not None
     assert len(bb.messages) >= 5
 
@@ -301,4 +306,5 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
     st = r_state.json()
     assert st["agent_contracts"]["creative_brief"] is not None
     assert st["agent_contracts"]["pacing_audit"] is not None
+    assert st["agent_contracts"]["director_review"] is not None
     assert st["agent_contracts"]["vfx_manifest"] is not None

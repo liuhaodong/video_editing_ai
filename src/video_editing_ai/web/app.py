@@ -149,6 +149,7 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
             "beat_grid": _read_json_if_exists(proj / "beat_grid.json"),
             "paper_edit": _read_json_if_exists(proj / "paper_edit.json"),
             "pacing_audit": _read_json_if_exists(proj / "pacing_audit.json"),
+            "director_review": _read_json_if_exists(proj / "director_review.json"),
             "vfx_manifest": _read_json_if_exists(proj / "vfx_manifest.json"),
             "blackboard": _read_json_if_exists(proj / "blackboard.json"),
         }

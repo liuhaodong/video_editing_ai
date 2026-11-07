@@ -52,8 +52,18 @@ function renderContractsAndBus(contracts) {
   const selector = document.getElementById("contractSelector");
 
   const bb = latestAgentContracts.blackboard;
+  const dr = latestAgentContracts.director_review;
+  let busHtml = "";
+  if (dr) {
+    busHtml += `
+      <div class="bus-msg" style="background:rgba(255,200,59,0.12); border-left:3px solid #ffc83b; margin-bottom:6px;">
+        <strong>🎬 Movie Production Director Sign-Off: Grade ${dr.quality_grade} (${dr.overall_quality_score}/10)</strong>
+        • <span>${dr.interventions_count} Active Agent Improvements Directed</span>
+      </div>
+    `;
+  }
   if (bb && bb.messages && bb.messages.length > 0) {
-    busBox.innerHTML = bb.messages
+    busHtml += bb.messages
       .map(
         (m) => `
         <div class="bus-msg">
@@ -63,8 +73,9 @@ function renderContractsAndBus(contracts) {
         </div>`
       )
       .join("");
+    busBox.innerHTML = busHtml;
   } else {
-    busBox.innerHTML = "<span class='muted'>No inter-agent messages recorded yet. Click 'Run Coordinated Multi-Agent Pipeline' to execute Stages 0 -> 50.</span>";
+    busBox.innerHTML = "<span class='muted'>No inter-agent messages recorded yet. Click 'Run Coordinated Multi-Agent Pipeline' to execute Stages 0 -> 60.</span>";
   }
 
   const key = selector ? selector.value : "blackboard";

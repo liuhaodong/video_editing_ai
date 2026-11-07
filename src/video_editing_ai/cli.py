@@ -113,16 +113,23 @@ def cmd_agents_run(
     )
 
     tl = blackboard.timeline
+    dr = blackboard.director_review
+    dr_note = (
+        f"Grade {dr.quality_grade} ({dr.overall_quality_score}/10, {dr.interventions_count} active directives)"
+        if dr
+        else "N/A"
+    )
     console.print(
         f"[bold green][OK] Multi-Agent Pipeline Complete![/bold green]\n"
-        f"  - Executed Roles: {', '.join(a['role_id'] for a in blackboard.executed_agents)}\n"
-        f"  - Creative Brief: [underline]{project_dir / 'creative_brief.json'}[/underline]\n"
-        f"  - Media Index:    [underline]{project_dir / 'media_index.json'}[/underline]\n"
-        f"  - Beat Grid:      [underline]{project_dir / 'beat_grid.json'}[/underline]\n"
-        f"  - Paper Edit:     [underline]{project_dir / 'paper_edit.json'}[/underline]\n"
-        f"  - Pacing Audit:   [underline]{project_dir / 'pacing_audit.json'}[/underline]\n"
-        f"  - Blackboard Bus: [underline]{project_dir / 'blackboard.json'}[/underline]\n"
-        f"  - Final Timeline: [underline]{project_dir / 'timeline.yaml'}[/underline] "
+        f"  - Executed Roles:   {', '.join(a['role_id'] for a in blackboard.executed_agents)}\n"
+        f"  - Creative Brief:   [underline]{project_dir / 'creative_brief.json'}[/underline]\n"
+        f"  - Media Index:      [underline]{project_dir / 'media_index.json'}[/underline]\n"
+        f"  - Beat Grid:        [underline]{project_dir / 'beat_grid.json'}[/underline]\n"
+        f"  - Paper Edit:       [underline]{project_dir / 'paper_edit.json'}[/underline]\n"
+        f"  - Pacing Audit:     [underline]{project_dir / 'pacing_audit.json'}[/underline]\n"
+        f"  - Director Review:  [underline]{project_dir / 'director_review.json'}[/underline] [{dr_note}]\n"
+        f"  - Blackboard Bus:   [underline]{project_dir / 'blackboard.json'}[/underline]\n"
+        f"  - Final Timeline:   [underline]{project_dir / 'timeline.yaml'}[/underline] "
         f"({len(tl.visual_track) if tl else 0} V1 cuts, {len(tl.broll_track) if tl else 0} V2 cutaways, "
         f"{len(tl.effects_track) if tl else 0} VFX items)"
     )

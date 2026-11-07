@@ -287,6 +287,30 @@ class DialogueEditorAgent(BaseEditingAgent):
 
         timeline.subtitles.items = sub_items
 
+        # Check if ProductionDirectorAgent directed a dialogue highlight badge on Track V3
+        inject_badge = any(
+            msg.message_type == "director_directive" and msg.payload.get("inject_dialogue_highlight_badge")
+            for msg in blackboard.get_messages_for(self.role_id)
+        )
+        if inject_badge and sub_items and not any(t.style == "dialogue_badge" for t in timeline.title_track):
+            best_sub = max(sub_items, key=lambda s: len(s.text))
+            badge_start = round(best_sub.start + 0.2, 2)
+            # Ensure badge does not collide with existing title_track items
+            if not any(abs(t.timeline_start - badge_start) < 3.2 for t in timeline.title_track):
+                timeline.title_track.append(
+                    TitleOverlayItem(
+                        id="title_director_quote_badge",
+                        style="dialogue_badge",
+                        text=f'"{best_sub.text[:36]}"',
+                        subtitle=best_sub.secondary_text or "Candid Family Moment · 精彩原声",
+                        timeline_start=badge_start,
+                        duration=min(3.2, max(1.8, best_sub.end - best_sub.start)),
+                        fade_in=0.3,
+                        fade_out=0.3,
+                        accent_color="#00E5FF",
+                    )
+                )
+
         blackboard.send_message(
             sender_role=self.role_id,
             recipient_role="montage_editor",
@@ -380,6 +404,31 @@ class MontageEditorAgent(BaseEditingAgent):
                 b_item.source_out = round(b_item.source_in + b_item.duration, 2)
             if parent is not None and parent.id in new_starts:
                 b_item.timeline_start = round(new_starts[parent.id] + rel_offset, 3)
+
+        # Honor any ProductionDirectorAgent directives for Ken Burns motion variety and title collision spacing
+        kb_cycle = [
+            "floating_gallery",
+            "zoom_in",
+            "pan_left_to_right",
+            "zoom_out",
+            "pan_right_to_left",
+            "tilt_up",
+        ]
+        prev_preset = None
+        for idx, item in enumerate(timeline.visual_track):
+            if item.type == "photo" and item.ken_burns is not None:
+                if item.ken_burns.preset == prev_preset:
+                    item.ken_burns.preset = kb_cycle[(idx + 1) % len(kb_cycle)]  # type: ignore[assignment]
+                prev_preset = item.ken_burns.preset
+
+        # Sort and space out title_track overlays so titles never collide
+        timeline.title_track.sort(key=lambda t: t.timeline_start)
+        for i in range(1, len(timeline.title_track)):
+            prev_t = timeline.title_track[i - 1]
+            cur_t = timeline.title_track[i]
+            min_start = round(prev_t.timeline_start + prev_t.duration + 1.0, 2)
+            if cur_t.timeline_start < min_start and min_start + cur_t.duration < timeline.total_duration:
+                cur_t.timeline_start = min_start
 
         # Configure Track A3 Background Music with -14dB auto-ducking & 1.0s smooth ramps
         audio_source = ""

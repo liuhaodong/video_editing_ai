@@ -324,9 +324,51 @@ class AgentCoordinationMessage(BaseModel):
     timestamp: str
     sender_role: str
     recipient_role: str
-    message_type: Literal["directive", "handoff", "revision_request", "revision_completed", "audit_note"] = "handoff"
+    message_type: Literal[
+        "directive",
+        "handoff",
+        "revision_request",
+        "revision_completed",
+        "audit_note",
+        "director_directive",
+        "director_signoff",
+    ] = "handoff"
     subject: str
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class DirectorStageReview(BaseModel):
+    """A stage-gate review and corrective directive issued by the Movie Production Director Agent."""
+
+    stage_order: int
+    reviewed_agent_role: str
+    status: Literal["approved", "directed_improvement", "polished_by_director"] = "approved"
+    quality_score: float = Field(default=9.0, ge=0.0, le=10.0)
+    critique: str
+    directive_sent: Optional[str] = None
+    directive_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class DirectorReviewReport(BaseModel):
+    """Agent 6 Output (director_review.json): Executive Movie Production Director's quality audit & sign-off."""
+
+    director_vision_statement: str
+    overall_quality_score: float = Field(default=9.2, ge=0.0, le=10.0)
+    quality_grade: str = Field(default="A")
+    approved_for_master_render: bool = True
+    interventions_count: int = 0
+    rubric_scores: dict[str, float] = Field(default_factory=dict)
+    stage_reviews: list[DirectorStageReview] = Field(default_factory=list)
+    final_director_notes: list[str] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "DirectorReviewReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 class PacingAuditEntry(BaseModel):

@@ -1,4 +1,4 @@
-"""Multi-Agent Pipeline Orchestrator with topological stage execution and Showrunner revision loop."""
+"""Multi-Agent Pipeline Orchestrator with Executive Movie Production Director supervision and revision loops."""
 
 from __future__ import annotations
 
@@ -6,21 +6,24 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..exporters.nle_export import export_all_nle_formats
+from ..models.schema import DirectorStageReview
 from ..renderer.ffmpeg_composer import render_timeline
 from ..renderer.subtitles import export_ass_subtitles, export_srt_subtitles
 from . import (
     audio_vibe_agent as _audio_vibe,  # noqa: F401
     culler_agent as _culler,  # noqa: F401
+    director_agent as _director,  # noqa: F401
     intake_agent as _intake,  # noqa: F401
     picture_editors as _editors,  # noqa: F401
     showrunner_agent as _showrunner,  # noqa: F401
 )
 from .base import AgentRegistry, BaseEditingAgent, PipelineBlackboard
+from .director_agent import ProductionDirectorAgent
 from .plugins import vfx_agent as _vfx  # noqa: F401
 
 
 class MultiAgentOrchestrator:
-    """Executes registered video editing sub-agents in stage_order over a shared PipelineBlackboard."""
+    """Executes registered video editing sub-agents in stage_order under Production Director supervision."""
 
     def __init__(
         self,
@@ -46,6 +49,13 @@ class MultiAgentOrchestrator:
         plan = self.get_execution_plan()
         total_steps = max(1, len(plan))
 
+        director: Optional[ProductionDirectorAgent] = next(
+            (a for a in plan if isinstance(a, ProductionDirectorAgent)),
+            None,
+        )
+        stage_reviews: list[DirectorStageReview] = []
+        setattr(blackboard, "_director_stage_reviews", stage_reviews)
+
         for idx, agent in enumerate(plan):
             pct = int(round((idx / total_steps) * 85))
             if progress_callback:
@@ -61,6 +71,29 @@ class MultiAgentOrchestrator:
                     "summary": summary,
                 }
             )
+
+            # Executive Production Director supervises each stage (< 60) and directs immediate improvements if needed
+            if director is not None and agent.role_id != director.role_id:
+                review, should_rerun = director.supervise_stage(agent, blackboard)
+                stage_reviews.append(review)
+                if should_rerun:
+                    if progress_callback:
+                        progress_callback(
+                            director.role_id,
+                            f"[Director Directive -> {agent.role_id}] {review.directive_sent}",
+                            pct + 2,
+                        )
+                    improved_summary = agent.run(blackboard)
+                    blackboard.executed_agents.append(
+                        {
+                            "role_id": agent.role_id,
+                            "display_name": f"{agent.display_name} (Director-Guided Improvement)",
+                            "stage_order": agent.stage_order,
+                            "round": blackboard.revision_round,
+                            "summary": improved_summary,
+                        }
+                    )
+
             blackboard.save_snapshot()
 
             # If Stage 0 ClientIntakeAgent enabled optional agents in creative_brief, merge them into the plan
@@ -74,7 +107,7 @@ class MultiAgentOrchestrator:
                             plan.sort(key=lambda a: (a.stage_order, a.role_id))
                             total_steps = max(1, len(plan))
 
-        # Check if Showrunner requested a revision loop (at most 1 revision round)
+        # Check if Showrunner requested a full cross-stage revision loop (at most 1 revision round)
         has_revision_request = any(
             m.message_type == "revision_request" and m.sender_role == "showrunner"
             for m in blackboard.messages

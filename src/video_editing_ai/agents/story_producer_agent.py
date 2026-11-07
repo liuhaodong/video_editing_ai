@@ -35,10 +35,13 @@ class StoryProducerAgent(BaseEditingAgent):
         photos = [s for s in active_selects if s.media_type == "photo"]
 
         forced_select_ids: set[str] = set()
+        min_aroll_cutaway_dur = 8.5
         for msg in blackboard.get_messages_for(self.role_id):
-            if msg.message_type == "revision_request":
+            if msg.message_type in ("revision_request", "director_directive"):
                 for sid in msg.payload.get("include_select_ids", []):
                     forced_select_ids.add(str(sid))
+                if "min_aroll_cutaway_duration" in msg.payload:
+                    min_aroll_cutaway_dur = float(msg.payload["min_aroll_cutaway_duration"])
 
         for s in media_index.subclips:
             if s.subclip_id in forced_select_ids and s not in active_selects:
@@ -151,10 +154,10 @@ class StoryProducerAgent(BaseEditingAgent):
             c_vids = v_buckets[c_idx]
             c_photos = p_buckets[c_idx]
 
-            # Build Track V2 B-Roll cutaway anchor map for long A-roll clips (>= 8.5s)
+            # Build Track V2 B-Roll cutaway anchor map for A-roll clips (>= min_aroll_cutaway_dur)
             broll_anchor_map: dict[str, list[str]] = {}
             for v in c_vids:
-                if v.roll_type == "a_roll" and v.duration >= 8.5 and len(c_photos) >= 2:
+                if v.roll_type == "a_roll" and v.duration >= min_aroll_cutaway_dur and len(c_photos) >= 1:
                     cutaway_candidate = next(
                         (p for p in c_photos if p.subclip_id not in used_as_v2_cutaway),
                         None,

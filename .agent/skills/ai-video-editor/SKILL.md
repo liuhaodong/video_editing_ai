@@ -1,6 +1,6 @@
 ---
 name: ai-video-editor
-description: Modular multi-agent AI photo and video editing skill for family travel, vlogs, and unscripted highlights. Orchestrates specialized sub-agents (Client Intake, Culler & Sync, Audio/Beat Vibe Designer, Story Producer, Dual Dialogue & Montage Editors, Pluggable VFX/Color Agents, and Showrunner Pacing Critic) through deterministic JSON contracts (creative_brief.json, media_index.json, beat_grid.json, paper_edit.json, pacing_audit.json, timeline.yaml) and renders 4K 10-bit HLG HDR deliverables + FCPXML/EDL/OTIO.
+description: Modular multi-agent AI photo and video editing skill for family travel, vlogs, and unscripted highlights. Orchestrates specialized sub-agents (Client Intake, Culler & Sync, Audio/Beat Vibe Designer, Story Producer, Dual Dialogue & Montage Editors, Pluggable VFX/Color Agents, Showrunner Pacing Critic, and Executive Movie Production Director) through deterministic JSON contracts (creative_brief.json, media_index.json, beat_grid.json, paper_edit.json, pacing_audit.json, director_review.json, timeline.yaml) and renders 4K 10-bit HLG HDR deliverables + FCPXML/EDL/OTIO.
 ---
 
 # Modular Multi-Agent Video & Photo Editor Skill
@@ -17,7 +17,8 @@ Each agent role has its own reference specification in `references/` (used by bo
 - **Stage 20 — Story Producer (`story_producer`)**: [references/02_story_producer_agent.md](references/02_story_producer_agent.md) → outputs `paper_edit.json`
 - **Stage 30 — Dual Picture Editors (`dialogue_editor` + `montage_editor`)**: [references/03_picture_editors.md](references/03_picture_editors.md) → outputs draft multi-track `timeline.yaml`
 - **Stage 40 — Pluggable Post / VFX / Color Slot (`vfx_designer`)**: [references/06_vfx_agent.md](references/06_vfx_agent.md) → enriches `timeline.yaml` (`effects_track`) & outputs `vfx_manifest.json`
-- **Stage 50 — Showrunner & Pacing Critic (`showrunner`)**: [references/05_showrunner_agent.md](references/05_showrunner_agent.md) → audits against `creative_brief.json`, coordinates revisions, and outputs `pacing_audit.json` + final `timeline.yaml` + `storyboard.md`
+- **Stage 50 — Showrunner & Pacing Critic (`showrunner`)**: [references/05_showrunner_agent.md](references/05_showrunner_agent.md) → audits against `creative_brief.json`, coordinates revisions, and outputs `pacing_audit.json` + draft `timeline.yaml` + `storyboard.md`
+- **Stage 60 & Cross-Stage Supervisor — Executive Movie Production Director (`production_director`)**: [references/07_production_director_agent.md](references/07_production_director_agent.md) → oversees all sub-agents at every stage gate, directs sub-agents to fix/improve coverage, motion variety, and audio/title continuity, and outputs `director_review.json` + final signed-off `timeline.yaml` & `storyboard.md`
 
 ---
 

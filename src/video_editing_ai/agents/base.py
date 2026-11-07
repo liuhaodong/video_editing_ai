@@ -14,6 +14,7 @@ from ..models.schema import (
     AgentCoordinationMessage,
     BeatGrid,
     CreativeBrief,
+    DirectorReviewReport,
     EditTimeline,
     MediaCatalog,
     MediaIndex,
@@ -77,6 +78,7 @@ class PipelineBlackboard:
         self.paper_edit: Optional[PaperEdit] = None
         self.timeline: Optional[EditTimeline] = None
         self.pacing_audit: Optional[PacingAuditReport] = None
+        self.director_review: Optional[DirectorReviewReport] = None
 
         # Open dictionary for pluggable future agents (e.g., vfx_manifest.json, color_lut.json)
         self.custom_artifacts: dict[str, Any] = {}

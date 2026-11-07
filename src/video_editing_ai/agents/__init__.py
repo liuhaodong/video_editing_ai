@@ -1,8 +1,9 @@
-"""Modular Multi-Agent Video Editing Architecture (Stage 0 -> Stage 50 + Pluggable Slots)."""
+"""Modular Multi-Agent Video Editing Architecture (Stage 0 -> Stage 60 + Pluggable Slots)."""
 
 from .audio_vibe_agent import AudioVibeAgent
 from .base import AgentRegistry, BaseEditingAgent, PipelineBlackboard, register_agent
 from .culler_agent import CullerAgent
+from .director_agent import ProductionDirectorAgent
 from .intake_agent import ClientIntakeAgent, generate_intake_questions
 from .orchestrator import MultiAgentOrchestrator, run_multi_agent_pipeline
 from .picture_editors import DialogueEditorAgent, MontageEditorAgent
@@ -20,6 +21,7 @@ __all__ = [
     "MontageEditorAgent",
     "MultiAgentOrchestrator",
     "PipelineBlackboard",
+    "ProductionDirectorAgent",
     "ShowrunnerAgent",
     "StoryProducerAgent",
     "VFXAgent",

@@ -18,6 +18,7 @@ Unscripted family travel videos and vlogs require solving a **massive signal-to-
 | **Stage 30** | `montage_editor` | `MontageEditorAgent` | `EditTimeline` (`V1`, `A3`) | Snaps B-roll and photo durations to the musical beat grid, sequences `Wide -> Medium -> Close-up` progression, applies Gallery Frame Ken Burns, and configures `-20 dB` Nat-Sound (`0.33s` crossfades) + `-14 dB` auto-ducking. |
 | **Stage 40** *(Plugin)* | `vfx_designer` | `VFXAgent` | `vfx_manifest.json`, `effects_track` | Optional `@register_agent` plugin demonstrating modular extensibility; attaches non-destructive `warm_glow`, `vignette_focus`, and `contrast_pop` effects to `timeline.effects_track`. |
 | **Stage 50** | `showrunner` | `ShowrunnerAgent` | `pacing_audit.json`, `timeline.yaml`, `storyboard.md` | Audits the assembled timeline against `creative_brief.json` (caps pure B-roll at `4.5s`, drops `>3` consecutive static stills, injects chapter lower-thirds & closing card, verifies must-haves, and triggers a revision loop if needed). |
+| **Stage 60 & Cross-Stage Supervisor** | `production_director` | `ProductionDirectorAgent` | `director_review.json`, `timeline.yaml`, `storyboard.md` | Experienced movie production director that reviews every sub-agent stage gate (`0` -> `50`), actively directs sub-agents to fix/improve B-roll cutaway coverage, Ken Burns motion variety, dialogue quote badges, and HDR VFX calibration mid-pipeline, and signs off on the final cut across a 6-dimension cinematic rubric. |
 
 ---
 
@@ -57,6 +58,7 @@ This workspace includes a native Antigravity Skill at `.agent/skills/ai-video-ed
 - `04_audio_vibe_agent.md`
 - `05_showrunner_agent.md`
 - `06_vfx_agent.md`
+- `07_production_director_agent.md`
 
 ---
 
