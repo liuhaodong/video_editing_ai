@@ -92,9 +92,12 @@ C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao
      ```powershell
      C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-bgm-plan --project-dir "<project_dir>" --tracks "parisian_accordion.mp3,valse_gymnopedie.mp3,evening_debussy_chamber.mp3,jazz_brunch_bistro.mp3" --target-lufs -14.0 --bgm-volume 0.90
      ```
-- **Documentary Reading-Paced Scene Durations & Unified Frosted-Glass Captions**:
+- **Documentary Reading-Paced Scene Durations, 10 Premium Photo Modes & Unified Frosted-Glass Captions**:
   - For annotated educational/travel scenes, give viewers comfortable reading time (`160–180 WPM` + visual appreciation): **`5.5s–6.8s`** per photo plate and **`6.5s–9.0s`** per video clip.
   - Attach `caption_title`, `caption_subtitle`, and `camera_badge` directly to `item.ken_burns` on both `photo` and `video` clips so the renderer composites a single unified **Apple TV+ / National Geographic Frosted-Glass Documentary Lower-Third Card** (avoiding redundant overlapping Track V3 subtitle boxes).
+  - Curate a diverse choreography of the **10 Premium Photo Presentation Modes (`mode`)** and **4 Composable Atmospheric Finishers (`overlay_fx`)** across chapters (preview all 10 modes side-by-side via `preview-photo-effects --project-dir "<project_dir>"`):
+    - **Modes (`mode`)**: `cinematic_depth_3d` (3-plane saliency depth + bokeh rack-focus), `triptych_cinematic` (3-panel staggered storyboard reveal), `polaroid_scrapbook` (tilted vintage instant-film print stack), `curator_loupe` (`1.65x` optical magnifying glass spotlight), `editorial_magazine` (asymmetric `62/38` luxury monograph spread), `cinema_anamorphic` (`2.39:1` widescreen + 35mm highlight halation), `parallax_gallery`, `diptych_frame`, `gallery_frame`, `full_bleed`.
+    - **Finishers (`overlay_fx`)**: `golden_light_leak`, `champagne_bokeh`, `museum_spotlight`, `nostalgic_film_grain`, `none`.
 
 ### Phase 4: Surgical Timeline Revisions (`edit-cut`) & Fast 2-Second Segment Previews (`render-segment`)
 When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *"drop clip_005"*, *"change the plaque on clip_003"*, *"lower BGM volume under speech"*), **never re-run the entire 11-agent pipeline**:

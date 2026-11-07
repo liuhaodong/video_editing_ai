@@ -12,6 +12,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ..analyzer.media_probe import _get_cjk_font
 from ..models.schema import (
+    VALID_PHOTO_MODES,
+    VALID_PHOTO_OVERLAY_FX,
     CulledSubClip,
     CuratedPhotoItem,
     EditTimeline,
@@ -555,9 +557,8 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     if len(chosen_ids) < target_select_count:
                         chosen_ids.add(pick.subclip_id)
 
-        # Step 4: Pair complementary vertical ('portrait') selects for Diptych Split-Screen presentation
-        # We select (target_select_count + 1) items if we form 1 diptych pair so that the secondary partner
-        # is absorbed into the diptych without reducing the number of timeline slides or duplicating a photo.
+        # Step 4: Pair complementary vertical ('portrait') selects for Diptych / Polaroid Split-Screen
+        # and assign diverse cinema-grade photo modes & atmospheric finishers across selected plates
         selected_items = [it for it in curated_items if it.subclip_id in chosen_ids]
         portrait_selects = [
             it
@@ -569,6 +570,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
         if len(portrait_selects) >= 2:
             p1, p2 = portrait_selects[0], portrait_selects[1]
             p1.recommended_photo_mode = "diptych_frame"
+            p1.overlay_fx = "golden_light_leak"
             p1.paired_with_subclip_id = p2.subclip_id
             t1_short = p1.annotation_title.split("—")[0].strip()
             t2_short = p2.annotation_title.split("—")[0].strip()
@@ -579,7 +581,25 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 p1.annotation_subtitle = f"{s1_short} · {s2_short} (双联画展陈)"
             absorbed_partner_ids.add(p2.subclip_id)
 
-        # Step 5: Sync curated selections, scores, and bilingual annotations back to media_index.subclips
+        # Assign curated premium photo modes & atmospheric finishers to remaining primary selects
+        active_selects = [it for it in selected_items if it.subclip_id not in absorbed_partner_ids]
+        premium_mode_cycle = [
+            ("cinematic_depth_3d", "golden_light_leak"),
+            ("parallax_gallery", "museum_spotlight"),
+            ("editorial_magazine", "none"),
+            ("curator_loupe", "museum_spotlight"),
+            ("polaroid_scrapbook", "nostalgic_film_grain"),
+            ("triptych_cinematic", "none"),
+            ("cinema_anamorphic", "champagne_bokeh"),
+        ]
+        for idx_sel, sel_it in enumerate(active_selects):
+            if sel_it.recommended_photo_mode == "diptych_frame":
+                continue
+            m_name, fx_name = premium_mode_cycle[idx_sel % len(premium_mode_cycle)]
+            sel_it.recommended_photo_mode = m_name  # type: ignore[assignment]
+            sel_it.overlay_fx = fx_name  # type: ignore[assignment]
+
+        # Step 5: Sync curated selections, scores, modes, and bilingual annotations back to media_index.subclips
         for item in curated_items:
             sc = subclip_by_id[item.subclip_id]
             sc.aesthetic_score = item.overall_taste_score
@@ -588,6 +608,8 @@ class PhotoCuratorAgent(BaseEditingAgent):
             sc.annotation_subtitle = item.annotation_subtitle
             sc.camera_badge = item.camera_badge
             sc.subject_category = item.subject_category
+            sc.recommended_photo_mode = item.recommended_photo_mode
+            sc.overlay_fx = item.overlay_fx
             sc.summary = f"{item.annotation_title} ({item.annotation_subtitle}) — {item.curation_rationale}"
 
             if item.subclip_id in chosen_ids and item.subclip_id not in absorbed_partner_ids:
@@ -598,6 +620,9 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 if item.paired_with_subclip_id and item.paired_with_subclip_id in subclip_by_id:
                     partner_sc = subclip_by_id[item.paired_with_subclip_id]
                     sc.secondary_source_path = partner_sc.source_path
+                if item.tertiary_subclip_id and item.tertiary_subclip_id in subclip_by_id:
+                    tert_sc = subclip_by_id[item.tertiary_subclip_id]
+                    sc.tertiary_source_path = tert_sc.source_path
             elif item.subclip_id in absorbed_partner_ids:
                 item.is_selected = True
                 item.rejection_reason = None
@@ -950,10 +975,16 @@ def apply_vision_curation_overrides(
             target_item.subject_category = str(ov["subject_category"])
         if ov.get("overall_taste_score") is not None:
             target_item.overall_taste_score = float(ov["overall_taste_score"])
-        if ov.get("recommended_photo_mode") in ("parallax_gallery", "diptych_frame", "gallery_frame", "full_bleed"):
-            target_item.recommended_photo_mode = ov["recommended_photo_mode"]
+        new_mode = ov.get("recommended_photo_mode") or ov.get("photo_mode") or ov.get("mode")
+        if new_mode in VALID_PHOTO_MODES:
+            target_item.recommended_photo_mode = new_mode
+        new_fx = ov.get("overlay_fx")
+        if new_fx in VALID_PHOTO_OVERLAY_FX:
+            target_item.overlay_fx = new_fx
         if "paired_with_subclip_id" in ov:
             target_item.paired_with_subclip_id = ov["paired_with_subclip_id"]
+        if "tertiary_subclip_id" in ov:
+            target_item.tertiary_subclip_id = ov["tertiary_subclip_id"]
         if ov.get("curation_rationale") or ov.get("vision_note") or ov.get("curatorial_note"):
             target_item.curation_rationale = str(
                 ov.get("curation_rationale") or ov.get("vision_note") or ov.get("curatorial_note")
@@ -976,11 +1007,12 @@ def apply_vision_curation_overrides(
     if mi_path.exists():
         mi = MediaIndex.from_json_file(mi_path)
         sc_by_id = {s.subclip_id: s for s in mi.subclips}
-        absorbed_partners = {
-            it.paired_with_subclip_id
-            for it in selected_items
-            if it.paired_with_subclip_id and it.recommended_photo_mode == "diptych_frame"
-        }
+        absorbed_partners: set[str] = set()
+        for it in selected_items:
+            if it.paired_with_subclip_id and it.recommended_photo_mode in ("diptych_frame", "polaroid_scrapbook", "triptych_cinematic"):
+                absorbed_partners.add(it.paired_with_subclip_id)
+            if it.tertiary_subclip_id and it.recommended_photo_mode == "triptych_cinematic":
+                absorbed_partners.add(it.tertiary_subclip_id)
         for it in report.items:
             sc = sc_by_id.get(it.subclip_id)
             if sc is None:
@@ -989,6 +1021,8 @@ def apply_vision_curation_overrides(
             sc.annotation_subtitle = it.annotation_subtitle
             sc.camera_badge = it.camera_badge
             sc.subject_category = it.subject_category
+            sc.recommended_photo_mode = it.recommended_photo_mode
+            sc.overlay_fx = it.overlay_fx
             sc.aesthetic_score = it.overall_taste_score
             sc.summary = f"{it.annotation_title} ({it.annotation_subtitle}) — {it.curation_rationale}"
             if it.is_selected and it.subclip_id not in absorbed_partners:
@@ -996,9 +1030,11 @@ def apply_vision_curation_overrides(
                 sc.discard_reason = None
                 if it.paired_with_subclip_id and it.paired_with_subclip_id in sc_by_id:
                     sc.secondary_source_path = sc_by_id[it.paired_with_subclip_id].source_path
+                if it.tertiary_subclip_id and it.tertiary_subclip_id in sc_by_id:
+                    sc.tertiary_source_path = sc_by_id[it.tertiary_subclip_id].source_path
             elif it.subclip_id in absorbed_partners:
                 sc.is_discarded = True
-                sc.discard_reason = "paired_as_secondary_panel_in_diptych_frame"
+                sc.discard_reason = "paired_as_secondary_or_tertiary_panel"
             else:
                 sc.is_discarded = True
                 sc.discard_reason = it.rejection_reason or "rejected_by_ai_vision_curator"
@@ -1006,7 +1042,7 @@ def apply_vision_curation_overrides(
         mi.discarded_count = sum(1 for s in mi.subclips if s.is_discarded)
         mi.to_json_file(mi_path)
 
-    # Sync updated plaques into timeline.yaml if already generated
+    # Sync updated plaques & photo effects into timeline.yaml if already generated
     updated_timeline_cuts = 0
     if tl_path.exists():
         tl = EditTimeline.from_yaml(tl_path)
@@ -1022,6 +1058,8 @@ def apply_vision_curation_overrides(
                         clip.ken_burns.caption_title = matched.annotation_title
                         clip.ken_burns.caption_subtitle = matched.annotation_subtitle
                         clip.ken_burns.camera_badge = matched.camera_badge
+                        clip.ken_burns.mode = matched.recommended_photo_mode
+                        clip.ken_burns.overlay_fx = matched.overlay_fx
                         clip.narrative_note = f"[STILL · {matched.annotation_title}] {matched.annotation_subtitle}"
                         updated_timeline_cuts += 1
         tl.to_yaml(tl_path)

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 import subprocess
 import textwrap
-from typing import Optional
+from typing import Any, Optional
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+import numpy as np
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 try:
     import pillow_heif
@@ -618,33 +620,487 @@ def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> li
     ]
 
 
-def render_photo_clip(
-    photo_path: str | Path,
-    output_mp4: str | Path,
-    duration: float = 5.5,
-    width: int = 3840,
-    height: int = 2160,
-    fps: int = 30,
-    hdr: bool = True,
-    ken_burns: Optional[KenBurnsConfig] = None,
-    transition_in: Optional[TransitionConfig] = None,
-    transition_out: Optional[TransitionConfig] = None,
-) -> Path:
-    """Render a photo into a 4K HDR MP4 video clip using 2.5D Parallax, Diptych Split-Screen, or Gallery Frame."""
-    kb = ken_burns or KenBurnsConfig()
-    out_path = Path(output_mp4)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+def _build_subject_depth_layers(
+    raw_img: Image.Image,
+    bg_w: int,
+    bg_h: int,
+    focal_point: tuple[float, float],
+    scale_factor: float,
+) -> tuple[Image.Image, Image.Image, Image.Image]:
+    """
+    Build 3 depth planes for 'cinematic_depth_3d':
+      1. bg_sharp: fitted full-canvas RGB plane
+      2. bg_bokeh: defocused creamy bokeh background plane
+      3. fg_subject_rgba: extracted foreground subject with soft saliency + radial alpha mask and micro-contrast pop
+    """
+    bg_sharp = ImageOps.fit(raw_img, (bg_w, bg_h), method=Image.Resampling.BILINEAR)
 
+    # Defocused creamy bokeh plane (computed fast at 1/4 scale)
+    small_w, small_h = max(32, bg_w // 4), max(32, bg_h // 4)
+    small_rgb = bg_sharp.resize((small_w, small_h), Image.Resampling.BILINEAR)
+    bokeh_small = small_rgb.filter(ImageFilter.GaussianBlur(radius=max(8, int(round(12 * scale_factor)))))
+    bg_bokeh = bokeh_small.resize((bg_w, bg_h), Image.Resampling.BILINEAR)
+    bg_bokeh = Image.blend(bg_bokeh, Image.new("RGB", (bg_w, bg_h), (8, 11, 20)), 0.28)
+
+    # Saliency + radial focal-point depth mask at 1/4 resolution
+    gray_small = small_rgb.convert("L")
+    edges = gray_small.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(radius=6))
+    edge_arr = np.asarray(edges, dtype=np.float32)
+    p95 = float(np.percentile(edge_arr, 95)) if edge_arr.size else 1.0
+    edge_norm = np.clip(edge_arr / max(12.0, p95), 0.0, 1.0)
+
+    yy, xx = np.mgrid[0:small_h, 0:small_w]
+    nx = xx / max(1.0, float(small_w - 1))
+    ny = fy = yy / max(1.0, float(small_h - 1))
+    fx_c = max(0.22, min(0.78, float(focal_point[0])))
+    fy_c = max(0.22, min(0.78, float(focal_point[1])))
+
+    dist_sq = ((nx - fx_c) ** 2) / 0.11 + ((ny - fy_c) ** 2) / 0.14
+    radial_core = np.exp(-0.5 * dist_sq)
+    radial_broad = np.exp(-0.22 * dist_sq)
+
+    combined = np.clip(0.58 * radial_core + 0.62 * edge_norm * radial_broad, 0.0, 1.0)
+    # Smooth S-curve mask so the foreground subject has a natural feathered boundary
+    mask_float = np.clip((combined - 0.22) / 0.52, 0.0, 1.0)
+    mask_float = mask_float * mask_float * (3.0 - 2.0 * mask_float)
+    mask_u8 = (mask_float * 255.0).astype(np.uint8)
+    mask_l = (
+        Image.fromarray(mask_u8, mode="L")
+        .filter(ImageFilter.GaussianBlur(radius=8))
+        .resize((bg_w, bg_h), Image.Resampling.BILINEAR)
+    )
+
+    fg_enhanced = ImageEnhance.Contrast(ImageEnhance.Sharpness(bg_sharp).enhance(1.18)).enhance(1.06)
+    fg_subject_rgba = fg_enhanced.copy().convert("RGBA")
+    fg_subject_rgba.putalpha(mask_l)
+    return bg_sharp, bg_bokeh, fg_subject_rgba
+
+
+def _build_polaroid_card(
+    img: Image.Image,
+    max_w: int,
+    max_h: int,
+    scale_factor: float,
+    angle_deg: float = -2.8,
+    stamp_text: str = "",
+) -> Image.Image:
+    """Render a tactile vintage instant-film Polaroid print with warm ivory paper borders, stamp text, and 3D shadow."""
+    side_pad = max(14, int(round(22 * scale_factor)))
+    top_pad = max(14, int(round(22 * scale_factor)))
+    bottom_chin = max(46, int(round(76 * scale_factor)))
+
+    inner_max_w = max(64, max_w - side_pad * 2)
+    inner_max_h = max(64, max_h - top_pad - bottom_chin)
+
+    fg = img.copy()
+    fg.thumbnail((inner_max_w, inner_max_h), Image.Resampling.LANCZOS)
+    # Subtle warm nostalgic film tone on the print
+    warm_tint = Image.new("RGB", fg.size, (252, 244, 228))
+    fg = Image.blend(fg, warm_tint, 0.06)
+
+    pw = fg.width + side_pad * 2
+    ph = fg.height + top_pad + bottom_chin
+
+    paper = Image.new("RGBA", (pw, ph), (249, 246, 238, 255))
+    p_draw = ImageDraw.Draw(paper)
+    # Outer subtle paper bevel & inner recessed photo well
+    p_draw.rectangle([0, 0, pw - 1, ph - 1], outline=(218, 212, 198, 255), width=max(1, int(round(1.5 * scale_factor))))
+    p_draw.rectangle(
+        [side_pad - 2, top_pad - 2, side_pad + fg.width + 1, top_pad + fg.height + 1],
+        outline=(195, 188, 174, 235),
+        width=max(1, int(round(1.5 * scale_factor))),
+    )
+    paper.paste(fg, (side_pad, top_pad))
+
+    # Editorial stamp in the Polaroid bottom chin
+    if stamp_text:
+        f_stamp = _load_editorial_font(int(round(17 * scale_factor)), bold=True, serif=True)
+        short_stamp = stamp_text.split("—")[0].split("·")[0].strip()[:42]
+        tw = p_draw.textbbox((0, 0), short_stamp, font=f_stamp)[2]
+        tx = (pw - tw) // 2
+        ty = top_pad + fg.height + (bottom_chin - int(round(22 * scale_factor))) // 2
+        p_draw.text((tx, ty), short_stamp, font=f_stamp, fill=(48, 44, 38, 230))
+
+    # Drop shadow behind the Polaroid before rotation
+    sh_margin = max(24, int(round(36 * scale_factor)))
+    sh_offset = max(6, int(round(10 * scale_factor)))
+    canvas = Image.new("RGBA", (pw + sh_margin * 2, ph + sh_margin * 2), (0, 0, 0, 0))
+    c_draw = ImageDraw.Draw(canvas)
+    c_draw.rectangle(
+        [sh_margin, sh_margin + sh_offset, sh_margin + pw, sh_margin + ph + sh_offset],
+        fill=(0, 0, 0, 175),
+    )
+    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=max(10, int(round(16 * scale_factor)))))
+    canvas.paste(paper, (sh_margin, sh_margin), paper)
+
+    if abs(angle_deg) > 0.05:
+        canvas = canvas.rotate(angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
+    return canvas
+
+
+def _build_triptych_panels(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    has_card: bool,
+    scale_factor: float,
+) -> list[Image.Image]:
+    """Build 3 coordinated vertical gallery panels for 'triptych_cinematic'."""
+    panel_w = int(width * 0.265)
+    panel_h = int(height * (0.70 if has_card else 0.78))
+    border_px = max(8, int(round(11 * scale_factor)))
+
+    sec_img: Optional[Image.Image] = None
+    tert_img: Optional[Image.Image] = None
+    if kb.secondary_source and Path(kb.secondary_source).exists():
+        sec_img = ImageOps.exif_transpose(Image.open(kb.secondary_source)).convert("RGB")
+    if kb.tertiary_source and Path(kb.tertiary_source).exists():
+        tert_img = ImageOps.exif_transpose(Image.open(kb.tertiary_source)).convert("RGB")
+
+    if sec_img is not None and tert_img is not None:
+        imgs = [
+            ImageOps.fit(raw_primary, (panel_w, panel_h), method=Image.Resampling.LANCZOS),
+            ImageOps.fit(sec_img, (panel_w, panel_h), method=Image.Resampling.LANCZOS),
+            ImageOps.fit(tert_img, (panel_w, panel_h), method=Image.Resampling.LANCZOS),
+        ]
+    elif sec_img is not None:
+        # 2 photos available: Left = Primary, Center = Secondary, Right = zoomed detail of Primary
+        detail_crop = ImageOps.fit(
+            raw_primary, (panel_w, panel_h), method=Image.Resampling.LANCZOS, centering=(0.62, 0.45)
+        )
+        imgs = [
+            ImageOps.fit(raw_primary, (panel_w, panel_h), method=Image.Resampling.LANCZOS, centering=(0.38, 0.50)),
+            ImageOps.fit(sec_img, (panel_w, panel_h), method=Image.Resampling.LANCZOS),
+            detail_crop,
+        ]
+    else:
+        # Single photo: slice a wide architectural triptych across the image
+        total_w = panel_w * 3 + int(round(36 * scale_factor))
+        pano = ImageOps.fit(raw_primary, (total_w, panel_h), method=Image.Resampling.LANCZOS)
+        step = (total_w - panel_w) // 2
+        imgs = [
+            pano.crop((0, 0, panel_w, panel_h)),
+            pano.crop((step, 0, step + panel_w, panel_h)),
+            pano.crop((total_w - panel_w, 0, total_w, panel_h)),
+        ]
+
+    return [
+        _build_double_matte_card(im, max_w=panel_w, max_h=panel_h, scale_factor=scale_factor, border_px=border_px)
+        for im in imgs
+    ]
+
+
+def _build_curator_loupe_assets(
+    raw_primary: Image.Image,
+    width: int,
+    height: int,
+    has_card: bool,
+    scale_factor: float,
+) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image, int]:
+    """
+    Pre-build assets for 'curator_loupe' (Art-Historian 1.65x Optical Magnifying Glass Spotlight):
+    Returns (dimmed_canvas_rgb, sharp_canvas_rgb, loupe_mask_l, loupe_bezel_rgba, radius_px).
+    """
+    # Fit or frame the full artwork on the 16:9 canvas
+    sharp_canvas = build_gallery_frame_image(raw_primary, width=width, height=height) if isinstance(raw_primary, (str, Path)) else None
+    if sharp_canvas is None:
+        # Build clean dimmed background + centered uncropped artwork
+        bg_small = ImageOps.fit(raw_primary, (width // 4, height // 4), method=Image.Resampling.BILINEAR)
+        bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(9 * scale_factor)))))
+        sharp_canvas = bg_small.resize((width, height), Image.Resampling.BILINEAR)
+        sharp_canvas = Image.blend(sharp_canvas, Image.new("RGB", (width, height), (8, 10, 18)), 0.35)
+
+        max_w = int(width * 0.84)
+        max_h = int(height * (0.76 if has_card else 0.84))
+        card = _build_double_matte_card(raw_primary, max_w=max_w, max_h=max_h, scale_factor=scale_factor)
+        cy = int(height * (0.43 if has_card else 0.48))
+        sharp_canvas.paste(card, ((width - card.width) // 2, max(10, cy - card.height // 2)), card)
+
+    dimmed_canvas = Image.blend(sharp_canvas, Image.new("RGB", (width, height), (6, 8, 14)), 0.36)
+
+    radius_px = int(round(min(width, height) * 0.21))
+    diam = radius_px * 2
+    loupe_mask_l = Image.new("L", (diam, diam), 0)
+    m_draw = ImageDraw.Draw(loupe_mask_l)
+    m_draw.ellipse([2, 2, diam - 3, diam - 3], fill=255)
+
+    # Brushed champagne-gold bezel + glass specular crescent + outer shadow
+    pad = max(18, int(round(26 * scale_factor)))
+    bz_size = diam + pad * 2
+    bezel = Image.new("RGBA", (bz_size, bz_size), (0, 0, 0, 0))
+    b_draw = ImageDraw.Draw(bezel)
+    # Soft outer shadow ring
+    b_draw.ellipse(
+        [pad - 4, pad + 4, pad + diam + 4, pad + diam + 12],
+        outline=(0, 0, 0, 165),
+        width=max(6, int(round(10 * scale_factor))),
+    )
+    bezel = bezel.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(9 * scale_factor)))))
+    b_draw = ImageDraw.Draw(bezel)
+    # Champagne-gold metallic rim
+    rim_w = max(3, int(round(5 * scale_factor)))
+    b_draw.ellipse(
+        [pad, pad, pad + diam - 1, pad + diam - 1],
+        outline=(234, 194, 96, 248),
+        width=rim_w,
+    )
+    # Inner pearl glass specular highlight arc
+    b_draw.arc(
+        [pad + rim_w + 3, pad + rim_w + 3, pad + diam - rim_w - 4, pad + diam - rim_w - 4],
+        start=200,
+        end=325,
+        fill=(255, 250, 235, 115),
+        width=max(2, int(round(2.5 * scale_factor))),
+    )
+    return dimmed_canvas, sharp_canvas, loupe_mask_l, bezel, radius_px
+
+
+def _build_editorial_magazine_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+) -> tuple[Image.Image, Image.Image, int]:
+    """
+    Build asymmetric 62% / 38% luxury Architectural Digest / Kinfolk editorial spread:
+    Returns (left_oversampled_rgb, right_column_rgb, left_w).
+    """
+    left_w = int(round(width * 0.62))
+    left_w = left_w - (left_w % 2)
+    right_w = width - left_w
+
+    oversample = 1.14
+    ow = int(round(left_w * oversample))
+    oh = int(round(height * oversample))
+    left_oversampled = ImageOps.fit(raw_primary, (ow, oh), method=Image.Resampling.LANCZOS)
+
+    # Right 38% luxury dark-velvet editorial monograph column
+    col = Image.new("RGB", (right_w, height), (12, 15, 23))
+    draw = ImageDraw.Draw(col)
+
+    # Subtle vertical champagne-gold divider rule on the left seam
+    seam_w = max(2, int(round(3 * scale_factor)))
+    draw.rectangle([0, 0, seam_w, height], fill=(214, 176, 84))
+    draw.rectangle([seam_w + int(round(8 * scale_factor)), int(height * 0.08), seam_w + int(round(9 * scale_factor)), int(height * 0.92)], fill=(52, 48, 42))
+
+    # Giant subtle background watermark
+    f_wm = _load_editorial_font(int(round(130 * scale_factor)), bold=True, serif=True)
+    draw.text((int(right_w * 0.08), int(height * 0.06)), "PARIS", font=f_wm, fill=(22, 27, 39))
+
+    pad_x = int(round(48 * scale_factor))
+    max_text_w = right_w - pad_x * 2
+    cur_y = int(height * 0.24)
+
+    # 1. Camera / Location Overline Badge
+    badge_str = (kb.camera_badge or "CURATED ARCHIVE · 4K HDR").upper().replace("📍", "").strip()
+    f_badge = _load_editorial_font(int(round(15 * scale_factor)), bold=True, serif=False)
+    draw.text((pad_x, cur_y), badge_str, font=f_badge, fill=(234, 194, 96))
+    cur_y += int(round(34 * scale_factor))
+
+    # Gold accent bar
+    draw.rectangle([pad_x, cur_y, pad_x + int(round(68 * scale_factor)), cur_y + max(2, int(round(3 * scale_factor)))], fill=(234, 194, 96))
+    cur_y += int(round(28 * scale_factor))
+
+    # 2. Multi-line Serif Monograph Title
+    title_str = (kb.caption_title or "Curated Masterpiece").strip()
+    f_title = _load_editorial_font(int(round(34 * scale_factor)), bold=True, serif=True)
+    for line in textwrap.wrap(title_str, width=22)[:4]:
+        draw.text((pad_x, cur_y), line, font=f_title, fill=(252, 250, 245))
+        cur_y += int(round(46 * scale_factor))
+
+    cur_y += int(round(18 * scale_factor))
+
+    # 3. Multi-line Curatorial Essay / Bilingual Subtitle
+    sub_str = (kb.caption_subtitle or "").strip()
+    if sub_str:
+        f_sub = _load_editorial_font(int(round(21 * scale_factor)), bold=False, serif=False)
+        for line in textwrap.wrap(sub_str, width=32)[:6]:
+            draw.text((pad_x, cur_y), line, font=f_sub, fill=(198, 208, 222))
+            cur_y += int(round(32 * scale_factor))
+
+    # Bottom monograph folio stamp
+    f_folio = _load_editorial_font(int(round(14 * scale_factor)), bold=False, serif=True)
+    draw.text(
+        (pad_x, int(height * 0.89)),
+        "EXHIBITION MONOGRAPH  ·  10-BIT HLG MASTER",
+        font=f_folio,
+        fill=(132, 140, 156),
+    )
+    return left_oversampled, col, left_w
+
+
+def _build_cinema_anamorphic_base(
+    raw_primary: Image.Image,
+    work_w: int,
+    work_h: int,
+    scale_factor: float,
+) -> Image.Image:
+    """Build an oversampled image with 35mm Anamorphic highlight halation (warm amber-red bloom on bright highlights)."""
+    base = ImageOps.fit(raw_primary, (work_w, work_h), method=Image.Resampling.LANCZOS)
+    small_w, small_h = max(32, work_w // 4), max(32, work_h // 4)
+    small = base.resize((small_w, small_h), Image.Resampling.BILINEAR)
+    arr = np.asarray(small, dtype=np.float32)
+    luma = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    hi_mask = np.clip((luma - 185.0) / 70.0, 0.0, 1.0)
+
+    hal_rgb = np.zeros_like(arr)
+    hal_rgb[:, :, 0] = hi_mask * 255.0
+    hal_rgb[:, :, 1] = hi_mask * 118.0
+    hal_rgb[:, :, 2] = hi_mask * 42.0
+    hal_img = (
+        Image.fromarray(hal_rgb.astype(np.uint8), mode="RGB")
+        .filter(ImageFilter.GaussianBlur(radius=max(6, int(round(10 * scale_factor)))))
+        .resize((work_w, work_h), Image.Resampling.BILINEAR)
+    )
+    # Soft additive screen-like blend of warm halation bloom
+    base_arr = np.asarray(base, dtype=np.uint16)
+    hal_full = np.asarray(hal_img, dtype=np.uint16)
+    out_arr = np.clip(base_arr + (hal_full * 28) // 100, 0, 255).astype(np.uint8)
+    return Image.fromarray(out_arr, mode="RGB")
+
+
+def _prepare_overlay_fx_assets(
+    overlay_fx: str,
+    width: int,
+    height: int,
+    focal_point: tuple[float, float],
+    scale_factor: float,
+) -> dict[str, Any]:
+    """Pre-compute reusable masks/textures for composable atmospheric photo finishers."""
+    if not overlay_fx or overlay_fx == "none":
+        return {"type": "none"}
+
+    small_w, small_h = max(64, width // 4), max(36, height // 4)
+    yy, xx = np.mgrid[0:small_h, 0:small_w]
+    nx = xx / max(1.0, float(small_w - 1))
+    ny = yy / max(1.0, float(small_h - 1))
+
+    if overlay_fx == "golden_light_leak":
+        # Warm amber sun-ray wash across top-left & right-bottom corners
+        g1 = np.exp(-((nx - 0.08) ** 2 / 0.18 + (ny - 0.12) ** 2 / 0.22))
+        g2 = np.exp(-((nx - 0.92) ** 2 / 0.25 + (ny - 0.25) ** 2 / 0.28)) * 0.65
+        leak = np.clip(g1 + g2, 0.0, 1.0)
+        rgb = np.zeros((small_h, small_w, 3), dtype=np.uint8)
+        rgb[:, :, 0] = (leak * 255).astype(np.uint8)
+        rgb[:, :, 1] = (leak * 168).astype(np.uint8)
+        rgb[:, :, 2] = (leak * 52).astype(np.uint8)
+        leak_img = (
+            Image.fromarray(rgb, mode="RGB")
+            .filter(ImageFilter.GaussianBlur(radius=8))
+            .resize((width, height), Image.Resampling.BILINEAR)
+        )
+        return {"type": "golden_light_leak", "leak_img": leak_img}
+
+    if overlay_fx == "museum_spotlight":
+        fx_c = max(0.2, min(0.8, float(focal_point[0])))
+        fy_c = max(0.2, min(0.8, float(focal_point[1])))
+        dist_sq = ((nx - fx_c) ** 2) / 0.22 + ((ny - fy_c) ** 2) / 0.24
+        spot = np.exp(-0.65 * dist_sq)
+        dark_alpha = ((1.0 - spot) * 95.0).clip(0, 255).astype(np.uint8)
+        mask_l = (
+            Image.fromarray(dark_alpha, mode="L")
+            .filter(ImageFilter.GaussianBlur(radius=6))
+            .resize((width, height), Image.Resampling.BILINEAR)
+        )
+        dark_rgb = Image.new("RGB", (width, height), (5, 7, 12))
+        return {"type": "museum_spotlight", "mask_l": mask_l, "dark_rgb": dark_rgb}
+
+    if overlay_fx == "champagne_bokeh":
+        # Deterministic set of 14 multi-scale golden bokeh orbs
+        rng = np.random.default_rng(seed=42)
+        orbs = []
+        for _ in range(14):
+            orbs.append(
+                (
+                    float(rng.uniform(0.08, 0.92)),
+                    float(rng.uniform(0.12, 0.88)),
+                    int(round(rng.uniform(22, 68) * scale_factor)),
+                    int(rng.integers(38, 88)),
+                    float(rng.uniform(0.0, math.pi * 2.0)),
+                )
+            )
+        return {"type": "champagne_bokeh", "orbs": orbs}
+
+    if overlay_fx == "nostalgic_film_grain":
+        rng = np.random.default_rng(seed=1972)
+        grain_frames: list[Image.Image] = []
+        for _ in range(3):
+            noise = rng.normal(loc=128.0, scale=28.0, size=(small_h * 2, small_w * 2)).clip(0, 255).astype(np.uint8)
+            g_rgb = np.stack([noise, (noise * 0.96).astype(np.uint8), (noise * 0.88).astype(np.uint8)], axis=-1)
+            grain_frames.append(
+                Image.fromarray(g_rgb, mode="RGB").resize((width, height), Image.Resampling.BILINEAR)
+            )
+        return {"type": "nostalgic_film_grain", "grain_frames": grain_frames}
+
+    return {"type": "none"}
+
+
+def _apply_overlay_fx(
+    frame_rgb: Image.Image,
+    fx_assets: dict[str, Any],
+    t_norm: float,
+    f_idx: int,
+    scale_factor: float,
+) -> Image.Image:
+    """Apply composable atmospheric finisher to frame_rgb."""
+    fx_type = fx_assets.get("type", "none")
+    if fx_type == "none":
+        return frame_rgb
+
+    if fx_type == "golden_light_leak":
+        weight = 0.12 + 0.10 * math.sin(math.pi * t_norm)
+        return Image.blend(frame_rgb, fx_assets["leak_img"], weight)
+
+    if fx_type == "museum_spotlight":
+        frame_rgb.paste(fx_assets["dark_rgb"], (0, 0), fx_assets["mask_l"])
+        return frame_rgb
+
+    if fx_type == "champagne_bokeh":
+        w, h = frame_rgb.size
+        sw, sh = max(64, w // 4), max(36, h // 4)
+        overlay = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        for ox, oy, rad, alpha, phase in fx_assets["orbs"]:
+            cx = int(((ox + 0.03 * math.sin(phase + t_norm * 4.0)) % 1.0) * sw)
+            cy = int(((oy - 0.10 * t_norm) % 1.0) * sh)
+            r_small = max(3, rad // 4)
+            pulse = int(alpha * (0.75 + 0.25 * math.sin(phase + t_norm * 6.0)))
+            d.ellipse(
+                [cx - r_small, cy - r_small, cx + r_small, cy + r_small],
+                fill=(255, 222, 138, pulse),
+                outline=(255, 240, 190, min(255, pulse + 25)),
+            )
+        overlay = overlay.filter(ImageFilter.GaussianBlur(radius=3)).resize((w, h), Image.Resampling.BILINEAR)
+        frame_rgb.paste(overlay.convert("RGB"), (0, 0), overlay.split()[3])
+        return frame_rgb
+
+    if fx_type == "nostalgic_film_grain":
+        grains = fx_assets["grain_frames"]
+        g_img = grains[f_idx % len(grains)]
+        return Image.blend(frame_rgb, g_img, 0.065)
+
+    return frame_rgb
+
+
+
+def _prepare_photo_scene_context(
+    photo_path: str | Path,
+    width: int,
+    height: int,
+    kb: KenBurnsConfig,
+) -> dict[str, Any]:
+    """Pre-build all multi-plane assets for any of the 10 photo presentation modes + 4 atmospheric finishers."""
     raw_primary = Image.open(photo_path)
     raw_primary = ImageOps.exif_transpose(raw_primary).convert("RGB")
     scale_factor = width / 1920.0
-
     s_zoom, e_zoom, (sx, sy), (ex, ey) = _resolve_kb_endpoints(kb)
-    total_frames = max(1, int(round(duration * fps)))
     resample_mode = Image.Resampling.BILINEAR if width >= 3840 else Image.Resampling.BICUBIC
 
-    # Prepare Frosted-Glass Documentary Lower-Third Card assets once outside the frame loop
-    has_card = bool(kb.caption_title and kb.caption_title.strip())
+    mode = kb.mode
+    # editorial_magazine renders its own right-hand monograph column so suppress the bottom lower-third card
+    has_card = bool(kb.caption_title and kb.caption_title.strip()) and (mode != "editorial_magazine")
     card_fg: Optional[Image.Image] = None
     card_mask: Optional[Image.Image] = None
     card_tint: Optional[Image.Image] = None
@@ -657,6 +1113,490 @@ def render_photo_clip(
             caption_subtitle=kb.caption_subtitle or "",
             camera_badge=kb.camera_badge or "",
         )
+        if mode == "cinema_anamorphic":
+            bar_h = max(0, int(round((height - width / 2.39) * 0.5)))
+            card_y = min(card_y, height - bar_h - card_fg.height - int(round(18 * scale_factor)))
+
+    bg_oversample = 1.12
+    bg_w = int(round(width * bg_oversample))
+    bg_h = int(round(height * bg_oversample))
+    bg_small = ImageOps.fit(raw_primary, (bg_w // 4, bg_h // 4), method=Image.Resampling.BILINEAR)
+    bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(8 * scale_factor)))))
+    bg_plane = bg_small.resize((bg_w, bg_h), Image.Resampling.BILINEAR)
+    bg_plane = Image.blend(bg_plane, Image.new("RGB", (bg_w, bg_h), (8, 10, 18)), 0.34)
+
+    card_max_h_ratio = 0.74 if has_card else 0.80
+    card_cy_ratio = 0.435 if has_card else 0.48
+
+    ctx: dict[str, Any] = {
+        "mode": mode,
+        "kb": kb,
+        "width": width,
+        "height": height,
+        "scale_factor": scale_factor,
+        "s_zoom": s_zoom,
+        "e_zoom": e_zoom,
+        "sx": sx,
+        "sy": sy,
+        "ex": ex,
+        "ey": ey,
+        "resample_mode": resample_mode,
+        "bg_plane": bg_plane,
+        "bg_w": bg_w,
+        "bg_h": bg_h,
+        "card_cy_ratio": card_cy_ratio,
+        "has_card": has_card,
+        "card_fg": card_fg,
+        "card_mask": card_mask,
+        "card_tint": card_tint,
+        "card_x": card_x,
+        "card_y": card_y,
+        "fx_assets": _prepare_overlay_fx_assets(
+            kb.overlay_fx, width, height, kb.start_center, scale_factor
+        ),
+    }
+
+    if mode == "diptych_frame":
+        sec_path = kb.secondary_source
+        if sec_path and Path(sec_path).exists():
+            raw_sec = ImageOps.exif_transpose(Image.open(sec_path)).convert("RGB")
+        else:
+            raw_sec = ImageOps.fit(
+                raw_primary,
+                (raw_primary.width, raw_primary.height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.68, 0.45),
+            )
+        card_max_w = int(width * 0.41)
+        card_max_h = int(height * card_max_h_ratio)
+        ctx["fg_card_1"] = _build_double_matte_card(raw_primary, card_max_w, card_max_h, scale_factor, kb.border_px)
+        ctx["fg_card_2"] = _build_double_matte_card(raw_sec, card_max_w, card_max_h, scale_factor, kb.border_px)
+
+    elif mode == "triptych_cinematic":
+        ctx["triptych_panels"] = _build_triptych_panels(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            has_card=has_card,
+            scale_factor=scale_factor,
+        )
+
+    elif mode == "polaroid_scrapbook":
+        stamp_1 = kb.caption_title or kb.camera_badge or "PARIS ARCHIVE"
+        max_w = int(width * (0.42 if kb.secondary_source else 0.56))
+        max_h = int(height * card_max_h_ratio)
+        ctx["polaroid_1"] = _build_polaroid_card(
+            raw_primary, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=-3.2, stamp_text=stamp_1
+        )
+        if kb.secondary_source and Path(kb.secondary_source).exists():
+            raw_sec = ImageOps.exif_transpose(Image.open(kb.secondary_source)).convert("RGB")
+            stamp_2 = (kb.camera_badge or "KEEPSAKE PRINT").replace("📍", "").strip()
+            ctx["polaroid_2"] = _build_polaroid_card(
+                raw_sec, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=3.6, stamp_text=stamp_2
+            )
+        else:
+            ctx["polaroid_2"] = None
+
+    elif mode == "cinematic_depth_3d":
+        bg_sharp, bg_bokeh, fg_subject_rgba = _build_subject_depth_layers(
+            raw_img=raw_primary,
+            bg_w=bg_w,
+            bg_h=bg_h,
+            focal_point=kb.start_center,
+            scale_factor=scale_factor,
+        )
+        ctx["depth_bg_sharp"] = bg_sharp
+        ctx["depth_bg_bokeh"] = bg_bokeh
+        ctx["depth_fg_rgba"] = fg_subject_rgba
+
+    elif mode == "curator_loupe":
+        dimmed_c, sharp_c, loupe_mask, loupe_bezel, rad_px = _build_curator_loupe_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+            has_card=has_card,
+            scale_factor=scale_factor,
+        )
+        ctx["loupe_dimmed"] = dimmed_c
+        ctx["loupe_sharp"] = sharp_c
+        ctx["loupe_mask"] = loupe_mask
+        ctx["loupe_bezel"] = loupe_bezel
+        ctx["loupe_radius"] = rad_px
+
+    elif mode == "editorial_magazine":
+        left_over, right_col, left_w = _build_editorial_magazine_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+        )
+        ctx["mag_left_over"] = left_over
+        ctx["mag_right_col"] = right_col
+        ctx["mag_left_w"] = left_w
+
+    elif mode == "cinema_anamorphic":
+        oversample = 1.12 if width >= 3840 else 1.20
+        work_w = int(round(width * oversample))
+        work_h = int(round(height * oversample))
+        ctx["anamorphic_base"] = _build_cinema_anamorphic_base(
+            raw_primary=raw_primary, work_w=work_w, work_h=work_h, scale_factor=scale_factor
+        )
+        ctx["anamorphic_bar_h"] = max(24, int(round((height - width / 2.39) * 0.5)))
+
+    elif mode == "parallax_gallery":
+        aspect = raw_primary.width / max(1, raw_primary.height)
+        if aspect < 1.0:
+            max_w, max_h = int(width * 0.66), int(height * card_max_h_ratio)
+        else:
+            max_w, max_h = int(width * 0.80), int(height * card_max_h_ratio)
+        ctx["fg_card_1"] = _build_double_matte_card(raw_primary, max_w, max_h, scale_factor, kb.border_px)
+
+    else:
+        oversample = 1.10 if width >= 3840 else 1.20
+        work_w = int(round(width * oversample))
+        work_h = int(round(height * oversample))
+        if mode == "gallery_frame":
+            ctx["base_static_img"] = build_gallery_frame_image(
+                photo_path, width=work_w, height=work_h, border_px=kb.border_px
+            )
+        else:
+            ctx["base_static_img"] = ImageOps.fit(raw_primary, (work_w, work_h), method=Image.Resampling.LANCZOS)
+
+    return ctx
+
+
+def _render_photo_frame_from_context(
+    ctx: dict[str, Any],
+    t_norm: float,
+    f_idx: int,
+    duration: float,
+    fps: int,
+) -> Image.Image:
+    """Synthesize a single RGB frame at normalized time t_norm in [0.0, 1.0] from pre-built scene context."""
+    mode = ctx["mode"]
+    width = ctx["width"]
+    height = ctx["height"]
+    scale_factor = ctx["scale_factor"]
+    s_zoom, e_zoom = ctx["s_zoom"], ctx["e_zoom"]
+    sx, sy, ex, ey = ctx["sx"], ctx["sy"], ctx["ex"], ctx["ey"]
+    resample_mode = ctx["resample_mode"]
+    bg_plane = ctx["bg_plane"]
+    bg_w, bg_h = ctx["bg_w"], ctx["bg_h"]
+    card_cy_ratio = ctx["card_cy_ratio"]
+    eased = _ease_in_out_cubic(t_norm)
+
+    if mode == "diptych_frame":
+        fg_card_1 = ctx["fg_card_1"]
+        fg_card_2 = ctx["fg_card_2"]
+        bg_zoom = 1.05 - 0.04 * eased
+        bg_cx = 0.52 - 0.04 * eased
+        bg_cy = 0.50
+        bw_crop = bg_w / bg_zoom
+        bh_crop = bg_h / bg_zoom
+        bx0 = bg_cx * bg_w - bw_crop * 0.5
+        by0 = bg_cy * bg_h - bh_crop * 0.5
+        frame = bg_plane.transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
+            resample=resample_mode,
+        )
+        drift_px = int(round((eased - 0.5) * 24.0 * scale_factor))
+        left_cx = int(width * 0.28)
+        right_cx = int(width * 0.72)
+        mid_cy = int(height * card_cy_ratio)
+        lx = left_cx - fg_card_1.width // 2
+        ly = mid_cy - fg_card_1.height // 2 - drift_px
+        rx = right_cx - fg_card_2.width // 2
+        ry = mid_cy - fg_card_2.height // 2 + drift_px
+        frame.paste(fg_card_1, (lx, ly), fg_card_1)
+        frame.paste(fg_card_2, (rx, ry), fg_card_2)
+
+    elif mode == "triptych_cinematic":
+        panels: list[Image.Image] = ctx["triptych_panels"]
+        bg_zoom = 1.05 - 0.04 * eased
+        bw_crop = bg_w / bg_zoom
+        bh_crop = bg_h / bg_zoom
+        bx0 = (0.50 - 0.03 * (eased - 0.5)) * bg_w - bw_crop * 0.5
+        by0 = 0.50 * bg_h - bh_crop * 0.5
+        frame = bg_plane.transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
+            resample=resample_mode,
+        )
+        centers_x = [int(width * 0.20), int(width * 0.50), int(width * 0.80)]
+        mid_cy = int(height * card_cy_ratio)
+        drift_dirs = [-1.0, 0.85, -1.0]
+        for p_i, p_card in enumerate(panels):
+            # Staggered entrance cascade over the first 25% of the clip
+            stagger_start = p_i * 0.06
+            enter_p = _ease_out_cubic((t_norm - stagger_start) / 0.18) if t_norm > stagger_start else 0.0
+            if enter_p <= 0.02:
+                continue
+            slide_in_y = int(round((1.0 - enter_p) * 38.0 * scale_factor))
+            drift_y = int(round((eased - 0.5) * 20.0 * scale_factor * drift_dirs[p_i]))
+            px = centers_x[p_i] - p_card.width // 2
+            py = mid_cy - p_card.height // 2 + drift_y + slide_in_y
+            frame.paste(p_card, (px, max(8, py)), p_card)
+
+    elif mode == "polaroid_scrapbook":
+        p1: Image.Image = ctx["polaroid_1"]
+        p2: Optional[Image.Image] = ctx["polaroid_2"]
+        bg_zoom = 1.06 - 0.04 * eased
+        bw_crop = bg_w / bg_zoom
+        bh_crop = bg_h / bg_zoom
+        bx0 = (0.50 + 0.03 * (eased - 0.5)) * bg_w - bw_crop * 0.5
+        by0 = 0.50 * bg_h - bh_crop * 0.5
+        frame = bg_plane.transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
+            resample=resample_mode,
+        )
+        mid_cy = int(height * card_cy_ratio)
+        if p2 is not None:
+            # Dual Polaroid Scrapbook Stack
+            drift = int(round((eased - 0.5) * 18.0 * scale_factor))
+            x1 = int(width * 0.33) - p1.width // 2
+            y1 = mid_cy - p1.height // 2 - drift
+            frame.paste(p1, (x1, max(8, y1)), p1)
+
+            enter_2 = _ease_out_cubic((t_norm - 0.08) / 0.24) if t_norm > 0.08 else 0.0
+            if enter_2 > 0.02:
+                slide_x = int(round((1.0 - enter_2) * 52.0 * scale_factor))
+                x2 = int(width * 0.67) - p2.width // 2 + slide_x
+                y2 = mid_cy - p2.height // 2 + drift
+                frame.paste(p2, (x2, max(8, y2)), p2)
+        else:
+            scale_p = 0.96 + 0.05 * eased
+            cw = max(1, int(round(p1.width * scale_p)))
+            ch = max(1, int(round(p1.height * scale_p)))
+            scaled_p1 = p1.resize((cw, ch), resample=resample_mode)
+            px = (width - cw) // 2 + int(round((eased - 0.5) * 22.0 * scale_factor))
+            py = mid_cy - ch // 2
+            frame.paste(scaled_p1, (px, max(8, py)), scaled_p1)
+
+    elif mode == "cinematic_depth_3d":
+        bg_sharp: Image.Image = ctx["depth_bg_sharp"]
+        bg_bokeh: Image.Image = ctx["depth_bg_bokeh"]
+        fg_rgba: Image.Image = ctx["depth_fg_rgba"]
+
+        # Plane 1: Background counter-zooms (1.06 -> 1.00) and racks focus into creamy bokeh
+        bg_zoom = 1.06 - 0.05 * eased
+        fg_dx = (ex - sx) * eased
+        fg_dy = (ey - sy) * eased
+        bg_cx = 0.5 - fg_dx * 0.45
+        bg_cy = 0.5 - fg_dy * 0.45
+        bw_crop = bg_w / bg_zoom
+        bh_crop = bg_h / bg_zoom
+        bx0 = min(max(0.0, bg_cx * bg_w - bw_crop * 0.5), bg_w - bw_crop)
+        by0 = min(max(0.0, bg_cy * bg_h - bh_crop * 0.5), bg_h - bh_crop)
+
+        sharp_crop = bg_sharp.transform(
+            (width, height), Image.Transform.EXTENT, (bx0, by0, bx0 + bw_crop, by0 + bh_crop), resample=resample_mode
+        )
+        bokeh_crop = bg_bokeh.transform(
+            (width, height), Image.Transform.EXTENT, (bx0, by0, bx0 + bw_crop, by0 + bh_crop), resample=resample_mode
+        )
+        bokeh_mix = min(0.88, 0.30 + 0.58 * eased)
+        frame = Image.blend(sharp_crop, bokeh_crop, bokeh_mix)
+
+        # Plane 2: Foreground subject expands forward (1.00 -> 1.085) with true differential parallax
+        fg_zoom = 1.00 + 0.085 * eased
+        fg_cx = 0.5 + fg_dx * 0.35
+        fg_cy = 0.5 + fg_dy * 0.35
+        fw_crop = bg_w / fg_zoom
+        fh_crop = bg_h / fg_zoom
+        fx0 = min(max(0.0, fg_cx * bg_w - fw_crop * 0.5), bg_w - fw_crop)
+        fy0 = min(max(0.0, fg_cy * bg_h - fh_crop * 0.5), bg_h - fh_crop)
+
+        fg_warped = fg_rgba.transform(
+            (width, height), Image.Transform.EXTENT, (fx0, fy0, fx0 + fw_crop, fy0 + fh_crop), resample=resample_mode
+        )
+        frame.paste(fg_warped.convert("RGB"), (0, 0), fg_warped.split()[3])
+
+    elif mode == "curator_loupe":
+        dimmed_c: Image.Image = ctx["loupe_dimmed"]
+        sharp_c: Image.Image = ctx["loupe_sharp"]
+        loupe_mask: Image.Image = ctx["loupe_mask"]
+        loupe_bezel: Image.Image = ctx["loupe_bezel"]
+        rad: int = ctx["loupe_radius"]
+        diam = rad * 2
+
+        frame = dimmed_c.copy()
+        # Smoothly glide the optical loupe across the focal path
+        lx_norm = (sx - 0.08) + ((ex + 0.08) - (sx - 0.08)) * eased
+        ly_norm = (sy + 0.03 * math.sin(math.pi * eased)) * 0.88
+        lcx = int(round(max(0.24, min(0.76, lx_norm)) * width))
+        lcy = int(round(max(0.24, min(0.68, ly_norm)) * height))
+
+        # Extract 1.65x magnified patch from sharp_c around (lcx, lcy)
+        mag = 1.65
+        src_half = rad / mag
+        sx0 = max(0.0, min(float(width) - 2 * src_half, lcx - src_half))
+        sy0 = max(0.0, min(float(height) - 2 * src_half, lcy - src_half))
+        magnified_patch = sharp_c.transform(
+            (diam, diam),
+            Image.Transform.EXTENT,
+            (sx0, sy0, sx0 + 2 * src_half, sy0 + 2 * src_half),
+            resample=Image.Resampling.BICUBIC,
+        )
+        dst_x = lcx - rad
+        dst_y = lcy - rad
+        frame.paste(magnified_patch, (dst_x, dst_y), loupe_mask)
+        bz_pad = (loupe_bezel.width - diam) // 2
+        frame.paste(loupe_bezel, (dst_x - bz_pad, dst_y - bz_pad), loupe_bezel)
+
+    elif mode == "editorial_magazine":
+        left_over: Image.Image = ctx["mag_left_over"]
+        right_col: Image.Image = ctx["mag_right_col"]
+        left_w: int = ctx["mag_left_w"]
+        ow, oh = left_over.size
+
+        cur_zoom = 1.0 + 0.08 * eased
+        cx = sx + (ex - sx) * eased
+        cy = sy + (ey - sy) * eased
+        cw = ow / cur_zoom
+        ch = oh / cur_zoom
+        x0 = min(max(0.0, cx * ow - cw * 0.5), ow - cw)
+        y0 = min(max(0.0, cy * oh - ch * 0.5), oh - ch)
+
+        left_crop = left_over.transform(
+            (left_w, height),
+            Image.Transform.EXTENT,
+            (x0, y0, x0 + cw, y0 + ch),
+            resample=resample_mode,
+        )
+        frame = Image.new("RGB", (width, height))
+        frame.paste(left_crop, (0, 0))
+        frame.paste(right_col, (left_w, 0))
+
+    elif mode == "cinema_anamorphic":
+        ana_base: Image.Image = ctx["anamorphic_base"]
+        work_w, work_h = ana_base.size
+        cur_zoom = s_zoom + (e_zoom - s_zoom) * eased
+        cx = sx + (ex - sx) * eased
+        cy = sy + (ey - sy) * eased
+        crop_w = work_w / cur_zoom
+        crop_h = work_h / cur_zoom
+        x0 = min(max(0.0, cx * work_w - crop_w * 0.5), work_w - crop_w)
+        y0 = min(max(0.0, cy * work_h - crop_h * 0.5), work_h - crop_h)
+
+        frame = ana_base.transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (x0, y0, x0 + crop_w, y0 + crop_h),
+            resample=resample_mode,
+        )
+
+    elif mode == "parallax_gallery":
+        fg_card_1 = ctx["fg_card_1"]
+        bg_zoom = 1.06 - 0.05 * eased
+        fg_dx = (ex - sx) * eased
+        fg_dy = (ey - sy) * eased
+        bg_cx = 0.5 - fg_dx * 0.55
+        bg_cy = 0.5 - fg_dy * 0.55
+        bw_crop = bg_w / bg_zoom
+        bh_crop = bg_h / bg_zoom
+        bx0 = min(max(0.0, bg_cx * bg_w - bw_crop * 0.5), bg_w - bw_crop)
+        by0 = min(max(0.0, bg_cy * bg_h - bh_crop * 0.5), bg_h - bh_crop)
+        frame = bg_plane.transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
+            resample=resample_mode,
+        )
+        fg_scale = 0.96 + 0.05 * eased
+        cw = max(1, int(round(fg_card_1.width * fg_scale)))
+        ch = max(1, int(round(fg_card_1.height * fg_scale)))
+        scaled_card = fg_card_1.resize((cw, ch), resample=resample_mode)
+        pan_px_x = int(round(fg_dx * width * 0.28))
+        pan_px_y = int(round(fg_dy * height * 0.24))
+        px = (width - cw) // 2 + pan_px_x
+        py = int(height * card_cy_ratio) - ch // 2 + pan_px_y
+        frame.paste(scaled_card, (px, max(10, py)), scaled_card)
+
+    else:
+        base_static_img: Image.Image = ctx["base_static_img"]
+        work_w, work_h = base_static_img.size
+        cur_zoom = s_zoom + (e_zoom - s_zoom) * eased
+        cx = sx + (ex - sx) * eased
+        cy = sy + (ey - sy) * eased
+        crop_w = work_w / cur_zoom
+        crop_h = work_h / cur_zoom
+        half_w = crop_w / 2.0
+        half_h = crop_h / 2.0
+        center_px = min(max(cx * work_w, half_w), work_w - half_w)
+        center_py = min(max(cy * work_h, half_h), work_h - half_h)
+        x0 = center_px - half_w
+        y0 = center_py - half_h
+        x1 = center_px + half_w
+        y1 = center_py + half_h
+        frame = base_static_img.transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (x0, y0, x1, y1),
+            resample=resample_mode,
+        )
+
+    # Apply composable atmospheric finisher (golden_light_leak, champagne_bokeh, museum_spotlight, nostalgic_film_grain)
+    frame = _apply_overlay_fx(frame, ctx["fx_assets"], t_norm=t_norm, f_idx=f_idx, scale_factor=scale_factor)
+
+    # If 2.39:1 cinema_anamorphic, mask top & bottom CinemaScope letterbox bars after atmospheric finishers so bars remain pure black
+    if mode == "cinema_anamorphic":
+        bar_h: int = ctx["anamorphic_bar_h"]
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle([0, 0, width, bar_h], fill=(4, 5, 8))
+        draw.rectangle([0, height - bar_h, width, height], fill=(4, 5, 8))
+        line_w = max(1, int(round(1.5 * scale_factor)))
+        draw.line([(0, bar_h), (width, bar_h)], fill=(208, 174, 78), width=line_w)
+        draw.line([(0, height - bar_h), (width, height - bar_h)], fill=(208, 174, 78), width=line_w)
+
+    # Plane 3: Frosted-Glass Documentary Lower-Third Card (with smooth upward glide + fade)
+    if ctx["has_card"] and ctx["card_fg"] is not None and ctx["card_mask"] is not None and ctx["card_tint"] is not None:
+        t_sec = f_idx / max(1.0, float(fps))
+        rem_sec = max(0.0, duration - t_sec)
+        entry_prog = _ease_out_cubic((t_sec - 0.15) / 0.50) if t_sec > 0.15 else 0.0
+        exit_prog = min(1.0, rem_sec / 0.40)
+        alpha_mult = min(entry_prog, exit_prog)
+        if alpha_mult > 0.04:
+            slide_y = int(round((1.0 - entry_prog) * 16.0 * scale_factor))
+            _composite_frosted_card_on_rgb(
+                frame_rgb=frame,
+                text_fg_rgba=ctx["card_fg"],
+                card_mask_l=ctx["card_mask"],
+                dark_tint_rgb=ctx["card_tint"],
+                px=ctx["card_x"],
+                py=ctx["card_y"],
+                alpha_mult=alpha_mult,
+                slide_y=slide_y,
+            )
+
+    return frame
+
+
+def render_photo_clip(
+    photo_path: str | Path,
+    output_mp4: str | Path,
+    duration: float = 5.5,
+    width: int = 3840,
+    height: int = 2160,
+    fps: int = 30,
+    hdr: bool = True,
+    ken_burns: Optional[KenBurnsConfig] = None,
+    transition_in: Optional[TransitionConfig] = None,
+    transition_out: Optional[TransitionConfig] = None,
+) -> Path:
+    """Render a photo into a 4K HDR MP4 video clip using any of the 10 Premium Photo Modes + 4 Atmospheric Finishers."""
+    kb = ken_burns or KenBurnsConfig()
+    out_path = Path(output_mp4)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_frames = max(1, int(round(duration * fps)))
+    ctx = _prepare_photo_scene_context(photo_path=photo_path, width=width, height=height, kb=kb)
 
     # Prepare FFmpeg encoder & HDR color space pipeline
     vf_filters: list[str] = ["setsar=1:1"]
@@ -708,169 +1648,19 @@ def render_photo_clip(
         str(out_path),
     ]
 
-    # Pre-build multi-plane assets depending on kb.mode
-    is_diptych = (
-        kb.mode == "diptych_frame"
-        and kb.secondary_source is not None
-        and Path(kb.secondary_source).exists()
-    )
-    is_parallax = kb.mode == "parallax_gallery"
-
-    bg_oversample = 1.12
-    bg_w = int(round(width * bg_oversample))
-    bg_h = int(round(height * bg_oversample))
-    # Fast background blur by blurring at 1/4 resolution then upsampling
-    bg_small = ImageOps.fit(raw_primary, (bg_w // 4, bg_h // 4), method=Image.Resampling.BILINEAR)
-    bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(8 * scale_factor)))))
-    bg_plane = bg_small.resize((bg_w, bg_h), Image.Resampling.BILINEAR)
-    bg_plane = Image.blend(bg_plane, Image.new("RGB", (bg_w, bg_h), (8, 10, 18)), 0.32)
-
-    fg_card_1: Optional[Image.Image] = None
-    fg_card_2: Optional[Image.Image] = None
-    base_static_img: Optional[Image.Image] = None
-
-    # Reserve vertical space at the bottom if a lower-third documentary card is present
-    card_max_h_ratio = 0.74 if has_card else 0.80
-    card_cy_ratio = 0.435 if has_card else 0.48
-
-    if is_diptych and kb.secondary_source:
-        raw_sec = Image.open(kb.secondary_source)
-        raw_sec = ImageOps.exif_transpose(raw_sec).convert("RGB")
-        card_max_w = int(width * 0.41)
-        card_max_h = int(height * card_max_h_ratio)
-        fg_card_1 = _build_double_matte_card(raw_primary, card_max_w, card_max_h, scale_factor, kb.border_px)
-        fg_card_2 = _build_double_matte_card(raw_sec, card_max_w, card_max_h, scale_factor, kb.border_px)
-    elif is_parallax:
-        aspect = raw_primary.width / max(1, raw_primary.height)
-        if aspect < 1.0:
-            max_w, max_h = int(width * 0.66), int(height * card_max_h_ratio)
-        else:
-            max_w, max_h = int(width * 0.80), int(height * card_max_h_ratio)
-        fg_card_1 = _build_double_matte_card(raw_primary, max_w, max_h, scale_factor, kb.border_px)
-    else:
-        oversample = 1.10 if width >= 3840 else 1.20
-        work_w = int(round(width * oversample))
-        work_h = int(round(height * oversample))
-        if kb.mode == "gallery_frame":
-            base_static_img = build_gallery_frame_image(
-                photo_path, width=work_w, height=work_h, border_px=kb.border_px
-            )
-        else:
-            base_static_img = ImageOps.fit(raw_primary, (work_w, work_h), method=Image.Resampling.LANCZOS)
-
-    # Pre-cache a small number of discrete foreground scale steps (e.g. 48 steps) or resize directly in RGB/RGBA
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdin is not None
 
     try:
         for f_idx in range(total_frames):
             t_norm = f_idx / max(1, total_frames - 1)
-            eased = _ease_in_out_cubic(t_norm)
-
-            if is_diptych and fg_card_1 is not None and fg_card_2 is not None:
-                bg_zoom = 1.05 - 0.04 * eased
-                bg_cx = 0.52 - 0.04 * eased
-                bg_cy = 0.50
-                bw_crop = bg_w / bg_zoom
-                bh_crop = bg_h / bg_zoom
-                bx0 = bg_cx * bg_w - bw_crop * 0.5
-                by0 = bg_cy * bg_h - bh_crop * 0.5
-                frame = bg_plane.transform(
-                    (width, height),
-                    Image.Transform.EXTENT,
-                    (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
-                    resample=resample_mode,
-                )
-
-                drift_px = int(round((eased - 0.5) * 24.0 * scale_factor))
-                left_cx = int(width * 0.28)
-                right_cx = int(width * 0.72)
-                mid_cy = int(height * card_cy_ratio)
-
-                lx = left_cx - fg_card_1.width // 2
-                ly = mid_cy - fg_card_1.height // 2 - drift_px
-                rx = right_cx - fg_card_2.width // 2
-                ry = mid_cy - fg_card_2.height // 2 + drift_px
-
-                # Paste directly onto RGB frame using RGBA mask (zero full-frame RGBA conversion!)
-                frame.paste(fg_card_1, (lx, ly), fg_card_1)
-                frame.paste(fg_card_2, (rx, ry), fg_card_2)
-
-            elif is_parallax and fg_card_1 is not None:
-                bg_zoom = 1.06 - 0.05 * eased
-                fg_dx = (ex - sx) * eased
-                fg_dy = (ey - sy) * eased
-                bg_cx = 0.5 - fg_dx * 0.55
-                bg_cy = 0.5 - fg_dy * 0.55
-                bw_crop = bg_w / bg_zoom
-                bh_crop = bg_h / bg_zoom
-                bx0 = min(max(0.0, bg_cx * bg_w - bw_crop * 0.5), bg_w - bw_crop)
-                by0 = min(max(0.0, bg_cy * bg_h - bh_crop * 0.5), bg_h - bh_crop)
-                frame = bg_plane.transform(
-                    (width, height),
-                    Image.Transform.EXTENT,
-                    (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
-                    resample=resample_mode,
-                )
-
-                fg_scale = 0.96 + 0.05 * eased
-                cw = max(1, int(round(fg_card_1.width * fg_scale)))
-                ch = max(1, int(round(fg_card_1.height * fg_scale)))
-                scaled_card = fg_card_1.resize((cw, ch), resample=resample_mode)
-
-                pan_px_x = int(round(fg_dx * width * 0.28))
-                pan_px_y = int(round(fg_dy * height * 0.24))
-                px = (width - cw) // 2 + pan_px_x
-                py = int(height * card_cy_ratio) - ch // 2 + pan_px_y
-                frame.paste(scaled_card, (px, max(10, py)), scaled_card)
-
-            else:
-                assert base_static_img is not None
-                work_w, work_h = base_static_img.size
-                cur_zoom = s_zoom + (e_zoom - s_zoom) * eased
-                cx = sx + (ex - sx) * eased
-                cy = sy + (ey - sy) * eased
-
-                crop_w = work_w / cur_zoom
-                crop_h = work_h / cur_zoom
-
-                half_w = crop_w / 2.0
-                half_h = crop_h / 2.0
-                center_px = min(max(cx * work_w, half_w), work_w - half_w)
-                center_py = min(max(cy * work_h, half_h), work_h - half_h)
-
-                x0 = center_px - half_w
-                y0 = center_py - half_h
-                x1 = center_px + half_w
-                y1 = center_py + half_h
-
-                frame = base_static_img.transform(
-                    (width, height),
-                    Image.Transform.EXTENT,
-                    (x0, y0, x1, y1),
-                    resample=resample_mode,
-                )
-
-            # 3. Plane 3: Frosted-Glass Documentary Lower-Third Card (with smooth upward glide + fade)
-            if has_card and card_fg is not None and card_mask is not None and card_tint is not None:
-                t_sec = f_idx / max(1.0, float(fps))
-                rem_sec = max(0.0, duration - t_sec)
-                entry_prog = _ease_out_cubic((t_sec - 0.15) / 0.50) if t_sec > 0.15 else 0.0
-                exit_prog = min(1.0, rem_sec / 0.40)
-                alpha_mult = min(entry_prog, exit_prog)
-                if alpha_mult > 0.04:
-                    slide_y = int(round((1.0 - entry_prog) * 16.0 * scale_factor))
-                    _composite_frosted_card_on_rgb(
-                        frame_rgb=frame,
-                        text_fg_rgba=card_fg,
-                        card_mask_l=card_mask,
-                        dark_tint_rgb=card_tint,
-                        px=card_x,
-                        py=card_y,
-                        alpha_mult=alpha_mult,
-                        slide_y=slide_y,
-                    )
-
+            frame = _render_photo_frame_from_context(
+                ctx=ctx,
+                t_norm=t_norm,
+                f_idx=f_idx,
+                duration=duration,
+                fps=fps,
+            )
             proc.stdin.write(frame.tobytes())
     finally:
         proc.stdin.close()
@@ -881,4 +1671,89 @@ def render_photo_clip(
         err_msg = stderr_bytes.decode("utf-8", errors="replace")
         raise RuntimeError(f"FFmpeg photo clip render failed (code {ret}): {err_msg}")
 
+    return out_path
+
+
+def render_photo_effects_showcase_sheet(
+    photo_path: str | Path,
+    output_jpg: str | Path,
+    secondary_path: Optional[str | Path] = None,
+    tertiary_path: Optional[str | Path] = None,
+    caption_title: str = "Cathédrale Notre-Dame & Parisian Masterpieces",
+    caption_subtitle: str = "860 Years of French Gothic Architecture · Île de la Cité, Paris",
+    camera_badge: str = "APPLE IPHONE 16 PRO · PARIS 4K HDR",
+    tile_width: int = 960,
+    tile_height: int = 540,
+) -> Path:
+    """
+    Mechanically render a 5x2 high-resolution visual comparison showcase sheet of all 10 Photo Modes
+    + Atmospheric Finishers so the AI Agent or user can inspect and select effects.
+    """
+    out_path = Path(output_jpg)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sec_str = str(secondary_path) if (secondary_path and Path(secondary_path).exists()) else None
+    tert_str = str(tertiary_path) if (tertiary_path and Path(tertiary_path).exists()) else None
+
+    showcase_specs: list[tuple[str, str, str]] = [
+        ("cinematic_depth_3d", "golden_light_leak", "1. 3D Depth Parallax + Golden Light Leak"),
+        ("triptych_cinematic", "none", "2. 3-Panel Staggered Storyboard Triptych"),
+        ("polaroid_scrapbook", "nostalgic_film_grain", "3. Vintage Polaroid Scrapbook + Film Grain"),
+        ("curator_loupe", "museum_spotlight", "4. Art-Historian 1.65x Optical Loupe + Spotlight"),
+        ("editorial_magazine", "none", "5. Asymmetric 62/38 Editorial Magazine Spread"),
+        ("cinema_anamorphic", "champagne_bokeh", "6. 2.39:1 Anamorphic Widescreen + Champagne Bokeh"),
+        ("parallax_gallery", "museum_spotlight", "7. 2.5D Museum Parallax + Spotlight"),
+        ("diptych_frame", "golden_light_leak", "8. Side-by-Side Diptych + Golden Light Leak"),
+        ("gallery_frame", "champagne_bokeh", "9. Classic Gallery Frame + Champagne Bokeh"),
+        ("full_bleed", "nostalgic_film_grain", "10. Full-Bleed Ken Burns + 35mm Film Grain"),
+    ]
+
+    cols, rows = 2, 5
+    pad = 20
+    header_h = 68
+    label_h = 38
+    canvas_w = cols * tile_width + (cols + 1) * pad
+    canvas_h = header_h + rows * (tile_height + label_h) + (rows + 1) * pad
+
+    sheet = Image.new("RGB", (canvas_w, canvas_h), (10, 14, 22))
+    draw = ImageDraw.Draw(sheet)
+    f_hdr = _load_editorial_font(28, bold=True, serif=True)
+    f_lbl = _load_editorial_font(18, bold=True, serif=False)
+
+    draw.text(
+        (pad, 18),
+        "PREMIUM PHOTO EFFECTS SHOWCASE — 10 PRESENTATION MODES & 4 ATMOSPHERIC FINISHERS",
+        font=f_hdr,
+        fill=(234, 194, 96),
+    )
+
+    for idx, (mode_name, fx_name, label_text) in enumerate(showcase_specs):
+        r = idx // cols
+        c = idx % cols
+        x0 = pad + c * (tile_width + pad)
+        y0 = header_h + pad + r * (tile_height + label_h + pad)
+
+        kb = KenBurnsConfig(
+            mode=mode_name,  # type: ignore[arg-type]
+            overlay_fx=fx_name,  # type: ignore[arg-type]
+            preset="zoom_in",
+            start_zoom=1.0,
+            end_zoom=1.08,
+            start_center=(0.50, 0.48),
+            end_center=(0.52, 0.45),
+            secondary_source=sec_str,
+            tertiary_source=tert_str,
+            caption_title=caption_title,
+            caption_subtitle=caption_subtitle,
+            camera_badge=camera_badge,
+        )
+        ctx = _prepare_photo_scene_context(photo_path=photo_path, width=tile_width, height=tile_height, kb=kb)
+        tile_img = _render_photo_frame_from_context(ctx=ctx, t_norm=0.55, f_idx=16, duration=5.5, fps=30)
+
+        draw.rectangle([x0 - 2, y0 - 2, x0 + tile_width + 1, y0 + tile_height + label_h + 1], outline=(214, 176, 84), width=2)
+        sheet.paste(tile_img, (x0, y0))
+        draw.rectangle([x0, y0 + tile_height, x0 + tile_width, y0 + tile_height + label_h], fill=(16, 22, 34))
+        draw.text((x0 + 14, y0 + tile_height + 7), f"{label_text}  [mode={mode_name}, overlay_fx={fx_name}]", font=f_lbl, fill=(242, 245, 250))
+
+    sheet.save(out_path, quality=92)
     return out_path

@@ -706,3 +706,78 @@ def test_cross_platform_macbook_pro_2019_hardware_encoding_and_filters(monkeypat
     hdr_filters_with_zscale = ken_burns.build_hdr_color_filters("709")
     assert any("zscale" in f for f in hdr_filters_with_zscale)
 
+
+def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
+    """Verify all 6 new Premium Photo Presentation Modes + 4 Atmospheric Finishers and showcase sheet generator."""
+    from PIL import Image, ImageDraw
+    from video_editing_ai.models.schema import KenBurnsConfig
+    from video_editing_ai.renderer.ken_burns import (
+        _prepare_photo_scene_context,
+        _render_photo_frame_from_context,
+        render_photo_clip,
+        render_photo_effects_showcase_sheet,
+    )
+
+    p1 = tmp_path / "photo_1.jpg"
+    p2 = tmp_path / "photo_2.jpg"
+    p3 = tmp_path / "photo_3.jpg"
+    for idx, p in enumerate((p1, p2, p3), start=1):
+        img = Image.new("RGB", (640, 480), (40 * idx, 80, 140))
+        d = ImageDraw.Draw(img)
+        d.rectangle([120, 90, 520, 390], fill=(235, 195, 95), outline=(255, 255, 255), width=6)
+        img.save(p, quality=90)
+
+    new_modes_and_finishers = [
+        ("cinematic_depth_3d", "golden_light_leak"),
+        ("triptych_cinematic", "none"),
+        ("polaroid_scrapbook", "nostalgic_film_grain"),
+        ("curator_loupe", "museum_spotlight"),
+        ("editorial_magazine", "none"),
+        ("cinema_anamorphic", "champagne_bokeh"),
+    ]
+    for mode_name, fx_name in new_modes_and_finishers:
+        kb = KenBurnsConfig(
+            mode=mode_name,  # type: ignore[arg-type]
+            overlay_fx=fx_name,  # type: ignore[arg-type]
+            secondary_source=str(p2),
+            tertiary_source=str(p3),
+            caption_title=f"Title for {mode_name}",
+            caption_subtitle=f"Subtitle with {fx_name} finisher",
+            camera_badge="PARIS 4K HDR",
+        )
+        ctx = _prepare_photo_scene_context(p1, width=480, height=270, kb=kb)
+        frame = _render_photo_frame_from_context(ctx, t_norm=0.5, f_idx=15, duration=2.0, fps=24)
+        assert frame.size == (480, 270)
+
+    # Render an actual MP4 clip with cinematic_depth_3d + golden_light_leak
+    out_mp4 = tmp_path / "depth_3d_clip.mp4"
+    render_photo_clip(
+        photo_path=p1,
+        output_mp4=out_mp4,
+        duration=1.0,
+        width=480,
+        height=270,
+        fps=12,
+        hdr=False,
+        ken_burns=KenBurnsConfig(
+            mode="cinematic_depth_3d",
+            overlay_fx="golden_light_leak",
+            caption_title="Eiffel Tower 3D Depth",
+            caption_subtitle="Champ de Mars · Paris",
+        ),
+    )
+    assert out_mp4.exists() and out_mp4.stat().st_size > 1000
+
+    # Render the 10-mode showcase sheet
+    showcase_jpg = tmp_path / "showcase.jpg"
+    render_photo_effects_showcase_sheet(
+        photo_path=p1,
+        output_jpg=showcase_jpg,
+        secondary_path=p2,
+        tertiary_path=p3,
+        tile_width=320,
+        tile_height=180,
+    )
+    assert showcase_jpg.exists() and showcase_jpg.stat().st_size > 5000
+
+

@@ -8,6 +8,8 @@ from typing import Any, Optional
 from ..analyzer.media_probe import PHOTO_EXTENSIONS
 from ..exporters.nle_export import export_all_nle_formats
 from ..models.schema import (
+    VALID_PHOTO_MODES,
+    VALID_PHOTO_OVERLAY_FX,
     CulledSubClip,
     EditTimeline,
     KenBurnsConfig,
@@ -89,8 +91,8 @@ def apply_surgical_edit(
         action = str(op.get("action") or "").strip().lower()
         clip_id = str(op.get("clip_id") or "").strip()
 
-        # 1. UPDATE-PLAQUE: Update museum/editorial plaque or Ken Burns motion preset on a photo clip
-        if action in ("update-plaque", "update_plaque", "plaque"):
+        # 1. UPDATE-PLAQUE / SET-PHOTO-EFFECT: Update museum/editorial plaque, photo presentation mode, or atmospheric finisher
+        if action in ("update-plaque", "update_plaque", "plaque", "set-photo-effect", "photo-effect"):
             target = next(
                 (c for c in (timeline.visual_track + timeline.broll_track) if c.id == clip_id),
                 None,
@@ -105,16 +107,24 @@ def apply_surgical_edit(
                 target.ken_burns.caption_subtitle = str(op["caption_subtitle"])
             if op.get("camera_badge") is not None:
                 target.ken_burns.camera_badge = str(op["camera_badge"])
-            if op.get("mode") in ("parallax_gallery", "diptych_frame", "gallery_frame", "full_bleed"):
-                target.ken_burns.mode = op["mode"]
+            req_mode = op.get("mode") or op.get("photo_mode")
+            if req_mode in VALID_PHOTO_MODES:
+                target.ken_burns.mode = req_mode
+            req_fx = op.get("overlay_fx")
+            if req_fx in VALID_PHOTO_OVERLAY_FX:
+                target.ken_burns.overlay_fx = req_fx
             if op.get("preset"):
                 target.ken_burns.preset = op["preset"]
             if op.get("secondary_source") is not None:
                 target.ken_burns.secondary_source = str(op["secondary_source"]) if op["secondary_source"] else None
+            if op.get("tertiary_source") is not None:
+                target.ken_burns.tertiary_source = str(op["tertiary_source"]) if op["tertiary_source"] else None
             target.narrative_note = (
                 f"[STILL · {target.ken_burns.caption_title}] {target.ken_burns.caption_subtitle or ''}".strip()
             )
-            applied_logs.append(f"Updated plaque on {clip_id} -> '{target.ken_burns.caption_title}'")
+            applied_logs.append(
+                f"Updated {clip_id} -> mode={target.ken_burns.mode}, overlay_fx={target.ken_burns.overlay_fx}, title='{target.ken_burns.caption_title}'"
+            )
 
         # 2. TRIM: Change duration / source_in of a clip and ripple-shift all downstream tracks
         elif action == "trim":

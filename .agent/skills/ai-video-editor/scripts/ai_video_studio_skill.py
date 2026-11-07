@@ -519,6 +519,12 @@ def cmd_edit_cut(args: argparse.Namespace) -> int:
             op["camera_badge"] = args.camera_badge
         if args.mode:
             op["mode"] = args.mode
+        if getattr(args, "overlay_fx", None):
+            op["overlay_fx"] = args.overlay_fx
+        if getattr(args, "secondary_source", None) is not None:
+            op["secondary_source"] = args.secondary_source
+        if getattr(args, "tertiary_source", None) is not None:
+            op["tertiary_source"] = args.tertiary_source
         if args.preset:
             op["preset"] = args.preset
         if args.before_clip_id:
@@ -761,6 +767,48 @@ def cmd_apply_bgm_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_preview_photo_effects(args: argparse.Namespace) -> int:
+    """Mechanically render a 5x2 high-resolution visual showcase sheet of all 10 Photo Modes & 4 Atmospheric Finishers."""
+    from video_editing_ai.renderer.ken_burns import render_photo_effects_showcase_sheet
+
+    proj = Path(args.project_dir).resolve()
+    proj.mkdir(parents=True, exist_ok=True)
+    out_jpg = Path(args.output).resolve() if args.output else (proj / "contact_sheets" / "photo_effects_showcase.jpg")
+
+    photo_path = args.photo
+    sec_path = args.secondary_photo
+    tert_path = args.tertiary_photo
+
+    # Auto-pick top curated photos from project if --photo is omitted
+    if not photo_path:
+        pc_path = proj / "photo_curation.json"
+        if pc_path.exists():
+            doc = json.loads(pc_path.read_text(encoding="utf-8"))
+            sel = [it for it in doc.get("items", []) if it.get("is_selected")]
+            if sel:
+                photo_path = sel[0]["source_path"]
+                if not sec_path and len(sel) >= 2:
+                    sec_path = sel[1]["source_path"]
+                if not tert_path and len(sel) >= 3:
+                    tert_path = sel[2]["source_path"]
+
+    if not photo_path or not Path(photo_path).exists():
+        print(f"Error: Valid --photo path required (got {photo_path})", file=sys.stderr)
+        return 1
+
+    res_jpg = render_photo_effects_showcase_sheet(
+        photo_path=photo_path,
+        output_jpg=out_jpg,
+        secondary_path=sec_path,
+        tertiary_path=tert_path,
+        caption_title=args.caption_title or "Cathédrale Notre-Dame & Parisian Masterpieces",
+        caption_subtitle=args.caption_subtitle or "860 Years of French Gothic Architecture · Île de la Cité, Paris",
+        camera_badge=args.camera_badge or "APPLE IPHONE 16 PRO · PARIS 4K HDR",
+    )
+    print(f"Success! Rendered 10-Mode Premium Photo Effects Showcase Sheet to: {res_jpg}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai_video_studio_skill",
@@ -896,7 +944,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("--project-dir", required=True, help="Project workspace directory")
     p_ec.add_argument(
         "--action",
-        choices=["update-plaque", "trim", "drop", "swap", "move", "set-cold-open", "audio-mix"],
+        choices=["update-plaque", "set-photo-effect", "trim", "drop", "swap", "move", "set-cold-open", "audio-mix"],
         default=None,
         help="Surgical operation type (or pass a batch via --ops-json)",
     )
@@ -908,7 +956,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("--caption-title", default=None, help="Updated plaque title or hook caption")
     p_ec.add_argument("--caption-subtitle", default=None, help="Updated plaque subtitle")
     p_ec.add_argument("--camera-badge", default=None, help="Updated camera badge")
-    p_ec.add_argument("--mode", default=None, help="Updated photo display mode (parallax_gallery | gallery_frame | full_bleed)")
+    p_ec.add_argument(
+        "--mode",
+        default=None,
+        help="Updated photo mode (cinematic_depth_3d | triptych_cinematic | polaroid_scrapbook | curator_loupe | editorial_magazine | cinema_anamorphic | parallax_gallery | diptych_frame | gallery_frame | full_bleed)",
+    )
+    p_ec.add_argument(
+        "--overlay-fx",
+        default=None,
+        help="Composable atmospheric finisher (none | golden_light_leak | champagne_bokeh | museum_spotlight | nostalgic_film_grain)",
+    )
+    p_ec.add_argument("--secondary-source", default=None, help="Optional 2nd photo path for diptych_frame / polaroid_scrapbook / triptych_cinematic")
+    p_ec.add_argument("--tertiary-source", default=None, help="Optional 3rd photo path for triptych_cinematic")
     p_ec.add_argument("--preset", default=None, help="Updated Ken Burns preset")
     p_ec.add_argument("--before-clip-id", default=None, help="Move clip before this clip_id (for --action move)")
     p_ec.add_argument("--after-clip-id", default=None, help="Move clip after this clip_id (for --action move)")
@@ -972,6 +1031,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_ab.add_argument("--rationale", default="", help="AI BGM Agent's curatorial rationale")
     p_ab.add_argument("--output", default=None, help="Optional output JSON report path")
     p_ab.set_defaults(func=cmd_apply_bgm_plan)
+
+    # 15. preview-photo-effects
+    p_pe = sub.add_parser(
+        "preview-photo-effects",
+        help="Mechanically render a 5x2 visual comparison showcase sheet of all 10 Photo Modes & 4 Atmospheric Finishers",
+    )
+    p_pe.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_pe.add_argument("--photo", default=None, help="Primary photo path (auto-picks top curated photo if omitted)")
+    p_pe.add_argument("--secondary-photo", default=None, help="Optional 2nd photo path for diptych/polaroid/triptych")
+    p_pe.add_argument("--tertiary-photo", default=None, help="Optional 3rd photo path for triptych")
+    p_pe.add_argument("--caption-title", default=None, help="Sample caption title")
+    p_pe.add_argument("--caption-subtitle", default=None, help="Sample caption subtitle")
+    p_pe.add_argument("--camera-badge", default=None, help="Sample camera badge")
+    p_pe.add_argument("--output", default=None, help="Optional output JPEG path")
+    p_pe.set_defaults(func=cmd_preview_photo_effects)
 
     return parser
 

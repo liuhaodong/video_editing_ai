@@ -8,6 +8,49 @@ from typing import Any, Literal, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+PhotoModeType = Literal[
+    "gallery_frame",
+    "parallax_gallery",
+    "diptych_frame",
+    "full_bleed",
+    "cinematic_depth_3d",
+    "triptych_cinematic",
+    "polaroid_scrapbook",
+    "curator_loupe",
+    "editorial_magazine",
+    "cinema_anamorphic",
+]
+
+PhotoOverlayFxType = Literal[
+    "none",
+    "golden_light_leak",
+    "champagne_bokeh",
+    "museum_spotlight",
+    "nostalgic_film_grain",
+]
+
+VALID_PHOTO_MODES: tuple[str, ...] = (
+    "gallery_frame",
+    "parallax_gallery",
+    "diptych_frame",
+    "full_bleed",
+    "cinematic_depth_3d",
+    "triptych_cinematic",
+    "polaroid_scrapbook",
+    "curator_loupe",
+    "editorial_magazine",
+    "cinema_anamorphic",
+)
+
+VALID_PHOTO_OVERLAY_FX: tuple[str, ...] = (
+    "none",
+    "golden_light_leak",
+    "champagne_bokeh",
+    "museum_spotlight",
+    "nostalgic_film_grain",
+)
+
+
 
 # ============================================================================
 # Step 1: Media Analysis & Annotation Schemas (annotations.yaml)
@@ -161,7 +204,7 @@ class CreativeBrief(BaseModel):
         "music_mostly",
     ] = Field(default="keep_full_sentences_with_broll_cutaways")
     bilingual_overlay_captions: bool = Field(default=True)
-    photo_mode: Literal["gallery_frame", "parallax_gallery", "diptych_frame", "full_bleed"] = Field(
+    photo_mode: PhotoModeType = Field(
         default="parallax_gallery"
     )
     max_broll_duration_sec: float = Field(default=4.5, ge=1.5, le=12.0)
@@ -226,8 +269,19 @@ class CulledSubClip(BaseModel):
     annotation_subtitle: Optional[str] = Field(default=None, description="Bilingual curatorial subtitle")
     camera_badge: Optional[str] = Field(default=None, description="Camera & location EXIF badge")
     subject_category: Optional[str] = Field(default=None, description="Curatorial subject category")
+    recommended_photo_mode: PhotoModeType = Field(
+        default="parallax_gallery",
+        description="Curated photo presentation mode (parallax_gallery, cinematic_depth_3d, triptych_cinematic, polaroid_scrapbook, curator_loupe, editorial_magazine, cinema_anamorphic, diptych_frame, etc.)",
+    )
+    overlay_fx: PhotoOverlayFxType = Field(
+        default="none",
+        description="Optional composable atmospheric finisher (golden_light_leak, champagne_bokeh, museum_spotlight, nostalgic_film_grain)",
+    )
     secondary_source_path: Optional[str] = Field(
-        default=None, description="Optional paired vertical photo path for diptych_frame layout"
+        default=None, description="Optional paired second photo path for diptych_frame / polaroid_scrapbook / triptych_cinematic layout"
+    )
+    tertiary_source_path: Optional[str] = Field(
+        default=None, description="Optional third photo path for 3-panel triptych_cinematic layout"
     )
     is_discarded: bool = Field(default=False)
     discard_reason: Optional[str] = Field(default=None)
@@ -294,10 +348,10 @@ class CuratedPhotoItem(BaseModel):
     annotation_title: str = ""
     annotation_subtitle: str = ""
     camera_badge: str = ""
-    recommended_photo_mode: Literal["parallax_gallery", "diptych_frame", "gallery_frame", "full_bleed"] = (
-        "parallax_gallery"
-    )
+    recommended_photo_mode: PhotoModeType = "parallax_gallery"
+    overlay_fx: PhotoOverlayFxType = "none"
     paired_with_subclip_id: Optional[str] = None
+    tertiary_subclip_id: Optional[str] = None
     curation_rationale: str = ""
 
 
@@ -543,15 +597,25 @@ class TimelineSettings(BaseModel):
 
 
 class KenBurnsConfig(BaseModel):
-    """Configuration for photo animation and framing (2.5D Parallax, Diptych, Gallery Frame, & Museum Plaques)."""
+    """Configuration for photo animation, multi-plane framing, and atmospheric finishers."""
 
-    mode: Literal["gallery_frame", "parallax_gallery", "diptych_frame", "full_bleed"] = Field(
+    mode: PhotoModeType = Field(
         default="parallax_gallery",
         description=(
-            "'parallax_gallery' renders a 2.5D multi-plane counter-panning backdrop + double museum matte frame + "
-            "embedded exhibition plaque; 'diptych_frame' pairs two vertical portraits side-by-side; "
-            "'gallery_frame' renders a classic gallery frame; 'full_bleed' crops to fill the canvas."
+            "'parallax_gallery' renders a 2.5D multi-plane counter-panning backdrop + double museum matte frame; "
+            "'cinematic_depth_3d' separates foreground subject from background with bokeh rack-focus parallax; "
+            "'triptych_cinematic' animates a 3-panel staggered storyboard reveal; "
+            "'polaroid_scrapbook' renders tilted vintage instant-film print(s) with organic rotation; "
+            "'curator_loupe' glides an optical 1.65x magnifying glass spotlight across key details; "
+            "'editorial_magazine' creates an asymmetric 62/38 luxury magazine spread; "
+            "'cinema_anamorphic' frames a 2.39:1 widescreen letterbox with 35mm highlight halation; "
+            "'diptych_frame' pairs two photos side-by-side; 'gallery_frame' renders a classic gallery frame; "
+            "'full_bleed' crops to fill the canvas."
         ),
+    )
+    overlay_fx: PhotoOverlayFxType = Field(
+        default="none",
+        description="Composable atmospheric finisher: 'none', 'golden_light_leak', 'champagne_bokeh', 'museum_spotlight', or 'nostalgic_film_grain'",
     )
     preset: Literal[
         "zoom_in",
@@ -569,7 +633,10 @@ class KenBurnsConfig(BaseModel):
     end_center: tuple[float, float] = Field(default=(0.5, 0.48))
     border_px: int = Field(default=16, description="White gallery frame border width in pixels (at 1080p scale)")
     secondary_source: Optional[str] = Field(
-        default=None, description="Optional second photo file path for diptych_frame side-by-side layout"
+        default=None, description="Optional second photo file path for diptych_frame / polaroid_scrapbook / triptych_cinematic"
+    )
+    tertiary_source: Optional[str] = Field(
+        default=None, description="Optional third photo file path for 3-panel triptych_cinematic layout"
     )
     caption_title: Optional[str] = Field(
         default=None, description="Curated subject/artwork/landmark title displayed on the museum plaque"
