@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import subprocess
 from typing import Any, Literal, Optional
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from ..models.schema import (
     CulledSubClip,
     CuratedPhotoItem,
+    EditTimeline,
+    MediaIndex,
     PhotoAsset,
     PhotoCurationReport,
 )
@@ -634,10 +638,13 @@ class PhotoCuratorAgent(BaseEditingAgent):
         report.to_json_file(out_path)
         blackboard.photo_curation = report
 
+        # Mechanically generate visual contact sheets so Antigravity / AI Agent can inspect & override
+        cs_info = render_curation_contact_sheets(blackboard.project_dir)
+
         sample_titles = ", ".join(it.annotation_title.split("—")[0].strip() for it in selected_items[:4])
         blackboard.emit_activity(
             self.role_id,
-            f"Curated {len(selected_items)} high-taste photos (avg {avg_taste}/10 across {cluster_id} burst clusters) + bilingual museum plaques",
+            f"Curated {len(selected_items)} high-taste photos (avg {avg_taste}/10 across {cluster_id} burst clusters) + rendered {len(cs_info.get('photo_sheets', []))} contact sheets",
             detail=f"Featured plates: {sample_titles}...",
         )
 
@@ -650,6 +657,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 "selected_photos": len(selected_items),
                 "average_taste_score": avg_taste,
                 "annotated_count": len(selected_items),
+                "contact_sheets": cs_info.get("photo_sheets", []),
             },
         )
 
@@ -657,4 +665,376 @@ class PhotoCuratorAgent(BaseEditingAgent):
             "photo_curation_path": str(out_path),
             "selected_photos": len(selected_items),
             "average_taste_score": avg_taste,
+            "contact_sheets": cs_info.get("photo_sheets", []),
         }
+
+
+def render_curation_contact_sheets(
+    project_dir: str | Path,
+    cols: int = 5,
+    rows: int = 4,
+    max_items: int = 60,
+) -> dict[str, Any]:
+    """Mechanically render numbered 5x4 contact sheets for photos and video subclips so the AI Agent can visually inspect them via read_file."""
+    proj = Path(project_dir).resolve()
+    pc_path = proj / "photo_curation.json"
+    mi_path = proj / "media_index.json"
+    cs_dir = proj / "contact_sheets"
+    cs_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        font_hdr = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 14)
+        font_sub = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 12)
+    except Exception:
+        font_hdr = ImageFont.load_default()
+        font_sub = ImageFont.load_default()
+
+    photo_sheets: list[str] = []
+    manifest_tiles: list[dict[str, Any]] = []
+
+    if pc_path.exists():
+        report = PhotoCurationReport.from_json_file(pc_path)
+        selected = [it for it in report.items if it.is_selected]
+        candidates = sorted(
+            [
+                it
+                for it in report.items
+                if not it.is_selected and it.rejection_reason != "near_duplicate_burst_frame"
+            ],
+            key=lambda x: x.overall_taste_score,
+            reverse=True,
+        )
+        ordered_items = (selected + candidates)[:max_items]
+        per_sheet = max(1, cols * rows)
+        cell_w, cell_h = 360, 260
+        pad = 12
+
+        for sheet_idx in range(0, len(ordered_items), per_sheet):
+            batch = ordered_items[sheet_idx : sheet_idx + per_sheet]
+            sheet_num = (sheet_idx // per_sheet) + 1
+            canvas_w = cols * cell_w + (cols + 1) * pad
+            canvas_h = rows * cell_h + (rows + 1) * pad + 44
+            canvas = Image.new("RGB", (canvas_w, canvas_h), (13, 17, 26))
+            draw = ImageDraw.Draw(canvas)
+            draw.text(
+                (pad, 10),
+                f"AI PHOTO CURATION CONTACT SHEET #{sheet_num:02d} — {report.project_title} (Green = Selected, Amber = Candidate)",
+                fill=(255, 215, 64),
+                font=font_hdr,
+            )
+
+            for local_i, item in enumerate(batch):
+                global_num = sheet_idx + local_i + 1
+                tile_code = f"#{global_num:02d}"
+                r = local_i // cols
+                c = local_i % cols
+                x0 = pad + c * (cell_w + pad)
+                y0 = 44 + pad + r * (cell_h + pad)
+
+                border_col = (16, 185, 129) if item.is_selected else (245, 158, 11)
+                draw.rectangle([x0, y0, x0 + cell_w, y0 + cell_h], fill=(22, 29, 43), outline=border_col, width=2)
+                draw.rectangle([x0, y0, x0 + cell_w, y0 + 26], fill=(15, 21, 33))
+
+                status_tag = f"★ SEL {item.overall_taste_score:.1f}" if item.is_selected else f"CAND {item.overall_taste_score:.1f}"
+                header_text = f"[{tile_code}] {item.filename[:20]} • {status_tag}"
+                draw.text((x0 + 6, y0 + 4), header_text, fill=border_col, font=font_hdr)
+
+                img_box_w = cell_w - 12
+                img_box_h = cell_h - 62
+                try:
+                    with Image.open(item.source_path) as im:
+                        rgb = im.convert("RGB")
+                        rgb.thumbnail((img_box_w, img_box_h), Image.Resampling.BILINEAR)
+                        ix = x0 + 6 + (img_box_w - rgb.width) // 2
+                        iy = y0 + 30 + (img_box_h - rgb.height) // 2
+                        canvas.paste(rgb, (ix, iy))
+                except Exception:
+                    draw.text((x0 + 16, y0 + 90), "[Preview Unavailable]", fill=(148, 163, 184), font=font_hdr)
+
+                caption_str = (item.annotation_title or item.subject_category)[:38]
+                draw.rectangle([x0, y0 + cell_h - 28, x0 + cell_w, y0 + cell_h], fill=(15, 21, 33))
+                draw.text((x0 + 6, y0 + cell_h - 24), caption_str, fill=(226, 232, 240), font=font_sub)
+
+                manifest_tiles.append(
+                    {
+                        "tile_id": tile_code,
+                        "tile_number": global_num,
+                        "subclip_id": item.subclip_id,
+                        "filename": item.filename,
+                        "source_path": item.source_path,
+                        "orientation": item.orientation,
+                        "is_selected": item.is_selected,
+                        "overall_taste_score": item.overall_taste_score,
+                        "annotation_title": item.annotation_title,
+                        "annotation_subtitle": item.annotation_subtitle,
+                        "camera_badge": item.camera_badge,
+                        "recommended_photo_mode": item.recommended_photo_mode,
+                        "paired_with_subclip_id": item.paired_with_subclip_id,
+                    }
+                )
+
+            sheet_path = cs_dir / f"contact_sheet_{sheet_num:02d}.jpg"
+            canvas.save(sheet_path, quality=88)
+            photo_sheets.append(str(sheet_path))
+
+    # Also render a Video Subclips Keyframe Contact Sheet if video subclips exist
+    video_sheet_path: Optional[str] = None
+    video_tiles: list[dict[str, Any]] = []
+    if mi_path.exists():
+        mi = MediaIndex.from_json_file(mi_path)
+        vid_subclips = [s for s in mi.subclips if s.media_type == "video" and not s.is_discarded][:20]
+        if vid_subclips:
+            v_cols = min(4, max(1, len(vid_subclips)))
+            v_rows = (len(vid_subclips) + v_cols - 1) // v_cols
+            cell_w, cell_h, pad = 420, 270, 12
+            canvas_w = v_cols * cell_w + (v_cols + 1) * pad
+            canvas_h = v_rows * cell_h + (v_rows + 1) * pad + 44
+            v_canvas = Image.new("RGB", (canvas_w, canvas_h), (13, 17, 26))
+            v_draw = ImageDraw.Draw(v_canvas)
+            v_draw.text(
+                (pad, 10),
+                "VIDEO SUBCLIPS KEYFRAME CONTACT SHEET — A-Roll & B-Roll Selects",
+                fill=(0, 229, 255),
+                font=font_hdr,
+            )
+            for idx, vsc in enumerate(vid_subclips):
+                v_code = f"#V{idx + 1:02d}"
+                r = idx // v_cols
+                c = idx % v_cols
+                x0 = pad + c * (cell_w + pad)
+                y0 = 44 + pad + r * (cell_h + pad)
+                v_draw.rectangle([x0, y0, x0 + cell_w, y0 + cell_h], fill=(22, 29, 43), outline=(0, 229, 255), width=2)
+                v_draw.rectangle([x0, y0, x0 + cell_w, y0 + 26], fill=(15, 21, 33))
+                v_draw.text(
+                    (x0 + 6, y0 + 4),
+                    f"[{v_code}] {vsc.subclip_id} ({vsc.roll_type.upper()} • {vsc.duration:.1f}s) {vsc.filename[:16]}",
+                    fill=(0, 229, 255),
+                    font=font_hdr,
+                )
+                mid_tc = round((vsc.in_tc + vsc.out_tc) * 0.5, 2)
+                tmp_jpg = cs_dir / f"_tmp_{vsc.subclip_id}.jpg"
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-ss",
+                        str(mid_tc),
+                        "-i",
+                        vsc.source_path,
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "3",
+                        str(tmp_jpg),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if tmp_jpg.exists():
+                    try:
+                        with Image.open(tmp_jpg) as vim:
+                            rgb = vim.convert("RGB")
+                            rgb.thumbnail((cell_w - 12, cell_h - 62), Image.Resampling.BILINEAR)
+                            v_canvas.paste(rgb, (x0 + 6, y0 + 30))
+                    except Exception:
+                        pass
+                    try:
+                        tmp_jpg.unlink()
+                    except Exception:
+                        pass
+                quote_or_sum = (vsc.spoken_text or vsc.summary or "")[:44]
+                v_draw.rectangle([x0, y0 + cell_h - 28, x0 + cell_w, y0 + cell_h], fill=(15, 21, 33))
+                v_draw.text((x0 + 6, y0 + cell_h - 24), quote_or_sum, fill=(226, 232, 240), font=font_sub)
+                video_tiles.append(
+                    {
+                        "tile_id": v_code,
+                        "subclip_id": vsc.subclip_id,
+                        "filename": vsc.filename,
+                        "roll_type": vsc.roll_type,
+                        "in_tc": vsc.in_tc,
+                        "out_tc": vsc.out_tc,
+                        "duration": vsc.duration,
+                        "spoken_text": vsc.spoken_text,
+                        "summary": vsc.summary,
+                        "emotion_score": vsc.emotion_score,
+                    }
+                )
+            v_sheet = cs_dir / "video_subclips_sheet.jpg"
+            v_canvas.save(v_sheet, quality=88)
+            video_sheet_path = str(v_sheet)
+
+    manifest_path = cs_dir / "contact_sheets_manifest.json"
+    photo_contact_sheets = [
+        {
+            "sheet_index": idx + 1,
+            "sheet_path": sp,
+            "items": [t for t in manifest_tiles if t.get("sheet_path") == sp] or manifest_tiles,
+        }
+        for idx, sp in enumerate(photo_sheets)
+    ]
+    manifest_doc = {
+        "project_dir": str(proj),
+        "photo_sheets": photo_sheets,
+        "photo_contact_sheets": photo_contact_sheets,
+        "video_sheet": video_sheet_path,
+        "video_subclips_sheet": video_sheet_path,
+        "photo_tiles": manifest_tiles,
+        "video_tiles": video_tiles,
+    }
+    manifest_path.write_text(json.dumps(manifest_doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest_doc
+
+
+def apply_vision_curation_overrides(
+    project_dir: str | Path,
+    overrides: list[dict[str, Any]],
+    curatorial_statement: Optional[str] = None,
+) -> dict[str, Any]:
+    """Mechanically persist the AI Agent's visual curation & annotation decisions into photo_curation.json, media_index.json, and timeline.yaml."""
+    proj = Path(project_dir).resolve()
+    pc_path = proj / "photo_curation.json"
+    mi_path = proj / "media_index.json"
+    tl_path = proj / "timeline.yaml"
+    manifest_path = proj / "contact_sheets" / "contact_sheets_manifest.json"
+
+    if not pc_path.exists():
+        raise FileNotFoundError(f"photo_curation.json not found in {proj}")
+
+    report = PhotoCurationReport.from_json_file(pc_path)
+    tile_to_subclip: dict[str, str] = {}
+    if manifest_path.exists():
+        try:
+            m_doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for t in m_doc.get("photo_tiles", []):
+                tile_to_subclip[str(t.get("tile_id", "")).upper()] = t["subclip_id"]
+                tile_to_subclip[f"#{int(t.get('tile_number', 0)):02d}"] = t["subclip_id"]
+                tile_to_subclip[str(t.get("tile_number", ""))] = t["subclip_id"]
+        except Exception:
+            pass
+
+    item_by_subclip = {it.subclip_id: it for it in report.items}
+    item_by_filename = {it.filename.lower(): it for it in report.items}
+
+    applied_count = 0
+    for ov in overrides:
+        key_raw = str(
+            ov.get("subclip_id")
+            or ov.get("tile_id")
+            or ov.get("id_or_filename")
+            or ov.get("filename")
+            or ""
+        ).strip()
+        if not key_raw:
+            continue
+
+        resolved_sid = tile_to_subclip.get(key_raw.upper(), key_raw)
+        target_item = item_by_subclip.get(resolved_sid) or item_by_filename.get(key_raw.lower())
+        if target_item is None:
+            continue
+
+        sel_val = ov.get("is_selected") if "is_selected" in ov else ov.get("selected")
+        if sel_val is not None:
+            target_item.is_selected = bool(sel_val)
+            if target_item.is_selected:
+                target_item.rejection_reason = None
+            elif ov.get("rejection_reason") or ov.get("vision_note"):
+                target_item.rejection_reason = str(ov.get("rejection_reason") or ov.get("vision_note"))
+
+        new_title = ov.get("annotation_title") or ov.get("caption_title")
+        if new_title:
+            target_item.annotation_title = str(new_title)
+        new_sub = ov.get("annotation_subtitle") or ov.get("caption_subtitle")
+        if new_sub:
+            target_item.annotation_subtitle = str(new_sub)
+        if ov.get("camera_badge"):
+            target_item.camera_badge = str(ov["camera_badge"])
+        if ov.get("subject_category"):
+            target_item.subject_category = str(ov["subject_category"])
+        if ov.get("overall_taste_score") is not None:
+            target_item.overall_taste_score = float(ov["overall_taste_score"])
+        if ov.get("recommended_photo_mode") in ("parallax_gallery", "diptych_frame", "gallery_frame", "full_bleed"):
+            target_item.recommended_photo_mode = ov["recommended_photo_mode"]
+        if "paired_with_subclip_id" in ov:
+            target_item.paired_with_subclip_id = ov["paired_with_subclip_id"]
+        if ov.get("curation_rationale") or ov.get("vision_note") or ov.get("curatorial_note"):
+            target_item.curation_rationale = str(
+                ov.get("curation_rationale") or ov.get("vision_note") or ov.get("curatorial_note")
+            )
+
+        applied_count += 1
+
+    selected_items = [it for it in report.items if it.is_selected]
+    report.selected_count = len(selected_items)
+    report.rejected_count = len(report.items) - len(selected_items)
+    if selected_items:
+        report.average_taste_score_selected = round(
+            sum(it.overall_taste_score for it in selected_items) / len(selected_items), 2
+        )
+    if curatorial_statement:
+        report.curatorial_statement = curatorial_statement
+    report.to_json_file(pc_path)
+
+    # Sync changes into media_index.json
+    if mi_path.exists():
+        mi = MediaIndex.from_json_file(mi_path)
+        sc_by_id = {s.subclip_id: s for s in mi.subclips}
+        absorbed_partners = {
+            it.paired_with_subclip_id
+            for it in selected_items
+            if it.paired_with_subclip_id and it.recommended_photo_mode == "diptych_frame"
+        }
+        for it in report.items:
+            sc = sc_by_id.get(it.subclip_id)
+            if sc is None:
+                continue
+            sc.annotation_title = it.annotation_title
+            sc.annotation_subtitle = it.annotation_subtitle
+            sc.camera_badge = it.camera_badge
+            sc.subject_category = it.subject_category
+            sc.aesthetic_score = it.overall_taste_score
+            sc.summary = f"{it.annotation_title} ({it.annotation_subtitle}) — {it.curation_rationale}"
+            if it.is_selected and it.subclip_id not in absorbed_partners:
+                sc.is_discarded = False
+                sc.discard_reason = None
+                if it.paired_with_subclip_id and it.paired_with_subclip_id in sc_by_id:
+                    sc.secondary_source_path = sc_by_id[it.paired_with_subclip_id].source_path
+            elif it.subclip_id in absorbed_partners:
+                sc.is_discarded = True
+                sc.discard_reason = "paired_as_secondary_panel_in_diptych_frame"
+            else:
+                sc.is_discarded = True
+                sc.discard_reason = it.rejection_reason or "rejected_by_ai_vision_curator"
+        mi.kept_selects_count = sum(1 for s in mi.subclips if not s.is_discarded)
+        mi.discarded_count = sum(1 for s in mi.subclips if s.is_discarded)
+        mi.to_json_file(mi_path)
+
+    # Sync updated plaques into timeline.yaml if already generated
+    updated_timeline_cuts = 0
+    if tl_path.exists():
+        tl = EditTimeline.from_yaml(tl_path)
+        by_src = {str(Path(it.source_path).resolve()).lower(): it for it in report.items}
+        by_fname = {it.filename.lower(): it for it in report.items}
+        for track in (tl.visual_track, tl.broll_track):
+            for clip in track:
+                if clip.type == "photo" and clip.ken_burns is not None:
+                    src_key = str(Path(clip.source).resolve()).lower() if Path(clip.source).exists() else ""
+                    fname_key = Path(clip.source).name.lower()
+                    matched = by_src.get(src_key) or by_fname.get(fname_key)
+                    if matched is not None:
+                        clip.ken_burns.caption_title = matched.annotation_title
+                        clip.ken_burns.caption_subtitle = matched.annotation_subtitle
+                        clip.ken_burns.camera_badge = matched.camera_badge
+                        clip.narrative_note = f"[STILL · {matched.annotation_title}] {matched.annotation_subtitle}"
+                        updated_timeline_cuts += 1
+        tl.to_yaml(tl_path)
+
+    return {
+        "applied_overrides": applied_count,
+        "selected_count": report.selected_count,
+        "selected_photos": report.selected_count,
+        "rejected_photos": report.rejected_count,
+        "updated_timeline_cuts": updated_timeline_cuts,
+        "average_taste_score_selected": report.average_taste_score_selected,
+        "photo_curation_path": str(pc_path),
+    }

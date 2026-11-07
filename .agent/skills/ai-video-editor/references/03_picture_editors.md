@@ -18,3 +18,7 @@ In vlog and family travel editing, cutting talking segments and cutting music mo
    Order shots within montage clusters from `wide` (establishing, ~3.0s) → `medium` (activity, ~2.5s) → `closeup` (reaction/detail, ~2.0s).
 3. **Motion Direction Continuity**:
    Avoid placing opposing camera pans (`pan_left` immediately followed by `pan_right`) back-to-back unless aligned with a `chorus_drop` downbeat.
+4. **Cold-Open Teaser Hook Assembly (`clip_000_hook`)**:
+   When `paper_edit.cold_open_subclip_id` is present, place `clip_000_hook` at `0.0s–3.6s` (`act="Cold Open Teaser"`) with nat-sound/speech at `volume = 0.88` before the Main Opening Title Card (`title_opening`), preserving `>= 1.4s` breathing room between `title_opening` and `title_chap_01`.
+5. **Ripple-Aware Surgical Timeline Editing (`edit-cut`)**:
+   For post-render user feedback, use `edit-cut` (`update-plaque`, `trim`, `drop`, `swap`, `move`, `set-cold-open`, `audio-mix`) to modify `timeline.yaml` and ripple downstream V1, V2, V3 titles, VFX, markers, and subtitles without re-running the entire pipeline.

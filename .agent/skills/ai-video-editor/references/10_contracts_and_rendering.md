@@ -37,3 +37,12 @@ Every stage in the 11-agent pipeline reads upstream contracts from `<project_dir
   - `timeline.edl` (CMX 3600 EDL)
   - `timeline.otio` (OpenTimelineIO)
   - `final_story.srt` & `final_story.ass`
+
+---
+
+## 3. Surgical Timeline Editing (`edit-cut`) & Fast Segment Preview (`render-segment`)
+
+- **Surgical Ripple Editor (`edit-cut`)**:
+  - Supports `update-plaque`, `trim`, `drop`, `swap`, `move`, `set-cold-open`, and `audio-mix` on `timeline.yaml`, automatically ripple-shifting downstream V1 cuts, V2 B-roll cutaways, V3 title cards, VFX items, chapter markers, and subtitles, and re-exporting `.fcpxml`, `.edl`, `.otio`, and `storyboard.md`.
+- **Fast Segment Preview Renderer (`render-segment`)**:
+  - Slices `timeline.yaml` to any `[start_sec, end_sec]` window and renders a `1280x720` SDR preview (`--fast-preview`) or `3840x2160` 10-bit HLG HDR window (`--full-quality`) in ~2 seconds into `<project_dir>/segments/`.

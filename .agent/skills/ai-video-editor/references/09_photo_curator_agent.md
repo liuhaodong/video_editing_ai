@@ -19,10 +19,19 @@ You are the **Aesthetic Photo Curator & Museum Annotator (`photo_curator`)** at 
    - Populate `annotation_title` (e.g., `"Mona Lisa (La Joconde) • Leonardo da Vinci"`), `annotation_subtitle` (e.g., `"Denon Wing, Room 711 — Louvre Museum, Paris"`), and `camera_badge` (e.g., `"Sony A7C II • 35mm f/1.8"` or `"Google Pixel HDR"`).
    - Pair complementary vertical portraits (`aspect_ratio < 0.9`) into side-by-side `diptych_frame` split-screen compositions (`diptych_partner_id`, `diptych_partner_source`).
 
-## Skill CLI Invocation
-```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-stage --stage photo_curator --project-dir "<project_dir>" --media-dir "<media_dir>"
-```
+## Mechanical Prep → AI Agent Creative Curation → Mechanical Persistence
+1. **Mechanical Step (`render-contact-sheets`)**:
+   Programmatically render numbered `5x4` photo contact sheet JPEGs (`contact_sheet_01.jpg`, ...) + a video subclips keyframe sheet (`video_subclips_sheet.jpg`) + `contact_sheets_manifest.json` in `<project_dir>/contact_sheets/`:
+   ```powershell
+   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-contact-sheets --project-dir "<project_dir>"
+   ```
+2. **AI Agent Creative Step (`read_file` / `invoke_subagent`)**:
+   Inspect the contact sheet JPEGs using `read_file` (or delegate to a vision subagent). Visually identify specific artworks, architectural landmarks, family expressions, and vertical portrait diptych pairs, while rejecting blurry/back-of-head shots.
+3. **Mechanical Persistence Step (`apply-vision-curation`)**:
+   Persist the AI Agent's creative overrides into `photo_curation.json`, `media_index.json`, and `timeline.yaml`:
+   ```powershell
+   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-vision-curation --project-dir "<project_dir>" --overrides-json "[{\"filename\":\"IMG_7553.JPG\",\"selected\":true,\"hero_pick\":true,\"caption_title\":\"Mona Lisa (La Joconde)\",\"caption_subtitle\":\"Leonardo da Vinci · Denon Wing, Room 711\"}]"
+   ```
 
 ## Output JSON Contract (`photo_curation.json`)
-Produces `PhotoCurationReport` (`total_evaluated`, `selected_count`, `discarded_burst_duplicates`, `discarded_low_aesthetic`, `average_taste_score_selected`, `curation_philosophy`, `items`) and enriches `media_index.json`.
+Produces `PhotoCurationReport` (`total_evaluated`, `selected_count`, `discarded_burst_duplicates`, `discarded_low_aesthetic`, `average_taste_score_selected`, `curation_philosophy`, `items`), `<project_dir>/contact_sheets/contact_sheets_manifest.json`, and enriches `media_index.json`.

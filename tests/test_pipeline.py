@@ -423,8 +423,10 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
 
 def test_antigravity_skill_cli_and_global_sync(tmp_path: Path, sample_media_dir: Path) -> None:
     """Verify the Antigravity Skill package (SKILL.md, references, scripts/ai_video_studio_skill.py, and global sync)."""
+    import json
     import sys
     from video_editing_ai.cli import sync_skill_to_global
+    from video_editing_ai.models.schema import EditTimeline
 
     installed_skill = sync_skill_to_global(dest_root=tmp_path / "global_skills")
     assert (installed_skill / "SKILL.md").exists()
@@ -497,6 +499,24 @@ def test_antigravity_skill_cli_and_global_sync(tmp_path: Path, sample_media_dir:
     )
     assert (skill_proj / "bgm_selection.json").exists()
     assert (skill_proj / "photo_curation.json").exists()
+    assert (skill_proj / "contact_sheets" / "contact_sheets_manifest.json").exists()
+
+    # 3b. render-contact-sheets & apply-vision-curation (Feedback 1: Mechanical Sheets -> AI Curation -> Mechanical Persistence)
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "render-contact-sheets",
+            "--project-dir",
+            str(skill_proj),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cs_manifest = json.loads((skill_proj / "contact_sheets" / "contact_sheets_manifest.json").read_text(encoding="utf-8"))
+    assert len(cs_manifest["photo_contact_sheets"]) >= 1
+    assert Path(cs_manifest["photo_contact_sheets"][0]["sheet_path"]).exists()
 
     # 4. Modular run-stage (Part 2: Stages 20..60)
     subprocess.run(
@@ -517,6 +537,123 @@ def test_antigravity_skill_cli_and_global_sync(tmp_path: Path, sample_media_dir:
     )
     assert (skill_proj / "timeline.yaml").exists()
     assert (skill_proj / "director_review.json").exists()
+    assert (skill_proj / "candidate_story_digest.json").exists()
+
+    # Verify Feedback 2: Cold-Open Teaser Hook (clip_000_hook at 0.0s before title_opening)
+    tl_before = EditTimeline.from_yaml(skill_proj / "timeline.yaml")
+    assert tl_before.visual_track[0].clip_id == "clip_000_hook"
+    assert tl_before.visual_track[0].timeline_start == 0.0
+    assert tl_before.visual_track[0].act == "Cold Open Teaser"
+
+    # Apply AI Agent vision curation override & verify persistence into photo_curation.json & timeline.yaml
+    first_photo_name = cs_manifest["photo_contact_sheets"][0]["items"][0]["filename"]
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "apply-vision-curation",
+            "--project-dir",
+            str(skill_proj),
+            "--overrides-json",
+            json.dumps(
+                [
+                    {
+                        "filename": first_photo_name,
+                        "selected": True,
+                        "hero_pick": True,
+                        "caption_title": "Winged Victory of Samothrace",
+                        "caption_subtitle": "Daru Staircase · Denon Wing, Louvre",
+                    }
+                ]
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (skill_proj / "vision_curation_applied.json").exists()
+
+    # Apply AI Agent Story Plan override (Feedback 2: apply-story-plan)
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "apply-story-plan",
+            "--project-dir",
+            str(skill_proj),
+            "--overrides-json",
+            json.dumps(
+                {
+                    "cold_open_hook_caption": "Inside the Louvre · A Family Day in Paris",
+                    "cold_open_rationale": "AI Agent selected opening kinetic walk toward the Pyramid.",
+                }
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    pe_doc = json.loads((skill_proj / "paper_edit.json").read_text(encoding="utf-8"))
+    assert pe_doc["cold_open_hook_caption"] == "Inside the Louvre · A Family Day in Paris"
+
+    # 4b. Surgical Timeline Edit (Feedback 3: edit-cut with ripple shifting)
+    old_dur = tl_before.total_duration
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "edit-cut",
+            "--project-dir",
+            str(skill_proj),
+            "--ops-json",
+            json.dumps(
+                [
+                    {
+                        "action": "update-plaque",
+                        "clip_id": "clip_000_hook",
+                        "caption_title": "Cold Open · Louvre Courtyard",
+                        "caption_subtitle": "Paris · 4K HDR Master",
+                    },
+                    {
+                        "action": "trim",
+                        "clip_id": "clip_000_hook",
+                        "delta_sec": -0.5,
+                    },
+                ]
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tl_after = EditTimeline.from_yaml(skill_proj / "timeline.yaml")
+    assert tl_after.visual_track[0].caption_title == "Cold Open · Louvre Courtyard"
+    assert round(tl_after.total_duration, 2) == round(old_dur - 0.5, 2)
+
+    # 4c. Fast Segment Preview Renderer (Feedback 3: render-segment)
+    seg_mp4 = skill_proj / "segments" / "preview_0_4s.mp4"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "render-segment",
+            "--project-dir",
+            str(skill_proj),
+            "--start",
+            "0",
+            "--end",
+            "4",
+            "--fast-preview",
+            "--output-mp4",
+            str(seg_mp4),
+            "--extract-frames",
+            "1,2",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert seg_mp4.exists() and seg_mp4.stat().st_size > 1000
 
     # 5. project reset
     subprocess.run(

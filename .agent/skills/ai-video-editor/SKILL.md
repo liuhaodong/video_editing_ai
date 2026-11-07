@@ -10,6 +10,10 @@ description: >-
 
 This skill orchestrates an **11-Agent AI Film & Vlog Editing Room** that transforms raw folders of multi-camera videos (`.MP4`, `.MOV`) and photos (`.JPG`, `.HEIC`, `.PNG`) into a **4K 10-bit HLG HDR Master Video (`final_story.mp4`)** plus professional NLE timelines (`timeline.fcpxml`, `timeline.edl`, `timeline.otio`).
 
+> **Core Architectural Rule**:
+> - **Anything mechanical** (contact-sheet grid rendering, FFmpeg segment slicing, ripple timecode shifting, LUFS audio ducking, JSON/YAML contract serialization) is executed **programmatically** via [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py).
+> - **Anything requiring creativity, visual intelligence, or storytelling taste** (inspecting contact sheets to identify artworks/landmarks/expressions, choosing the Cold-Open Teaser Hook, pairing diptychs, writing poetic exhibition plaques, and interpreting user revision notes) is **always delegated to the AI Agent** (`read_file` vision inspection or `invoke_subagent`).
+
 All programmatic steps write structured JSON/YAML contracts to disk in `<project_dir>` via the skill's standalone helper CLI:
 - **Helper CLI**: [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py)
 - **Python Interpreter**: `C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe`
@@ -55,34 +59,45 @@ If the user's preferences are open-ended, use `ask_question` to confirm their pr
 C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --bgm-mood auto_match
 ```
 
-### Phase 3: Run the 11-Agent Pipeline (`run-pipeline` or Modular `run-stage`)
-- **Option A — Full 11-Agent Pipeline + 4K 10-bit HLG HDR Render**:
+### Phase 3: Run the 11-Agent Pipeline & Delegate Creative Curation to the AI Agent
+- **Option A — Full 11-Agent Pipeline + Contact Sheet Generation (`run-pipeline`)**:
   ```powershell
   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py run-pipeline --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --render
   ```
-- **Option B — Stage-by-Stage Execution with Custom Antigravity Visual Inspection (`run-stage`)**:
-  Run individual stages when you want to inspect intermediate contracts or visually examine curated photos (`read_file` on `.jpg` frames) to write custom artwork/landmark annotations before assembling the timeline:
-  ```powershell
-  # 1. Run Intake, BGM Scout, Culler, Audio Vibe, and Photo Curator
-  C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py run-stage --stage client_intake,music_supervisor,culler,audio_vibe,photo_curator --project-dir "<project_dir>" --media-dir "<media_dir>"
+- **Option B — Mechanical Contact Sheets → AI Agent Visual Curation → Mechanical Persistence (`render-contact-sheets` & `apply-vision-curation`)**:
+  1. **Mechanical Step**: Generate numbered `5x4` photo contact sheets (`contact_sheet_01.jpg`, ...) + video subclips keyframe sheet (`video_subclips_sheet.jpg`) in `<project_dir>/contact_sheets/`:
+     ```powershell
+     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-contact-sheets --project-dir "<project_dir>"
+     ```
+  2. **AI Agent Creative Step**: Call `read_file` on `<project_dir>/contact_sheets/contact_sheet_01.jpg` (and `video_subclips_sheet.jpg`) to visually inspect every candidate photo & clip. Identify specific artworks, landmarks, facial expressions, and vertical diptych pairs, and reject blurry/accidental shots.
+  3. **Mechanical Persistence Step**: Write your creative decisions into `photo_curation.json`, `media_index.json`, and `timeline.yaml`:
+     ```powershell
+     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-vision-curation --project-dir "<project_dir>" --overrides-json "[{\"filename\":\"IMG_7553.JPG\",\"selected\":true,\"hero_pick\":true,\"caption_title\":\"Mona Lisa (La Joconde)\",\"caption_subtitle\":\"Leonardo da Vinci · Denon Wing, Room 711\"}]"
+     ```
+- **Option C — AI-Directed Cold-Open Teaser Hook (`0.0s–3.8s`) & Story Architecture (`apply-story-plan`)**:
+  1. Read `<project_dir>/candidate_story_digest.json` and `<project_dir>/contact_sheets/video_subclips_sheet.jpg` to choose the most emotionally magnetic 3.0s–3.8s **Cold-Open Teaser Hook (`clip_000_hook`)** before the Main Title Card (`title_opening`).
+  2. Apply your creative story plan overrides and optionally reassemble `timeline.yaml`:
+     ```powershell
+     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-story-plan --project-dir "<project_dir>" --overrides-json "{\"cold_open_subclip_id\":\"sub_002\",\"cold_open_hook_caption\":\"Inside the Louvre · A Family Day in Paris\"}" --reassemble-timeline
+     ```
 
-  # 2. Inspect/enrich <project_dir>/photo_curation.json & media_index.json if needed, then run Story, Editors, VFX, Showrunner & Director:
-  C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py run-stage --stage story_producer,dialogue_editor,montage_editor,vfx_designer,showrunner,production_director --project-dir "<project_dir>" --media-dir "<media_dir>"
-  ```
+### Phase 4: Surgical Timeline Revisions (`edit-cut`) & Fast 2-Second Segment Previews (`render-segment`)
+When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *"drop clip_005"*, *"change the plaque on clip_003"*, *"lower BGM volume under speech"*), **never re-run the entire 11-agent pipeline**:
+1. **AI Agent Creative Step**: Read `<project_dir>/timeline.yaml` and translate the user's natural-language feedback into surgical operation(s) (`update-plaque`, `trim`, `drop`, `swap`, `move`, `set-cold-open`, `audio-mix`).
+2. **Mechanical Ripple Edit (`edit-cut`)**: Execute the surgical edit with automatic downstream ripple-shifting across V1, V2, V3 titles, VFX, markers, and subtitles:
+   ```powershell
+   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py edit-cut --project-dir "<project_dir>" --action trim --clip-id clip_001 --delta-sec -1.0
+   ```
+3. **Mechanical Fast Segment Render (`render-segment`)**: Render only the affected `[start_sec, end_sec]` window in ~2 seconds (`720p` fast preview or `--full-quality` 4K HLG HDR) and inspect frames via `read_file`:
+   ```powershell
+   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-segment --project-dir "<project_dir>" --start 0 --end 10 --fast-preview --extract-frames "1,5,8"
+   ```
 
-### Phase 4: Executive Movie Production Director Audit (`director-audit`)
-Read `<project_dir>/director_review.json` (or run `director-audit`) to verify:
-- `approved_for_master_render == true` and `overall_quality_score >= 9.0` (Grade `A` or `A+`).
-- All 10 stage reviews (`stage_reviews`) recorded the Director's **Observation**, **Thinking**, and **Verdict/Directives**.
-- `bgm_selection.json` selected a high-scoring soundtrack (`mood_match_score >= 8.5`) and rejected any mismatched audio.
-- `photo_curation.json` selected high-taste photos (`average_taste_score_selected >= 8.5`) with 100% `annotation_title` museum plaque coverage.
-
-### Phase 5: 4K 10-bit HLG HDR Rendering & Visual Keyframe Verification (`render-video`)
-If `--no-render` was used during planning or if `timeline.yaml` was edited, render the final 4K HDR MP4 and extract verification frames across the 4 acts:
+### Phase 5: Executive Movie Production Director Audit (`director-audit`) & Full 4K HDR Render (`render-video`)
+Read `<project_dir>/director_review.json` (or run `director-audit`) to verify `approved_for_master_render == true` and `overall_quality_score >= 9.0` (Grade `A` or `A+`), then render the full 4K 10-bit HLG HDR master when ready:
 ```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-video --project-dir "<project_dir>" --extract-frames "6,9,16,30,36,52"
+C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-video --project-dir "<project_dir>" --extract-frames "2,6,16,30,52"
 ```
-Use `read_file` on the extracted JPEGs in `<project_dir>/verification_frames/` to visually confirm uncropped 2.5D parallax frames, diptych split-screens, and lower-left museum exhibition plaques.
 
 ### Phase 6: Interactive 5-Tab Web Studio (`serve`)
 To let the user interactively manage projects, co-refine intake, watch real-time Agent Doing + Director Thinking streams, or download the newly rendered `.mp4` in their browser:

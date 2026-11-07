@@ -3,13 +3,18 @@
 
 Provides token-efficient, file-backed subcommands for every stage of the editing
 workflow:
-  - inspect-library : Scan raw media folder, detect cameras, and compute Director's recommended length
-  - intake-refine   : Co-refine Story Vision & CreativeBrief with Client Intake Agent + Director
-  - run-stage       : Run any individual sub-agent stage(s) with Executive Director stage-gate review
-  - run-pipeline    : Run the complete 11-agent pipeline (Stage 00 -> Stage 60) + 4K HLG HDR render
-  - director-audit  : Run or inspect the Stage 60 Executive Movie Production Director screening
-  - render-video    : Render timeline.yaml to 4K 10-bit HLG HDR MP4 and extract verification keyframes
-  - project         : Manage editing projects (list, create, load, reset)
+  - inspect-library       : Scan raw media folder, detect cameras, and compute Director's recommended length
+  - intake-refine         : Co-refine Story Vision & CreativeBrief with Client Intake Agent + Director
+  - run-stage             : Run any individual sub-agent stage(s) with Executive Director stage-gate review
+  - run-pipeline          : Run the complete 11-agent pipeline (Stage 00 -> Stage 60) + 4K HLG HDR render
+  - render-contact-sheets : Mechanically render numbered photo & video contact sheet JPEGs for AI Agent inspection
+  - apply-vision-curation : Persist AI Agent's creative select/reject, diptych & plaque decisions into contracts
+  - apply-story-plan      : Persist AI Agent's Cold-Open Teaser Hook & chapter plan overrides into paper_edit.json
+  - edit-cut              : Execute ripple-aware surgical timeline revisions (swap, trim, drop, move, update-plaque, set-cold-open, audio-mix)
+  - render-segment        : Render a fast 720p or 4K HLG HDR preview of any [start_sec, end_sec] timeline window
+  - director-audit        : Run or inspect the Stage 60 Executive Movie Production Director screening
+  - render-video          : Render timeline.yaml to 4K 10-bit HLG HDR MP4 and extract verification keyframes
+  - project               : Manage editing projects (list, create, load, reset)
 """
 
 from __future__ import annotations
@@ -36,16 +41,20 @@ from video_editing_ai.agents import (  # noqa: E402
     AgentRegistry,
     PipelineBlackboard,
     ProductionDirectorAgent,
+    apply_story_plan_overrides,
+    apply_vision_curation_overrides,
     compute_director_duration_recommendation,
     generate_intake_questions,
     inspect_media_library,
     refine_intake_interactively,
+    render_curation_contact_sheets,
     run_multi_agent_pipeline,
 )
 from video_editing_ai.exporters.nle_export import export_all_nle_formats  # noqa: E402
 from video_editing_ai.models.schema import CreativeBrief, EditTimeline  # noqa: E402
 from video_editing_ai.planner.story_director import generate_storyboard_markdown  # noqa: E402
-from video_editing_ai.renderer.ffmpeg_composer import render_timeline  # noqa: E402
+from video_editing_ai.planner.timeline_surgeon import apply_surgical_edit  # noqa: E402
+from video_editing_ai.renderer.ffmpeg_composer import render_timeline, render_timeline_segment  # noqa: E402
 from video_editing_ai.web.app import (  # noqa: E402
     _inspect_project_dir,
     _list_workspace_projects,
@@ -373,6 +382,222 @@ def cmd_render_video(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_render_contact_sheets(args: argparse.Namespace) -> int:
+    project_dir = Path(args.project_dir).resolve()
+    manifest = render_curation_contact_sheets(project_dir, max_items=args.max_items)
+    out_path = (
+        Path(args.output).resolve()
+        if args.output
+        else (project_dir / "contact_sheets" / "contact_sheets_manifest.json")
+    )
+    if args.output:
+        _write_json(out_path, manifest)
+    sheets = manifest.get("photo_contact_sheets", [])
+    vid_sheet = manifest.get("video_subclips_sheet")
+    print(
+        f"Success! Rendered {len(sheets)} photo contact sheet(s)"
+        + (f" + video subclips sheet ({vid_sheet})" if vid_sheet else "")
+        + f".\nManifest written to: {out_path}"
+    )
+    return 0
+
+
+def cmd_apply_vision_curation(args: argparse.Namespace) -> int:
+    project_dir = Path(args.project_dir).resolve()
+    raw_input = args.overrides_json
+    try:
+        if Path(raw_input).exists():
+            parsed = json.loads(Path(raw_input).read_text(encoding="utf-8"))
+        else:
+            parsed = json.loads(raw_input)
+    except Exception as exc:
+        print(f"Error parsing --overrides-json: {exc}", file=sys.stderr)
+        return 1
+
+    overrides = parsed.get("overrides", parsed) if isinstance(parsed, dict) else parsed
+    statement = args.statement or (parsed.get("curatorial_statement") if isinstance(parsed, dict) else None)
+    result = apply_vision_curation_overrides(
+        project_dir=project_dir,
+        overrides=overrides,
+        curatorial_statement=statement,
+    )
+    out_path = Path(args.output).resolve() if args.output else (project_dir / "vision_curation_applied.json")
+    _write_json(out_path, result)
+    print(
+        f"Success! Applied {result['applied_overrides']} AI Agent vision curation override(s) "
+        f"({result['selected_photos']} selected, {result['rejected_photos']} rejected, "
+        f"{result['updated_timeline_cuts']} timeline cut(s) updated).\n"
+        f"Report written to: {out_path}"
+    )
+    return 0
+
+
+def cmd_apply_story_plan(args: argparse.Namespace) -> int:
+    project_dir = Path(args.project_dir).resolve()
+    raw_input = args.overrides_json
+    try:
+        if Path(raw_input).exists():
+            overrides = json.loads(Path(raw_input).read_text(encoding="utf-8"))
+        else:
+            overrides = json.loads(raw_input)
+    except Exception as exc:
+        print(f"Error parsing --overrides-json: {exc}", file=sys.stderr)
+        return 1
+
+    result = apply_story_plan_overrides(project_dir=project_dir, overrides=overrides)
+    if args.reassemble_timeline:
+        meta_path = project_dir / "project_meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        media_dir_str = args.media_dir or meta.get("media_dir") or str(project_dir)
+        tl_path = project_dir / "timeline.yaml"
+        if tl_path.exists():
+            tl_path.unlink()
+        bb = PipelineBlackboard(
+            media_dir=Path(media_dir_str).resolve(),
+            project_dir=project_dir,
+            use_antigravity=False,
+        )
+        bb.load_existing_contracts()
+        for role_id in ["aroll_editor", "broll_editor", "montage_editor", "vfx_designer", "sound_mixer", "production_director"]:
+            cls = AgentRegistry.get(role_id)
+            if cls:
+                cls().run(bb)
+        if bb.timeline is not None:
+            bb.timeline.to_yaml(tl_path)
+            export_all_nle_formats(bb.timeline, project_dir)
+        bb.save_snapshot()
+        result["timeline_reassembled"] = True
+
+    out_path = Path(args.output).resolve() if args.output else (project_dir / "story_plan_applied.json")
+    _write_json(out_path, result)
+    print(
+        f"Success! Applied AI Agent Story Plan overrides (Cold-Open Subclip: {result.get('cold_open_subclip_id')}).\n"
+        f"Report written to: {out_path}"
+    )
+    return 0
+
+
+def cmd_edit_cut(args: argparse.Namespace) -> int:
+    project_dir = Path(args.project_dir).resolve()
+    ops: list[dict[str, Any]] = []
+    if args.ops_json:
+        try:
+            raw = args.ops_json
+            parsed = json.loads(Path(raw).read_text(encoding="utf-8")) if Path(raw).exists() else json.loads(raw)
+            ops = parsed if isinstance(parsed, list) else parsed.get("operations", [parsed])
+        except Exception as exc:
+            print(f"Error parsing --ops-json: {exc}", file=sys.stderr)
+            return 1
+    else:
+        if not args.action:
+            print("Error: Specify either --action or --ops-json", file=sys.stderr)
+            return 1
+        op: dict[str, Any] = {"action": args.action}
+        if args.clip_id:
+            op["clip_id"] = args.clip_id
+        if args.new_source:
+            op["new_source"] = args.new_source
+        if args.new_duration is not None:
+            op["new_duration"] = args.new_duration
+        if args.delta_sec is not None:
+            op["delta_sec"] = args.delta_sec
+        if args.new_source_in is not None:
+            op["new_source_in"] = args.new_source_in
+        if args.caption_title is not None:
+            op["caption_title"] = args.caption_title
+        if args.caption_subtitle is not None:
+            op["caption_subtitle"] = args.caption_subtitle
+        if args.camera_badge is not None:
+            op["camera_badge"] = args.camera_badge
+        if args.mode:
+            op["mode"] = args.mode
+        if args.preset:
+            op["preset"] = args.preset
+        if args.before_clip_id:
+            op["before_clip_id"] = args.before_clip_id
+        if args.after_clip_id:
+            op["after_clip_id"] = args.after_clip_id
+        if args.subclip_id:
+            op["subclip_id"] = args.subclip_id
+        if args.bgm_volume is not None:
+            op["bgm_volume"] = args.bgm_volume
+        if args.duck_volume is not None:
+            op["duck_volume"] = args.duck_volume
+        ops.append(op)
+
+    result = apply_surgical_edit(project_dir=project_dir, operations=ops)
+    out_path = Path(args.output).resolve() if args.output else (project_dir / "surgical_edit_report.json")
+    _write_json(out_path, result)
+    print(
+        f"Success! Executed {result['operations_count']} surgical timeline operation(s). "
+        f"Duration: {result['old_duration_sec']}s -> {result['new_duration_sec']}s "
+        f"(V1 cuts: {result['v1_cuts']}).\nReport written to: {out_path}"
+    )
+    return 0
+
+
+def cmd_render_segment(args: argparse.Namespace) -> int:
+    project_dir = Path(args.project_dir).resolve()
+    tl_path = project_dir / "timeline.yaml"
+    if not tl_path.exists():
+        print(f"Error: timeline.yaml not found in {project_dir}", file=sys.stderr)
+        return 1
+
+    timeline = EditTimeline.from_yaml(tl_path)
+    default_name = f"segment_{int(args.start):03d}s_{int(args.end):03d}s.mp4"
+    out_mp4 = Path(args.output_mp4).resolve() if args.output_mp4 else (project_dir / "segments" / default_name)
+    res = render_timeline_segment(
+        timeline=timeline,
+        output_mp4_path=out_mp4,
+        start_sec=args.start,
+        end_sec=args.end,
+        fast_preview=args.fast_preview,
+    )
+
+    extracted_frames: list[str] = []
+    if args.extract_frames and out_mp4.exists():
+        frames_dir = out_mp4.parent / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for raw_ts in args.extract_frames.split(","):
+            raw_ts = raw_ts.strip()
+            if not raw_ts:
+                continue
+            try:
+                ts = float(raw_ts)
+                rel_ts = max(0.0, ts - float(res["start_sec"])) if ts >= float(res["start_sec"]) else ts
+                jpg_path = frames_dir / f"seg_frame_{int(ts):03d}s.jpg"
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-ss",
+                        str(rel_ts),
+                        "-i",
+                        str(out_mp4),
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "2",
+                        str(jpg_path),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if jpg_path.exists():
+                    extracted_frames.append(str(jpg_path))
+            except ValueError:
+                pass
+
+    res["extracted_frames"] = extracted_frames
+    print(
+        f"Success! Rendered segment [{res['start_sec']}s - {res['end_sec']}s] "
+        f"({res['duration_sec']}s, fast_preview={res['fast_preview']}) to: {res['video']}"
+        + (f"\nExtracted segment frames: {', '.join(extracted_frames)}" if extracted_frames else "")
+    )
+    return 0
+
+
 def cmd_project(args: argparse.Namespace) -> int:
     workspace_root = Path(r"C:\Users\hihao\Documents\projects\video_editing_ai")
     action = args.action
@@ -512,6 +737,108 @@ def build_parser() -> argparse.ArgumentParser:
     p_proj.add_argument("--media-dir", default=None, help="Linked media directory (for --action create)")
     p_proj.add_argument("--output", default=None, help="Output JSON file path")
     p_proj.set_defaults(func=cmd_project)
+
+    # 8. render-contact-sheets
+    p_cs = sub.add_parser(
+        "render-contact-sheets",
+        help="Mechanically render numbered photo contact sheet JPEGs & video subclips keyframe sheet for AI Agent inspection",
+    )
+    p_cs.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_cs.add_argument("--max-items", type=int, default=60, help="Max photos to render across contact sheets")
+    p_cs.add_argument("--output", default=None, help="Optional output manifest JSON path")
+    p_cs.set_defaults(func=cmd_render_contact_sheets)
+
+    # 9. apply-vision-curation
+    p_vc = sub.add_parser(
+        "apply-vision-curation",
+        help="Persist AI Agent's creative select/reject, diptych & plaque decisions into photo_curation.json & timeline.yaml",
+    )
+    p_vc.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_vc.add_argument(
+        "--overrides-json",
+        required=True,
+        help="JSON string or file path containing AI Agent's list of photo curation overrides",
+    )
+    p_vc.add_argument("--statement", default=None, help="Optional AI Agent curatorial statement")
+    p_vc.add_argument("--output", default=None, help="Optional output report JSON path")
+    p_vc.set_defaults(func=cmd_apply_vision_curation)
+
+    # 10. apply-story-plan
+    p_sp = sub.add_parser(
+        "apply-story-plan",
+        help="Persist AI Agent's Cold-Open Teaser Hook & chapter plan overrides into paper_edit.json",
+    )
+    p_sp.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_sp.add_argument("--media-dir", default=None, help="Optional media directory when --reassemble-timeline is used")
+    p_sp.add_argument(
+        "--overrides-json",
+        required=True,
+        help="JSON string or file path with cold_open_subclip_id, cold_open_hook_caption, chapters, etc.",
+    )
+    p_sp.add_argument(
+        "--reassemble-timeline",
+        action="store_true",
+        default=False,
+        help="Re-run Picture Editors, VFX, Sound Mixer & Director to rebuild timeline.yaml with new Story Plan",
+    )
+    p_sp.add_argument("--output", default=None, help="Optional output report JSON path")
+    p_sp.set_defaults(func=cmd_apply_story_plan)
+
+    # 11. edit-cut
+    p_ec = sub.add_parser(
+        "edit-cut",
+        help="Execute ripple-aware surgical timeline revisions (swap, trim, drop, move, update-plaque, set-cold-open, audio-mix)",
+    )
+    p_ec.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_ec.add_argument(
+        "--action",
+        choices=["update-plaque", "trim", "drop", "swap", "move", "set-cold-open", "audio-mix"],
+        default=None,
+        help="Surgical operation type (or pass a batch via --ops-json)",
+    )
+    p_ec.add_argument("--clip-id", default=None, help="Target clip_id (e.g. clip_001, clip_000_hook, broll_01)")
+    p_ec.add_argument("--new-source", default=None, help="Replacement media path or filename (for --action swap)")
+    p_ec.add_argument("--new-duration", type=float, default=None, help="New clip duration in seconds (for --action trim)")
+    p_ec.add_argument("--delta-sec", type=float, default=None, help="Relative duration change in seconds (for --action trim)")
+    p_ec.add_argument("--new-source-in", type=float, default=None, help="New source in-point in seconds")
+    p_ec.add_argument("--caption-title", default=None, help="Updated plaque title or hook caption")
+    p_ec.add_argument("--caption-subtitle", default=None, help="Updated plaque subtitle")
+    p_ec.add_argument("--camera-badge", default=None, help="Updated camera badge")
+    p_ec.add_argument("--mode", default=None, help="Updated photo display mode (parallax_gallery | gallery_frame | full_bleed)")
+    p_ec.add_argument("--preset", default=None, help="Updated Ken Burns preset")
+    p_ec.add_argument("--before-clip-id", default=None, help="Move clip before this clip_id (for --action move)")
+    p_ec.add_argument("--after-clip-id", default=None, help="Move clip after this clip_id (for --action move)")
+    p_ec.add_argument("--subclip-id", default=None, help="Subclip ID for --action set-cold-open")
+    p_ec.add_argument("--bgm-volume", type=float, default=None, help="BGM base volume (0.05-1.0) for --action audio-mix")
+    p_ec.add_argument("--duck-volume", type=float, default=None, help="BGM ducking volume (0.02-0.5) for --action audio-mix")
+    p_ec.add_argument("--ops-json", default=None, help="JSON string or file path containing a list of surgical operations")
+    p_ec.add_argument("--output", default=None, help="Optional output report JSON path")
+    p_ec.set_defaults(func=cmd_edit_cut)
+
+    # 12. render-segment
+    p_rs = sub.add_parser(
+        "render-segment",
+        help="Render a fast 720p or 4K HLG HDR preview of any [start_sec, end_sec] timeline window in ~2 seconds",
+    )
+    p_rs.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_rs.add_argument("--start", type=float, required=True, help="Window start time in seconds (e.g. 0.0)")
+    p_rs.add_argument("--end", type=float, required=True, help="Window end time in seconds (e.g. 12.0)")
+    p_rs.add_argument(
+        "--fast-preview",
+        dest="fast_preview",
+        action="store_true",
+        default=True,
+        help="Render fast 1280x720 8-bit SDR preview (default)",
+    )
+    p_rs.add_argument(
+        "--full-quality",
+        dest="fast_preview",
+        action="store_false",
+        help="Render segment at full timeline resolution & 10-bit HLG HDR",
+    )
+    p_rs.add_argument("--output-mp4", default=None, help="Optional output segment MP4 path")
+    p_rs.add_argument("--extract-frames", default=None, help="Optional comma-separated timestamps to extract as JPEGs")
+    p_rs.set_defaults(func=cmd_render_segment)
 
     return parser
 

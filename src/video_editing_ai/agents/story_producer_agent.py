@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from pathlib import Path
+from typing import Any, Optional
 
 from ..models.schema import ChapterPlan, CulledSubClip, PaperEdit
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
@@ -245,21 +247,114 @@ class StoryProducerAgent(BaseEditingAgent):
                 )
             )
 
+        # Mechanically export candidate_story_digest.json so the AI Agent can review transcripts & peaks
+        digest_doc = {
+            "project_title": brief.project_title if brief else "Family_Travel_Story",
+            "user_prompt": prompt_text,
+            "video_candidates": [
+                {
+                    "subclip_id": v.subclip_id,
+                    "filename": v.filename,
+                    "roll_type": v.roll_type,
+                    "duration": v.duration,
+                    "action_peak_tc": v.action_peak_tc,
+                    "emotion_score": v.emotion_score,
+                    "aesthetic_score": v.aesthetic_score,
+                    "spoken_text": v.spoken_text,
+                    "summary": v.summary,
+                }
+                for v in videos
+            ],
+            "photo_candidates": [
+                {
+                    "subclip_id": p.subclip_id,
+                    "filename": p.filename,
+                    "annotation_title": p.annotation_title,
+                    "annotation_subtitle": p.annotation_subtitle,
+                    "aesthetic_score": p.aesthetic_score,
+                }
+                for p in photos
+            ],
+        }
+        (blackboard.project_dir / "candidate_story_digest.json").write_text(
+            json.dumps(digest_doc, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        # Select 3.0s-3.8s Cold-Open Teaser Hook (if enabled in CreativeBrief)
+        want_cold_open = brief.cold_open_hook if brief is not None else True
+        if str(blackboard.interview_answers.get("cold_open_hook", "")).lower() in ("false", "0", "no"):
+            want_cold_open = False
+
+        cold_open_sid: Optional[str] = None
+        cold_open_in: Optional[float] = None
+        cold_open_out: Optional[float] = None
+        cold_open_caption = ""
+        cold_open_rationale = ""
+
+        if want_cold_open and videos:
+            hook_pool = videos[1:] if len(videos) > 1 else videos
+            best_hook = max(
+                hook_pool,
+                key=lambda s: s.emotion_score + s.aesthetic_score + (1.2 if s.spoken_text else 0.0),
+            )
+            cold_open_sid = best_hook.subclip_id
+            hook_dur = min(3.4, max(2.2, round(best_hook.duration * 0.45, 2)))
+            peak_center = best_hook.action_peak_tc if best_hook.action_peak_tc > 0 else (best_hook.in_tc + best_hook.out_tc) * 0.5
+            cold_open_in = round(max(best_hook.in_tc, min(best_hook.out_tc - hook_dur, peak_center - hook_dur * 0.5)), 2)
+            cold_open_out = round(min(best_hook.out_tc, cold_open_in + hook_dur), 2)
+            if best_hook.spoken_text:
+                first_clause = best_hook.spoken_text.split(".")[0].strip()
+                cold_open_caption = f"“{first_clause[:56]}”"
+            else:
+                cold_open_caption = best_hook.annotation_title or best_hook.summary[:52] or "COMING UP IN THIS STORY..."
+            cold_open_rationale = (
+                f"Selected {best_hook.subclip_id} ({best_hook.filename}, emotion {best_hook.emotion_score}/10) "
+                "as a 3.4s Cold-Open Teaser Hook before the Main Title Card drop to maximize viewer retention."
+            )
+
+        if blackboard.use_antigravity:
+            ag_plan = self.ask_antigravity_json(
+                "You are the Story Producer. Review this candidate_story_digest.json and return JSON with optional "
+                "keys: cold_open_subclip_id, cold_open_hook_caption, cold_open_rationale, and chapter_titles "
+                "(list of {title, subtitle}).\n\n" + json.dumps(digest_doc, ensure_ascii=False)[:3500]
+            )
+            if isinstance(ag_plan, dict):
+                if ag_plan.get("cold_open_subclip_id") in {v.subclip_id for v in videos}:
+                    cold_open_sid = str(ag_plan["cold_open_subclip_id"])
+                if ag_plan.get("cold_open_hook_caption"):
+                    cold_open_caption = str(ag_plan["cold_open_hook_caption"])
+                if ag_plan.get("cold_open_rationale"):
+                    cold_open_rationale = str(ag_plan["cold_open_rationale"])
+                ag_titles = ag_plan.get("chapter_titles")
+                if isinstance(ag_titles, list):
+                    for idx_t, t_obj in enumerate(ag_titles[: len(chapters)]):
+                        if isinstance(t_obj, dict):
+                            if t_obj.get("title"):
+                                chapters[idx_t].title = str(t_obj["title"])
+                            if t_obj.get("subtitle"):
+                                chapters[idx_t].subtitle = str(t_obj["subtitle"])
+
         paper_edit = PaperEdit(
             project_title=brief.project_title if brief else "Family_Travel_Story",
             story_arc_summary=(
-                "Four-chapter Day-in-the-Life narrative arc alternating between spoken A-Roll story anchors "
-                "(with Track V2 B-Roll cutaways) and beat-synced Gallery Frame photo montages."
+                "Cold-Open Teaser Hook followed by a four-chapter Day-in-the-Life narrative arc alternating between "
+                "spoken A-Roll story anchors (with Track V2 B-Roll cutaways) and beat-synced Gallery Frame photo montages."
             ),
+            cold_open_subclip_id=cold_open_sid,
+            cold_open_in_tc=cold_open_in,
+            cold_open_out_tc=cold_open_out,
+            cold_open_hook_caption=cold_open_caption,
+            cold_open_rationale=cold_open_rationale,
             chapters=chapters,
         )
 
         out_path = blackboard.project_dir / "paper_edit.json"
         paper_edit.to_json_file(out_path)
         blackboard.paper_edit = paper_edit
+        hook_note = f" + Cold-Open Hook ({cold_open_sid})" if cold_open_sid else ""
         blackboard.emit_activity(
             self.role_id,
-            f"Architected {len(paper_edit.chapters)}-Act Paper Edit with {sum(len(c.selected_subclip_ids) for c in paper_edit.chapters)} sequenced story beats",
+            f"Architected {len(paper_edit.chapters)}-Act Paper Edit{hook_note} with {sum(len(c.selected_subclip_ids) for c in paper_edit.chapters)} sequenced story beats",
             detail="Chapters: " + " | ".join(f"{c.title} ({len(c.selected_subclip_ids)} clips)" for c in paper_edit.chapters),
         )
 
@@ -267,8 +362,9 @@ class StoryProducerAgent(BaseEditingAgent):
             sender_role=self.role_id,
             recipient_role="dialogue_editor",
             message_type="handoff",
-            subject="Paper edit ready with dialogue_with_broll chapters & V2 cutaway anchors",
+            subject="Paper edit ready with Cold-Open Hook, dialogue_with_broll chapters & V2 cutaway anchors",
             payload={
+                "cold_open_subclip_id": cold_open_sid,
                 "chapters": len(paper_edit.chapters),
                 "v2_cutaway_anchors": sum(len(c.broll_anchor_map) for c in paper_edit.chapters),
             },
@@ -278,11 +374,68 @@ class StoryProducerAgent(BaseEditingAgent):
             recipient_role="montage_editor",
             message_type="handoff",
             subject="Paper edit ready for beat-synced B-roll and photo montage assembly",
-            payload={"chapters": len(paper_edit.chapters)},
+            payload={"chapters": len(paper_edit.chapters), "cold_open_subclip_id": cold_open_sid},
         )
 
         return {
             "paper_edit_path": str(out_path),
+            "cold_open_subclip_id": cold_open_sid,
             "chapter_count": len(paper_edit.chapters),
             "v2_cutaway_count": sum(len(c.broll_anchor_map) for c in paper_edit.chapters),
         }
+
+
+def apply_story_plan_overrides(
+    project_dir: str | Path,
+    overrides: dict[str, Any],
+) -> dict[str, Any]:
+    """Mechanically apply AI-directed Cold-Open Hook and chapter edits to paper_edit.json."""
+    proj = Path(project_dir).resolve()
+    pe_path = proj / "paper_edit.json"
+    if not pe_path.exists():
+        raise FileNotFoundError(f"paper_edit.json not found in {proj}")
+
+    pe = PaperEdit.from_json_file(pe_path)
+    if "cold_open_subclip_id" in overrides:
+        pe.cold_open_subclip_id = overrides["cold_open_subclip_id"]
+    if "cold_open_in_tc" in overrides:
+        pe.cold_open_in_tc = float(overrides["cold_open_in_tc"]) if overrides["cold_open_in_tc"] is not None else None
+    if "cold_open_out_tc" in overrides:
+        pe.cold_open_out_tc = float(overrides["cold_open_out_tc"]) if overrides["cold_open_out_tc"] is not None else None
+    if "cold_open_hook_caption" in overrides:
+        pe.cold_open_hook_caption = str(overrides["cold_open_hook_caption"] or "")
+    if "cold_open_rationale" in overrides:
+        pe.cold_open_rationale = str(overrides["cold_open_rationale"] or "")
+    if overrides.get("story_arc_summary"):
+        pe.story_arc_summary = str(overrides["story_arc_summary"])
+
+    chap_overrides = overrides.get("chapters")
+    if isinstance(chap_overrides, list):
+        chap_by_id = {c.chapter_id: c for c in pe.chapters}
+        for idx, cov in enumerate(chap_overrides):
+            if not isinstance(cov, dict):
+                continue
+            cid = cov.get("chapter_id") or (pe.chapters[idx].chapter_id if idx < len(pe.chapters) else None)
+            target_c = chap_by_id.get(cid) if cid else None
+            if target_c is None:
+                continue
+            if cov.get("title"):
+                target_c.title = str(cov["title"])
+            if "subtitle" in cov:
+                target_c.subtitle = str(cov["subtitle"] or "")
+            if cov.get("narrative_goal"):
+                target_c.narrative_goal = str(cov["narrative_goal"])
+            if isinstance(cov.get("selected_subclip_ids"), list):
+                target_c.selected_subclip_ids = [str(x) for x in cov["selected_subclip_ids"]]
+            if isinstance(cov.get("broll_anchor_map"), dict):
+                target_c.broll_anchor_map = {
+                    str(k): [str(v) for v in val] for k, val in cov["broll_anchor_map"].items() if isinstance(val, list)
+                }
+
+    pe.to_json_file(pe_path)
+    return {
+        "paper_edit_path": str(pe_path),
+        "cold_open_subclip_id": pe.cold_open_subclip_id,
+        "cold_open_hook_caption": pe.cold_open_hook_caption,
+        "chapters_count": len(pe.chapters),
+    }

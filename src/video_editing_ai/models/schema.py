@@ -172,6 +172,10 @@ class CreativeBrief(BaseModel):
         default_factory=list,
         description="Optional plugin agent role_ids enabled by the user (e.g., ['vfx_designer'])",
     )
+    cold_open_hook: bool = Field(
+        default=True,
+        description="Start film with a 3-4s Cold-Open Teaser Hook before the Main Opening Title Card",
+    )
     interview_qa: list[dict[str, str]] = Field(default_factory=list)
 
     def to_json_file(self, path: str | Path) -> None:
@@ -404,6 +408,20 @@ class PaperEdit(BaseModel):
 
     project_title: str
     story_arc_summary: str
+    cold_open_subclip_id: Optional[str] = Field(
+        default=None,
+        description="Optional subclip_id selected for the 0.0s-3.8s Cold-Open Teaser Hook before the Title Card",
+    )
+    cold_open_in_tc: Optional[float] = Field(default=None, description="Optional override in_tc for the Cold-Open Hook")
+    cold_open_out_tc: Optional[float] = Field(default=None, description="Optional override out_tc for the Cold-Open Hook")
+    cold_open_hook_caption: str = Field(
+        default="",
+        description="Teaser hook caption or quote displayed during the Cold-Open Hook",
+    )
+    cold_open_rationale: str = Field(
+        default="",
+        description="Story Producer / AI Agent rationale for choosing this Cold-Open Hook",
+    )
     chapters: list[ChapterPlan] = Field(default_factory=list)
 
     def to_json_file(self, path: str | Path) -> None:
@@ -606,6 +624,18 @@ class VisualTrackItem(BaseModel):
     transition_in: TransitionConfig = Field(default_factory=TransitionConfig)
     transition_out: TransitionConfig = Field(default_factory=TransitionConfig)
     narrative_note: str = Field(default="", description="Editorial rationale for why this shot is placed here")
+
+    @property
+    def clip_id(self) -> str:
+        return self.id
+
+    @property
+    def caption_title(self) -> Optional[str]:
+        return self.ken_burns.caption_title if self.ken_burns else None
+
+    @property
+    def caption_subtitle(self) -> Optional[str]:
+        return self.ken_burns.caption_subtitle if self.ken_burns else None
 
 
 class EffectTrackItem(BaseModel):

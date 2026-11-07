@@ -51,7 +51,46 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
     clip_counter = 1
     broll_counter = 1
 
-    # Opening card on Track V3
+    # 1. Optional Cold-Open Teaser Hook (0.0s - ~3.4s) before the Main Opening Title Card
+    hook_sc = subclip_map.get(paper.cold_open_subclip_id) if paper.cold_open_subclip_id else None
+    if hook_sc is not None and hook_sc.media_type == "video":
+        hook_in = paper.cold_open_in_tc if paper.cold_open_in_tc is not None else hook_sc.in_tc
+        hook_out = paper.cold_open_out_tc if paper.cold_open_out_tc is not None else min(hook_sc.out_tc, hook_in + 3.2)
+        hook_dur = round(max(2.0, min(3.8, hook_out - hook_in)), 2)
+        markers.append(
+            TimelineMarker(
+                time_sec=0.0,
+                name="Cold Open Teaser Hook",
+                color="Blue",
+                note=paper.cold_open_rationale or "First-5-seconds high-retention teaser hook",
+            )
+        )
+        visual_track.append(
+            VisualTrackItem(
+                id="clip_000_hook",
+                type="video",
+                source=hook_sc.source_path,
+                track_lane=1,
+                roll_type=hook_sc.roll_type,
+                shot_scale=hook_sc.shot_scale,
+                act="Cold Open Teaser",
+                timeline_start=0.0,
+                duration=hook_dur,
+                source_in=round(hook_in, 2),
+                source_out=round(hook_in + hook_dur, 2),
+                speed=1.0,
+                volume=1.0 if hook_sc.roll_type == "a_roll" else 0.25,
+                j_l_cut_audio_offset=0.0,
+                audio_crossfade_sec=0.25,
+                ken_burns=None,
+                transition_in=TransitionConfig(type="fade_black", duration=0.25),
+                transition_out=TransitionConfig(type="fade_black", duration=0.25),
+                narrative_note=f"[COLD OPEN HOOK] {paper.cold_open_hook_caption or hook_sc.summary}",
+            )
+        )
+        cursor = round(hook_dur, 3)
+
+    # 2. Main Opening Title Card on Track V3 (drops right after Cold-Open Hook if present)
     title_low = paper.project_title.lower()
     if "louvre" in title_low or "paris" in title_low:
         opening_sub = "PARIS · LOUVRE MUSEUM · 4K HDR FAMILY STORY | 巴黎卢浮宫 · 家庭旅行记忆"
@@ -60,14 +99,15 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
     else:
         opening_sub = "4K 10-BIT HLG HDR · FAMILY TRAVEL STORY | 珍藏美好家庭时光"
 
+    opening_start = round(cursor + 0.35, 2)
     title_track.append(
         TitleOverlayItem(
             id="title_opening",
             style="opening_card",
             text=paper.project_title.replace("_", " ").upper(),
             subtitle=opening_sub,
-            timeline_start=0.4,
-            duration=3.8,
+            timeline_start=opening_start,
+            duration=3.6,
             fade_in=0.4,
             fade_out=0.5,
             accent_color="#FFD740",
@@ -84,8 +124,8 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
                 note=chapter.narrative_goal,
             )
         )
-        # Add chapter banner title (after opening card if c_idx == 0)
-        banner_start = round(chapter_start + (4.4 if c_idx == 0 else 0.35), 2)
+        # Add chapter banner title (after opening card with >=1.4s breathing room if c_idx == 0)
+        banner_start = round(chapter_start + (5.4 if c_idx == 0 else 0.35), 2)
         title_track.append(
             TitleOverlayItem(
                 id=f"title_chap_{c_idx + 1:02d}",
@@ -404,6 +444,8 @@ class MontageEditorAgent(BaseEditingAgent):
         snapped_count = 0
         scale_cycle = ["wide", "medium", "closeup"]
         for idx, item in enumerate(timeline.visual_track):
+            if item.id == "clip_000_hook":
+                continue
             if item.roll_type in ("b_roll", "still"):
                 cap = max(max_broll, 7.0) if item.id in v1_with_v2_cutaway else max_broll
                 target_d = min(cap, item.duration)
@@ -456,12 +498,12 @@ class MontageEditorAgent(BaseEditingAgent):
                     item.ken_burns.preset = kb_cycle[(idx + 1) % len(kb_cycle)]  # type: ignore[assignment]
                 prev_preset = item.ken_burns.preset
 
-        # Sort and space out title_track overlays so titles never collide
+        # Sort and space out title_track overlays so titles never collide (>= 1.4s breathing room)
         timeline.title_track.sort(key=lambda t: t.timeline_start)
         for i in range(1, len(timeline.title_track)):
             prev_t = timeline.title_track[i - 1]
             cur_t = timeline.title_track[i]
-            min_start = round(prev_t.timeline_start + prev_t.duration + 1.0, 2)
+            min_start = round(prev_t.timeline_start + prev_t.duration + 1.4, 2)
             if cur_t.timeline_start < min_start and min_start + cur_t.duration < timeline.total_duration:
                 cur_t.timeline_start = min_start
 

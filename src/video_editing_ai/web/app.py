@@ -20,9 +20,12 @@ from pydantic import BaseModel, Field
 from ..agents import (
     AgentRegistry,
     MultiAgentOrchestrator,
+    apply_story_plan_overrides,
+    apply_vision_curation_overrides,
     generate_intake_questions,
     inspect_media_library,
     refine_intake_interactively,
+    render_curation_contact_sheets,
     run_multi_agent_pipeline,
 )
 from ..analyzer.ag_annotator import analyze_media_directory
@@ -30,7 +33,8 @@ from ..analyzer.media_probe import AUDIO_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXT
 from ..exporters.nle_export import export_all_nle_formats
 from ..models.schema import EditTimeline, MediaCatalog
 from ..planner.story_director import generate_edit_plan, generate_storyboard_markdown
-from ..renderer.ffmpeg_composer import render_timeline
+from ..planner.timeline_surgeon import apply_surgical_edit
+from ..renderer.ffmpeg_composer import render_timeline, render_timeline_segment
 
 
 class AnalyzeRequest(BaseModel):
@@ -97,6 +101,30 @@ class ProjectCreateRequest(BaseModel):
 
 class ProjectDirRequest(BaseModel):
     project_dir: str
+
+
+class ContactSheetsRequest(BaseModel):
+    project_dir: str = "workspace_project"
+    max_items: int = 60
+
+
+class VisionOverridesRequest(BaseModel):
+    project_dir: str = "workspace_project"
+    overrides: list[dict[str, Any]] = Field(default_factory=list)
+    curatorial_statement: Optional[str] = None
+
+
+class SurgicalEditRequest(BaseModel):
+    project_dir: str = "workspace_project"
+    operations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SegmentRenderRequest(BaseModel):
+    project_dir: str = "workspace_project"
+    start_sec: float = 0.0
+    end_sec: float = 8.0
+    fast_preview: bool = True
+    output_filename: Optional[str] = None
 
 
 def _now_iso() -> str:
@@ -945,8 +973,12 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
             "bgm_selection": _read_json_if_exists(proj / "bgm_selection.json"),
             "media_index": _read_json_if_exists(proj / "media_index.json"),
             "photo_curation": _read_json_if_exists(proj / "photo_curation.json"),
+            "contact_sheets_manifest": _read_json_if_exists(
+                proj / "contact_sheets" / "contact_sheets_manifest.json"
+            ),
             "beat_grid": _read_json_if_exists(proj / "beat_grid.json"),
             "paper_edit": _read_json_if_exists(proj / "paper_edit.json"),
+            "candidate_story_digest": _read_json_if_exists(proj / "candidate_story_digest.json"),
             "pacing_audit": _read_json_if_exists(proj / "pacing_audit.json"),
             "director_review": _read_json_if_exists(proj / "director_review.json"),
             "vfx_manifest": _read_json_if_exists(proj / "vfx_manifest.json"),
@@ -1134,6 +1166,48 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
             "edl_path": str(nle_outputs["edl"]),
             "otio_path": str(nle_outputs["otio"]),
         }
+
+    @app.post("/api/curation/contact-sheets")
+    def api_render_contact_sheets(req: ContactSheetsRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        return render_curation_contact_sheets(proj, max_items=req.max_items)
+
+    @app.post("/api/curation/vision-overrides")
+    def api_apply_vision_overrides(req: VisionOverridesRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        return apply_vision_curation_overrides(
+            proj,
+            overrides=req.overrides,
+            curatorial_statement=req.curatorial_statement,
+        )
+
+    @app.post("/api/timeline/surgical-edit")
+    def api_surgical_edit(req: SurgicalEditRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        try:
+            return apply_surgical_edit(proj, operations=req.operations)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/render/segment")
+    def api_render_segment(req: SegmentRenderRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        tl_path = proj / "timeline.yaml"
+        if not tl_path.exists():
+            raise HTTPException(status_code=400, detail="timeline.yaml not found.")
+        timeline = EditTimeline.from_yaml(tl_path)
+        fname = (
+            req.output_filename
+            or f"segment_{int(req.start_sec):03d}s_{int(req.end_sec):03d}s.mp4"
+        )
+        out_mp4 = proj / "segments" / fname
+        return render_timeline_segment(
+            timeline=timeline,
+            output_mp4_path=out_mp4,
+            start_sec=req.start_sec,
+            end_sec=req.end_sec,
+            fast_preview=req.fast_preview,
+        )
 
     @app.get("/api/file")
     def api_serve_file(

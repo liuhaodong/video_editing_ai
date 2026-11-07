@@ -556,3 +556,129 @@ def render_timeline(
         progress_callback("Render complete!", 1.0)
 
     return {"video": out_path, "srt": srt_path, "ass": ass_path}
+
+
+def build_segment_subtimeline(
+    timeline: EditTimeline,
+    start_sec: float,
+    end_sec: float,
+    fast_preview: bool = True,
+) -> EditTimeline:
+    """Mechanically slice an EditTimeline to [start_sec, end_sec] for fast surgical preview rendering."""
+    st_bound = max(0.0, float(start_sec))
+    en_bound = min(float(timeline.total_duration), float(end_sec))
+    if en_bound <= st_bound:
+        en_bound = min(float(timeline.total_duration), st_bound + 5.0)
+
+    sub_tl = timeline.model_copy(deep=True)
+    if fast_preview:
+        sub_tl.settings.width = 1280
+        sub_tl.settings.height = 720
+        sub_tl.settings.fps = 24
+        sub_tl.settings.hdr = False
+
+    new_v1 = []
+    for clip in sub_tl.visual_track:
+        c_st = clip.timeline_start
+        c_en = c_st + clip.duration
+        if c_en <= st_bound + 0.02 or c_st >= en_bound - 0.02:
+            continue
+        ov_st = max(st_bound, c_st)
+        ov_en = min(en_bound, c_en)
+        lead_trim = round(ov_st - c_st, 3)
+        new_dur = round(max(0.5, ov_en - ov_st), 2)
+        if clip.type == "video":
+            clip.source_in = round(clip.source_in + lead_trim, 2)
+        clip.duration = new_dur
+        clip.source_out = round(clip.source_in + new_dur, 2)
+        new_v1.append(clip)
+
+    sub_tl.visual_track = new_v1
+    sub_tl.recalculate_sequential_starts()
+    seg_dur = round(sub_tl.total_duration, 2)
+
+    new_broll = []
+    for b in sub_tl.broll_track:
+        b_st = b.timeline_start
+        b_en = b_st + b.duration
+        if b_en <= st_bound + 0.05 or b_st >= en_bound - 0.05:
+            continue
+        ov_st = max(st_bound, b_st)
+        ov_en = min(en_bound, b_en)
+        b.timeline_start = round(max(0.0, ov_st - st_bound), 3)
+        b.duration = round(max(0.5, min(seg_dur - b.timeline_start, ov_en - ov_st)), 2)
+        b.source_out = round(b.source_in + b.duration, 2)
+        new_broll.append(b)
+    sub_tl.broll_track = new_broll
+
+    new_titles = []
+    for t in sub_tl.title_track:
+        t_st = t.timeline_start
+        t_en = t_st + t.duration
+        if t_en <= st_bound + 0.05 or t_st >= en_bound - 0.05:
+            continue
+        ov_st = max(st_bound, t_st)
+        ov_en = min(en_bound, t_en)
+        t.timeline_start = round(max(0.0, ov_st - st_bound), 3)
+        t.duration = round(max(0.5, min(seg_dur - t.timeline_start, ov_en - ov_st)), 2)
+        new_titles.append(t)
+    sub_tl.title_track = new_titles
+
+    kept_ids = {c.id for c in sub_tl.visual_track}
+    new_fx = []
+    for fx in sub_tl.effects_track:
+        if fx.target_clip_id in kept_ids:
+            target_c = next((c for c in sub_tl.visual_track if c.id == fx.target_clip_id), None)
+            if target_c is not None:
+                fx.timeline_start = target_c.timeline_start
+                fx.duration = target_c.duration
+                new_fx.append(fx)
+    sub_tl.effects_track = new_fx
+
+    new_subs = []
+    for s in sub_tl.subtitles.items:
+        if s.end <= st_bound + 0.05 or s.start >= en_bound - 0.05:
+            continue
+        s.start = round(max(0.0, s.start - st_bound), 2)
+        s.end = round(min(seg_dur, s.end - st_bound), 2)
+        if s.end - s.start >= 0.2:
+            new_subs.append(s)
+    sub_tl.subtitles.items = new_subs
+
+    for a in sub_tl.audio_tracks:
+        a.source_in = round(a.source_in + st_bound, 2)
+        a.timeline_start = 0.0
+        a.duration = seg_dur
+        a.fade_in = min(0.4, a.fade_in)
+        a.fade_out = min(0.5, a.fade_out)
+
+    return sub_tl
+
+
+def render_timeline_segment(
+    timeline: EditTimeline,
+    output_mp4: Optional[str | Path] = None,
+    start_sec: float = 0.0,
+    end_sec: float = 8.0,
+    fast_preview: bool = True,
+    progress_callback: Optional[Callable[[str, float], None]] = None,
+    output_mp4_path: Optional[str | Path] = None,
+) -> dict[str, Any]:
+    """Render a [start_sec, end_sec] time slice of an EditTimeline for rapid surgical previewing."""
+    target_mp4 = Path(output_mp4_path or output_mp4 or "segment_preview.mp4")
+    sub_tl = build_segment_subtimeline(
+        timeline=timeline,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        fast_preview=fast_preview,
+    )
+    out = render_timeline(sub_tl, target_mp4, progress_callback=progress_callback)
+    return {
+        "video": str(out["video"]),
+        "srt": str(out["srt"]),
+        "ass": str(out["ass"]),
+        "start_sec": round(float(start_sec), 2),
+        "end_sec": round(float(end_sec), 2),
+        "duration_sec": round(sub_tl.total_duration, 2),
+        "fast_preview": fast_preview,
+    }
