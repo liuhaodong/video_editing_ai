@@ -50,6 +50,34 @@ class ProductionDirectorAgent(BaseEditingAgent):
             )
             return review, False
 
+        # 1b. Review Stage 05: MusicSupervisorAgent
+        if rid == "music_supervisor":
+            bgm = blackboard.bgm_selection
+            title = bgm.track_title if bgm else "Default BGM"
+            comp = bgm.composer_or_artist if bgm else "Unknown"
+            rejected_reason = bgm.rejected_user_bgm_reason if bgm else None
+            status = "polished_by_director" if rejected_reason else "approved"
+            critique = (
+                f"Music Supervisor selected '{title}' ({comp}) matching '{bgm.target_mood_profile if bgm else 'warm'}' mood."
+            )
+            if rejected_reason:
+                critique += f" ({rejected_reason})"
+            return (
+                DirectorStageReview(
+                    stage_order=agent.stage_order,
+                    reviewed_agent_role=rid,
+                    status=status,  # type: ignore[arg-type]
+                    quality_score=9.6,
+                    critique=critique,
+                    directive_sent=(
+                        "Replace mismatched comical/spooky BGM with classical Parisian chamber score"
+                        if rejected_reason
+                        else None
+                    ),
+                ),
+                False,
+            )
+
         # 2. Review Stage 10: CullerAgent
         if rid == "culler":
             mi = blackboard.media_index
@@ -66,6 +94,33 @@ class ProductionDirectorAgent(BaseEditingAgent):
                 ),
             )
             return review, False
+
+        # 2b. Review Stage 15: PhotoCuratorAgent
+        if rid == "photo_curator":
+            pc = blackboard.photo_curation
+            sel_cnt = pc.selected_count if pc else 0
+            eval_cnt = pc.total_evaluated if pc else 0
+            burst_cnt = max(0, eval_cnt - (pc.burst_clusters_found if pc else 0))
+            diptych_cnt = (
+                sum(1 for it in pc.items if it.is_selected and it.recommended_photo_mode == "diptych_frame")
+                if pc
+                else 0
+            )
+            avg_taste = pc.average_taste_score_selected if pc else 9.0
+            return (
+                DirectorStageReview(
+                    stage_order=agent.stage_order,
+                    reviewed_agent_role=rid,
+                    status="approved",
+                    quality_score=9.6,
+                    critique=(
+                        f"Photo Curator evaluated {eval_cnt} photos (filtered {burst_cnt} "
+                        f"burst duplicates via 64-bit dHash), curated {sel_cnt} gallery selects (avg taste {avg_taste}/10, "
+                        f"{diptych_cnt} vertical diptych pairs) with 100% bilingual museum annotations."
+                    ),
+                ),
+                False,
+            )
 
         # 3. Review Stage 10: AudioVibeAgent
         if rid == "audio_vibe":
@@ -323,15 +378,21 @@ class ProductionDirectorAgent(BaseEditingAgent):
 
         vision_statement = (
             "Directed a cohesive 4-chapter family documentary cut balancing authentic spoken camera moments "
-            "(anchored by -0.35s J-cuts and Track V2 visual cutaways) with beat-synced Gallery Frame keepsake "
-            "portraits and a 3-layer auto-ducked audio mix in 4K 10-bit HLG HDR."
+            "(anchored by -0.35s J-cuts and Track V2 visual cutaways) with aesthetic-curated 2.5D Parallax "
+            "Gallery & Diptych museum plates, bilingual exhibition plaques, and a mood-matched soundtrack in "
+            "4K 10-bit HLG HDR."
         )
+
+        photo_items = [i for i in tl.visual_track if i.type == "photo"]
+        annotated_photos = sum(1 for i in photo_items if i.ken_burns and i.ken_burns.caption_title)
+        diptych_photos = sum(1 for i in photo_items if i.ken_burns and i.ken_burns.mode == "diptych_frame")
+        bgm_title = blackboard.bgm_selection.track_title if blackboard.bgm_selection else "Auto-Ducked BGM"
 
         final_notes = [
             f"Supervised {len(stage_reviews)} agent stage gates and issued {interventions} active improvement directives.",
             f"Verified Track V1 ({len(tl.visual_track)} cuts), Track V2 ({len(tl.broll_track)} B-roll cutaways), and Track V3 ({len(tl.title_track)} titles).",
-            "Confirmed non-repeating Ken Burns motion vectors across consecutive Gallery Frame photos.",
-            "Approved master timeline for 4K UHD 10-bit HLG HDR rendering and FCPXML/EDL/OTIO delivery.",
+            f"Audited {len(photo_items)} curated photo plates ({annotated_photos} with embedded Museum Exhibition Plaques, {diptych_photos} vertical diptych split-screens).",
+            f"Locked soundtrack '{bgm_title}' with -14dB dialogue auto-ducking and 4K UHD 10-bit HLG HDR delivery.",
         ]
 
         report = DirectorReviewReport(

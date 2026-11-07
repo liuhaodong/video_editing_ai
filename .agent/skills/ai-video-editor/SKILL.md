@@ -12,8 +12,10 @@ Use this skill whenever the user wants to analyze a folder of videos and photos,
 Each agent role has its own reference specification in `references/` (used by both Antigravity's `define_subagent` / `invoke_subagent` tools and the Python `BaseEditingAgent` classes):
 
 - **Stage 0 — Client Intake & Brief Producer (`client_intake`)**: [references/00_client_intake_agent.md](references/00_client_intake_agent.md) → outputs `creative_brief.json`
+- **Stage 05 — Music Supervisor & BGM Scout (`music_supervisor`)**: [references/08_music_supervisor_agent.md](references/08_music_supervisor_agent.md) → outputs `bgm_selection.json`
 - **Stage 10 — Wrangler & Culler (`culler`)**: [references/01_culler_agent.md](references/01_culler_agent.md) → outputs `media_index.json`
 - **Stage 10 — Sound & Vibe Designer (`audio_vibe`)**: [references/04_audio_vibe_agent.md](references/04_audio_vibe_agent.md) → outputs `beat_grid.json`
+- **Stage 15 — Aesthetic Photo Curator & Museum Annotator (`photo_curator`)**: [references/09_photo_curator_agent.md](references/09_photo_curator_agent.md) → outputs `photo_curation.json` & enriches `media_index.json`
 - **Stage 20 — Story Producer (`story_producer`)**: [references/02_story_producer_agent.md](references/02_story_producer_agent.md) → outputs `paper_edit.json`
 - **Stage 30 — Dual Picture Editors (`dialogue_editor` + `montage_editor`)**: [references/03_picture_editors.md](references/03_picture_editors.md) → outputs draft multi-track `timeline.yaml`
 - **Stage 40 — Pluggable Post / VFX / Color Slot (`vfx_designer`)**: [references/06_vfx_agent.md](references/06_vfx_agent.md) → enriches `timeline.yaml` (`effects_track`) & outputs `vfx_manifest.json`

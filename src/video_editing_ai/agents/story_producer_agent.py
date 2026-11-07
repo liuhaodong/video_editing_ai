@@ -203,7 +203,11 @@ class StoryProducerAgent(BaseEditingAgent):
                 )
                 if eligible_for_cutaway:
                     cutaway_candidate = next(
-                        (p for p in c_photos if p.subclip_id not in used_as_v2_cutaway),
+                        (
+                            p
+                            for p in reversed(c_photos)
+                            if p.subclip_id not in used_as_v2_cutaway and not p.secondary_source_path
+                        ),
                         None,
                     )
                     if cutaway_candidate is not None:

@@ -13,6 +13,7 @@ from typing import Any, Optional, Type
 from ..models.schema import (
     AgentCoordinationMessage,
     BeatGrid,
+    BGMSelectionReport,
     CreativeBrief,
     DirectorReviewReport,
     EditTimeline,
@@ -20,6 +21,7 @@ from ..models.schema import (
     MediaIndex,
     PacingAuditReport,
     PaperEdit,
+    PhotoCurationReport,
 )
 
 
@@ -73,7 +75,9 @@ class PipelineBlackboard:
         # Standard typed contracts
         self.catalog: Optional[MediaCatalog] = None
         self.creative_brief: Optional[CreativeBrief] = None
+        self.bgm_selection: Optional[BGMSelectionReport] = None
         self.media_index: Optional[MediaIndex] = None
+        self.photo_curation: Optional[PhotoCurationReport] = None
         self.beat_grid: Optional[BeatGrid] = None
         self.paper_edit: Optional[PaperEdit] = None
         self.timeline: Optional[EditTimeline] = None

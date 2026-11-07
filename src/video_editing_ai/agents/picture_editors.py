@@ -162,12 +162,20 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
                             audio_crossfade_sec=0.33,
                             ken_burns=(
                                 KenBurnsConfig(
-                                    mode=photo_mode,  # type: ignore[arg-type]
+                                    mode=(
+                                        "diptych_frame"
+                                        if cut_sc.secondary_source_path
+                                        else ("parallax_gallery" if photo_mode in ("gallery_frame", "parallax_gallery") else photo_mode)
+                                    ),  # type: ignore[arg-type]
                                     preset=preset,  # type: ignore[arg-type]
                                     start_zoom=1.0,
                                     end_zoom=1.08,
                                     start_center=cut_sc.focal_point,
                                     end_center=(cut_sc.focal_point[0], max(0.2, cut_sc.focal_point[1] - 0.03)),
+                                    secondary_source=cut_sc.secondary_source_path,
+                                    caption_title=cut_sc.annotation_title,
+                                    caption_subtitle=cut_sc.annotation_subtitle,
+                                    camera_badge=cut_sc.camera_badge,
                                 )
                                 if cut_sc.media_type == "photo"
                                 else None
@@ -199,16 +207,28 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
                     j_l_cut_audio_offset=0.0,
                     audio_crossfade_sec=0.0,
                     ken_burns=KenBurnsConfig(
-                        mode=photo_mode,  # type: ignore[arg-type]
+                        mode=(
+                            "diptych_frame"
+                            if sc.secondary_source_path
+                            else ("parallax_gallery" if photo_mode in ("gallery_frame", "parallax_gallery") else photo_mode)
+                        ),  # type: ignore[arg-type]
                         preset=preset,  # type: ignore[arg-type]
                         start_zoom=1.0,
                         end_zoom=1.09,
                         start_center=sc.focal_point,
                         end_center=(sc.focal_point[0], max(0.2, sc.focal_point[1] - 0.03)),
+                        secondary_source=sc.secondary_source_path,
+                        caption_title=sc.annotation_title,
+                        caption_subtitle=sc.annotation_subtitle,
+                        camera_badge=sc.camera_badge,
                     ),
                     transition_in=TransitionConfig(type="fade_black", duration=0.30),
                     transition_out=TransitionConfig(type="fade_black", duration=0.30),
-                    narrative_note=f"[STILL] {sc.summary}",
+                    narrative_note=(
+                        f"[STILL · {sc.annotation_title}] {sc.annotation_subtitle}"
+                        if sc.annotation_title
+                        else f"[STILL] {sc.summary}"
+                    ),
                 )
                 visual_track.append(p_item)
                 cursor += p_item.duration

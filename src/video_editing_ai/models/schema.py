@@ -161,7 +161,9 @@ class CreativeBrief(BaseModel):
         "music_mostly",
     ] = Field(default="keep_full_sentences_with_broll_cutaways")
     bilingual_overlay_captions: bool = Field(default=True)
-    photo_mode: Literal["gallery_frame", "full_bleed"] = Field(default="gallery_frame")
+    photo_mode: Literal["gallery_frame", "parallax_gallery", "diptych_frame", "full_bleed"] = Field(
+        default="parallax_gallery"
+    )
     max_broll_duration_sec: float = Field(default=4.5, ge=1.5, le=12.0)
     max_consecutive_same_subject: int = Field(default=3, ge=1, le=10)
     nat_sound_db: float = Field(default=-20.0, description="Ambient B-roll natural sound level in dB (-18 to -24)")
@@ -216,9 +218,105 @@ class CulledSubClip(BaseModel):
     action_peak_tc: float = Field(default=1.5, ge=0.0)
     aesthetic_score: float = Field(default=8.0, ge=1.0, le=10.0)
     brief_match_boost: float = Field(default=0.0, description="Score boost from matching CreativeBrief must-haves")
+    annotation_title: Optional[str] = Field(default=None, description="Curated subject/artwork/landmark title")
+    annotation_subtitle: Optional[str] = Field(default=None, description="Bilingual curatorial subtitle")
+    camera_badge: Optional[str] = Field(default=None, description="Camera & location EXIF badge")
+    subject_category: Optional[str] = Field(default=None, description="Curatorial subject category")
+    secondary_source_path: Optional[str] = Field(
+        default=None, description="Optional paired vertical photo path for diptych_frame layout"
+    )
     is_discarded: bool = Field(default=False)
     discard_reason: Optional[str] = Field(default=None)
     words: list[WordTimestamp] = Field(default_factory=list)
+
+
+class BGMCandidate(BaseModel):
+    """A candidate royalty-free / Creative Commons BGM track evaluated by MusicSupervisorAgent."""
+
+    track_id: str
+    title: str
+    composer_or_artist: str
+    genre_mood: str
+    license_info: str = "CC0 / Public Domain / Royalty-Free"
+    source_url: str = ""
+    local_path: str = ""
+    tempo_bpm_estimate: float = 96.0
+    mood_match_score: float = Field(default=9.0, ge=0.0, le=10.0)
+    notes: str = ""
+
+
+class BGMSelectionReport(BaseModel):
+    """Stage 05 Output (bgm_selection.json): Music Supervisor's BGM evaluation & download report."""
+
+    project_title: str
+    target_mood_profile: str
+    selected_track_path: str
+    track_title: str
+    composer_or_artist: str
+    license_info: str = "CC0 / Public Domain"
+    source_url: str = ""
+    mood_match_score: float = Field(default=9.5, ge=0.0, le=10.0)
+    selection_rationale: str = ""
+    rejected_user_bgm_reason: Optional[str] = None
+    candidates: list[BGMCandidate] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "BGMSelectionReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class CuratedPhotoItem(BaseModel):
+    """A single photo evaluated and annotated by Stage 15 PhotoCuratorAgent."""
+
+    subclip_id: str
+    filename: str
+    source_path: str
+    orientation: Literal["landscape", "portrait", "square"] = "landscape"
+    perceptual_hash: str = ""
+    cluster_id: int = 0
+    saliency_score: float = Field(default=8.0, ge=1.0, le=10.0)
+    composition_score: float = Field(default=8.0, ge=1.0, le=10.0)
+    portrait_warmth_score: float = Field(default=7.5, ge=1.0, le=10.0)
+    art_architecture_score: float = Field(default=8.0, ge=1.0, le=10.0)
+    overall_taste_score: float = Field(default=8.2, ge=1.0, le=10.0)
+    is_selected: bool = False
+    rejection_reason: Optional[str] = None
+    subject_category: str = "landmark_architecture"
+    annotation_title: str = ""
+    annotation_subtitle: str = ""
+    camera_badge: str = ""
+    recommended_photo_mode: Literal["parallax_gallery", "diptych_frame", "gallery_frame", "full_bleed"] = (
+        "parallax_gallery"
+    )
+    paired_with_subclip_id: Optional[str] = None
+    curation_rationale: str = ""
+
+
+class PhotoCurationReport(BaseModel):
+    """Stage 15 Output (photo_curation.json): Aesthetic Photo Curator's taste ranking & annotations."""
+
+    project_title: str
+    total_evaluated: int = 0
+    burst_clusters_found: int = 0
+    selected_count: int = 0
+    rejected_count: int = 0
+    average_taste_score_selected: float = 9.0
+    curatorial_statement: str = ""
+    items: list[CuratedPhotoItem] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "PhotoCurationReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 class MediaIndex(BaseModel):
@@ -427,13 +525,14 @@ class TimelineSettings(BaseModel):
 
 
 class KenBurnsConfig(BaseModel):
-    """Configuration for photo animation and framing (Ken Burns & Gallery Frame)."""
+    """Configuration for photo animation and framing (2.5D Parallax, Diptych, Gallery Frame, & Museum Plaques)."""
 
-    mode: Literal["gallery_frame", "full_bleed"] = Field(
-        default="gallery_frame",
+    mode: Literal["gallery_frame", "parallax_gallery", "diptych_frame", "full_bleed"] = Field(
+        default="parallax_gallery",
         description=(
-            "'gallery_frame' renders an uncropped photo with a crisp white border & drop shadow over a "
-            "Gaussian-blurred ambient background plus subtle floating motion; 'full_bleed' crops to fill the canvas."
+            "'parallax_gallery' renders a 2.5D multi-plane counter-panning backdrop + double museum matte frame + "
+            "embedded exhibition plaque; 'diptych_frame' pairs two vertical portraits side-by-side; "
+            "'gallery_frame' renders a classic gallery frame; 'full_bleed' crops to fill the canvas."
         ),
     )
     preset: Literal[
@@ -451,6 +550,18 @@ class KenBurnsConfig(BaseModel):
     start_center: tuple[float, float] = Field(default=(0.5, 0.5))
     end_center: tuple[float, float] = Field(default=(0.5, 0.48))
     border_px: int = Field(default=16, description="White gallery frame border width in pixels (at 1080p scale)")
+    secondary_source: Optional[str] = Field(
+        default=None, description="Optional second photo file path for diptych_frame side-by-side layout"
+    )
+    caption_title: Optional[str] = Field(
+        default=None, description="Curated subject/artwork/landmark title displayed on the museum plaque"
+    )
+    caption_subtitle: Optional[str] = Field(
+        default=None, description="Bilingual curatorial subtitle displayed on the museum plaque"
+    )
+    camera_badge: Optional[str] = Field(
+        default=None, description="Camera & location EXIF badge (e.g. 'SONY A7C II · LOUVRE PARIS')"
+    )
 
 
 class TransitionConfig(BaseModel):

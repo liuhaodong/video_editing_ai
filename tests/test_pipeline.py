@@ -172,7 +172,9 @@ def test_modular_agent_registry_and_custom_plugin(tmp_path: Path, sample_media_d
     role_ids = [cls.role_id for cls in AgentRegistry.list_all()]
     for expected in (
         "client_intake",
+        "music_supervisor",
         "culler",
+        "photo_curator",
         "audio_vibe",
         "story_producer",
         "dialogue_editor",
@@ -265,7 +267,9 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
 
     for contract_name in (
         "creative_brief.json",
+        "bgm_selection.json",
         "media_index.json",
+        "photo_curation.json",
         "beat_grid.json",
         "paper_edit.json",
         "vfx_manifest.json",
@@ -279,7 +283,9 @@ def test_six_agent_coordinated_vlog_pipeline(tmp_path: Path, sample_media_dir: P
         assert (proj_dir / contract_name).exists(), f"Missing {contract_name}"
 
     assert bb.creative_brief is not None
+    assert bb.bgm_selection is not None
     assert bb.media_index is not None
+    assert bb.photo_curation is not None
     assert bb.beat_grid is not None
     assert bb.paper_edit is not None
     assert bb.pacing_audit is not None

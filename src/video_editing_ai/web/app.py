@@ -145,7 +145,9 @@ def create_app(default_project_dir: str | Path = "workspace_project") -> FastAPI
 
         agent_contracts = {
             "creative_brief": _read_json_if_exists(proj / "creative_brief.json"),
+            "bgm_selection": _read_json_if_exists(proj / "bgm_selection.json"),
             "media_index": _read_json_if_exists(proj / "media_index.json"),
+            "photo_curation": _read_json_if_exists(proj / "photo_curation.json"),
             "beat_grid": _read_json_if_exists(proj / "beat_grid.json"),
             "paper_edit": _read_json_if_exists(proj / "paper_edit.json"),
             "pacing_audit": _read_json_if_exists(proj / "pacing_audit.json"),
