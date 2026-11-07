@@ -88,3 +88,32 @@ Then open `http://127.0.0.1:8000` in your browser to:
 - Answer the **Stage 0 Client Intake Interview** and toggle pluggable sub-agent roles (`vfx_designer`, etc.).
 - Inspect `creative_brief.json`, `media_index.json`, `beat_grid.json`, `paper_edit.json`, `pacing_audit.json`, `vfx_manifest.json`, and the `blackboard.json` inter-agent message bus.
 - Edit `timeline.yaml` and preview **Track V1 Storyline**, **Track V2 B-Roll Cutaways**, **Track V3 Titles**, **Stage-40 VFX**, and the **4K 10-bit HLG HDR** rendered video.
+
+---
+
+## Cross-Platform & 2019 MacBook Pro (Intel + AMD Radeon Pro) Support
+
+`video_editing_ai` runs natively across **macOS** (including **2019 16-inch / 15-inch Intel MacBook Pro with AMD Radeon Pro 5300M / 5500M / 5600M / Vega GPUs** and Apple Silicon) and **Windows** (NVIDIA RTX, AMD Radeon / Boot Camp, and Intel QuickSync):
+
+| Platform / Hardware | 10-bit 4K HLG HDR Encoder | 8-bit SDR Encoder | Color Space / Typography |
+| :--- | :--- | :--- | :--- |
+| **macOS (2019 MacBook Pro AMD Radeon Pro + Apple T2 / Apple Silicon)** | `hevc_videotoolbox` (`-profile:v main10 -pix_fmt p010le -q:v 68`) | `h264_videotoolbox` | Auto-detects `zscale` vs. native `setparams` BT.2020 HLG fallback; uses macOS system fonts (`Georgia`, `Helvetica Neue`, `Avenir Next`, `PingFang SC`) and native Finder `osascript` folder picker |
+| **Windows (NVIDIA GeForce RTX)** | `hevc_nvenc` (`p4`, `main10`, `p010le`) | `h264_nvenc` | Hardware-accelerated NVENC with 5-worker parallel segment rendering |
+| **Windows Boot Camp on 2019 MacBook Pro (AMD Radeon Pro / Intel iGPU)** | `hevc_amf` (`high_tier`, `p010le`) / `hevc_qsv` | `h264_amf` / `h264_qsv` | Hardware-accelerated AMD AMF / Intel QuickSync encoding |
+| **Linux / CPU Fallback** | `libx265` (`yuv420p10le`) | `libx264` (`yuv420p`) | Multi-threaded software fallback |
+
+### Setup on 2019 MacBook Pro (macOS)
+
+```bash
+# 1. Install FFmpeg and HEIF support via Homebrew
+brew install ffmpeg libheif python@3.12
+
+# 2. Create a virtual environment and install video-editing-ai
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+
+# 3. Launch the Web Studio or run the CLI
+ai-editor serve --port 8000
+```

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -649,6 +651,22 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
     @app.post("/api/fs/pick-folder")
     def api_pick_folder_native(initial_dir: Optional[str] = None) -> dict:
         """Open a native OS folder selection dialog on the local machine."""
+        if sys.platform == "darwin":
+            try:
+                proc = subprocess.run(
+                    ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select Media Library Folder")'],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                if proc.returncode != 0 or not proc.stdout.strip():
+                    return {"cancelled": True, "selected_path": None}
+                chosen = proc.stdout.strip()
+                info = inspect_media_library(chosen, workspace_root=workspace_root)
+                return {"cancelled": False, "selected_path": info["media_dir"], "library": info}
+            except Exception:
+                pass
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -672,9 +690,12 @@ def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> F
 
     @app.get("/api/intake-questions")
     def api_intake_questions(
-        media_dir: str = Query(default="C:/Users/hihao/Documents/projects/clips/louvre"),
+        media_dir: str = Query(default=""),
         prompt: str = Query(default=""),
     ) -> dict:
+        if not media_dir or not Path(media_dir).exists():
+            libs = _discover_sample_libraries()
+            media_dir = libs[0]["path"] if libs else str(workspace_root)
         lib_info = inspect_media_library(media_dir, workspace_root=workspace_root)
         questions = generate_intake_questions(media_dir=media_dir, initial_prompt=prompt)
         initial_refinement = refine_intake_interactively(

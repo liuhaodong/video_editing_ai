@@ -38,15 +38,36 @@ def _ease_out_cubic(t: float) -> float:
 def _load_editorial_font(size: int, bold: bool = True, serif: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     if serif:
         candidates = [
+            # Windows
             "C:/Windows/Fonts/georgiab.ttf" if bold else "C:/Windows/Fonts/georgia.ttf",
+            # macOS (2019 MacBook Pro & Apple Silicon)
+            "/System/Library/Fonts/Supplemental/Georgia Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Georgia.ttf",
+            "/Library/Fonts/Georgia Bold.ttf" if bold else "/Library/Fonts/Georgia.ttf",
+            "/System/Library/Fonts/NewYork.ttf",
+            "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+            # Linux
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            # Cross-platform fallbacks
             "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
+            "/System/Library/Fonts/HelveticaNeue.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
         ]
     else:
         candidates = [
+            # Windows
             "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+            # macOS (2019 MacBook Pro & Apple Silicon)
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/HelveticaNeue.ttc",
+            "/System/Library/Fonts/Avenir Next.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+            # Linux
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
     for path in candidates:
         if os.path.exists(path):
@@ -344,33 +365,257 @@ def _resolve_kb_endpoints(
     return (kb.start_zoom, kb.end_zoom, kb.start_center, kb.end_center)
 
 
-_NVENC_AVAILABLE: Optional[bool] = None
+_ENCODER_CACHE: dict[bool, str] = {}
+_FILTER_CACHE: dict[str, bool] = {}
+
+
+def has_ffmpeg_filter(filter_name: str) -> bool:
+    """Check once whether a specific FFmpeg filter (e.g. 'zscale') is compiled into the local ffmpeg binary."""
+    if filter_name not in _FILTER_CACHE:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _FILTER_CACHE[filter_name] = any(
+            f" {filter_name} " in line for line in (proc.stdout or "").splitlines()
+        )
+    return _FILTER_CACHE[filter_name]
+
+
+def _probe_hw_encoder(encoder: str, pix_fmt: str = "yuv420p", extra_args: Optional[list[str]] = None) -> bool:
+    """Test whether a specific hardware encoder is functional on the current machine/GPU."""
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "nullsrc=s=256x256:d=0.1",
+        "-c:v",
+        encoder,
+        "-pix_fmt",
+        pix_fmt,
+        *(extra_args or []),
+        "-f",
+        "null",
+        "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, check=False)
+    return proc.returncode == 0
+
+
+def detect_best_video_encoder(hdr: bool = True) -> str:
+    """
+    Auto-detect the fastest working hardware video encoder across platforms:
+    - macOS (2019 MacBook Pro AMD Radeon Pro + Apple T2 / Apple Silicon): hevc_videotoolbox / h264_videotoolbox
+    - Windows/Linux NVIDIA GPU: hevc_nvenc / h264_nvenc
+    - Windows/BootCamp AMD Radeon GPU: hevc_amf / h264_amf
+    - Intel QuickSync iGPU: hevc_qsv / h264_qsv
+    - Software fallback: libx265 / libx264
+    """
+    if hdr in _ENCODER_CACHE:
+        return _ENCODER_CACHE[hdr]
+
+    if hdr:
+        candidates = [
+            ("hevc_videotoolbox", "p010le", ["-profile:v", "main10", "-allow_sw", "1"]),
+            ("hevc_nvenc", "p010le", []),
+            ("hevc_amf", "p010le", []),
+            ("hevc_qsv", "p010le", []),
+        ]
+        fallback = "libx265"
+    else:
+        candidates = [
+            ("h264_videotoolbox", "yuv420p", ["-allow_sw", "1"]),
+            ("h264_nvenc", "yuv420p", []),
+            ("h264_amf", "yuv420p", []),
+            ("h264_qsv", "yuv420p", []),
+        ]
+        fallback = "libx264"
+
+    for enc_name, p_fmt, ex in candidates:
+        if _probe_hw_encoder(enc_name, pix_fmt=p_fmt, extra_args=ex):
+            _ENCODER_CACHE[hdr] = enc_name
+            return enc_name
+
+    _ENCODER_CACHE[hdr] = fallback
+    return fallback
 
 
 def has_hevc_nvenc() -> bool:
-    """Check once whether hardware-accelerated 10-bit hevc_nvenc is functional on this system."""
-    global _NVENC_AVAILABLE
-    if _NVENC_AVAILABLE is None:
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "nullsrc=s=256x256:d=0.1",
-            "-c:v",
-            "hevc_nvenc",
-            "-pix_fmt",
-            "p010le",
-            "-f",
-            "null",
-            "-",
+    """Backward-compatible helper returning True when hevc_nvenc is the active 10-bit encoder."""
+    return detect_best_video_encoder(hdr=True) == "hevc_nvenc"
+
+
+def build_hdr_color_filters(src_trc: str = "iec61966-2-1") -> list[str]:
+    """
+    Build 10-bit HLG HDR color-space filters, automatically falling back when 'zscale'
+    (libzimg) is omitted in macOS Homebrew / static FFmpeg builds.
+    """
+    filters: list[str] = []
+    if src_trc not in ("arib-std-b67", "smpte2084") and has_ffmpeg_filter("zscale"):
+        filters.append(
+            f"zscale=primariesin=709:transferin={src_trc}:matrixin=709:"
+            "primaries=2020:transfer=arib-std-b67:matrix=2020_ncl"
+        )
+    filters.extend(
+        [
+            "format=p010le",
+            "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
         ]
-        proc = subprocess.run(cmd, capture_output=True, check=False)
-        _NVENC_AVAILABLE = proc.returncode == 0
-    return _NVENC_AVAILABLE
+    )
+    return filters
+
+
+def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> list[str]:
+    """Return FFmpeg video encoder CLI arguments for the best available hardware or software encoder."""
+    enc = ("libx265" if hdr else "libx264") if force_software else detect_best_video_encoder(hdr=hdr)
+    if hdr:
+        hdr_tags = [
+            "-color_primaries",
+            "bt2020",
+            "-color_trc",
+            "arib-std-b67",
+            "-colorspace",
+            "bt2020nc",
+            "-tag:v",
+            "hvc1",
+        ]
+        if enc == "hevc_videotoolbox":
+            return [
+                "-c:v",
+                "hevc_videotoolbox",
+                "-profile:v",
+                "main10",
+                "-pix_fmt",
+                "p010le",
+                "-q:v",
+                "68",
+                "-b:v",
+                "28M",
+                "-allow_sw",
+                "1",
+                *hdr_tags,
+            ]
+        if enc == "hevc_nvenc":
+            return [
+                "-c:v",
+                "hevc_nvenc",
+                "-preset",
+                "p4",
+                "-tune",
+                "hq",
+                "-profile:v",
+                "main10",
+                "-pix_fmt",
+                "p010le",
+                "-rc",
+                "vbr",
+                "-cq",
+                "19",
+                "-b:v",
+                "28M",
+                *hdr_tags,
+            ]
+        if enc == "hevc_amf":
+            return [
+                "-c:v",
+                "hevc_amf",
+                "-quality",
+                "balanced",
+                "-pix_fmt",
+                "p010le",
+                "-rc",
+                "vbr_peak",
+                "-b:v",
+                "28M",
+                *hdr_tags,
+            ]
+        if enc == "hevc_qsv":
+            return [
+                "-c:v",
+                "hevc_qsv",
+                "-preset",
+                "faster",
+                "-pix_fmt",
+                "p010le",
+                "-global_quality",
+                "20",
+                *hdr_tags,
+            ]
+        return [
+            "-c:v",
+            "libx265",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-preset",
+            "superfast",
+            "-crf",
+            "18",
+            *hdr_tags,
+            "-x265-params",
+            "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+        ]
+
+    # 8-bit SDR encoders
+    if enc == "h264_videotoolbox":
+        return [
+            "-c:v",
+            "h264_videotoolbox",
+            "-q:v",
+            "68",
+            "-b:v",
+            "16M",
+            "-allow_sw",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    if enc == "h264_nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p4",
+            "-cq",
+            "19",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    if enc == "h264_amf":
+        return [
+            "-c:v",
+            "h264_amf",
+            "-quality",
+            "balanced",
+            "-b:v",
+            "16M",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    if enc == "h264_qsv":
+        return [
+            "-c:v",
+            "h264_qsv",
+            "-global_quality",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+    ]
 
 
 def render_photo_clip(
@@ -423,70 +668,10 @@ def render_photo_clip(
         vf_filters.append(f"fade=t=out:st={st:.3f}:d={fade_d:.3f}")
 
     if hdr:
-        vf_filters.extend(
-            [
-                "zscale=primariesin=709:transferin=iec61966-2-1:matrixin=709:"
-                "primaries=2020:transfer=arib-std-b67:matrix=2020_ncl",
-                "format=p010le",
-                "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
-            ]
-        )
-        if has_hevc_nvenc():
-            v_enc = [
-                "-c:v",
-                "hevc_nvenc",
-                "-preset",
-                "p4",
-                "-tune",
-                "hq",
-                "-profile:v",
-                "main10",
-                "-rc",
-                "vbr",
-                "-cq",
-                "19",
-                "-b:v",
-                "28M",
-                "-color_primaries",
-                "bt2020",
-                "-color_trc",
-                "arib-std-b67",
-                "-colorspace",
-                "bt2020nc",
-                "-tag:v",
-                "hvc1",
-            ]
-        else:
-            v_enc = [
-                "-c:v",
-                "libx265",
-                "-pix_fmt",
-                "yuv420p10le",
-                "-preset",
-                "superfast",
-                "-crf",
-                "18",
-                "-color_primaries",
-                "bt2020",
-                "-color_trc",
-                "arib-std-b67",
-                "-colorspace",
-                "bt2020nc",
-                "-x265-params",
-                "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
-                "-tag:v",
-                "hvc1",
-            ]
+        vf_filters.extend(build_hdr_color_filters("iec61966-2-1"))
     else:
         vf_filters.append("format=yuv420p")
-        v_enc = [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-        ]
+    v_enc = get_video_encoder_args(hdr=hdr, force_software=False)
 
     cmd = [
         "ffmpeg",

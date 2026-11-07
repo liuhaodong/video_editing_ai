@@ -10,6 +10,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from ..analyzer.media_probe import _get_cjk_font
 from ..models.schema import (
     CulledSubClip,
     CuratedPhotoItem,
@@ -682,12 +683,8 @@ def render_curation_contact_sheets(
     cs_dir = proj / "contact_sheets"
     cs_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        font_hdr = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 14)
-        font_sub = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 12)
-    except Exception:
-        font_hdr = ImageFont.load_default()
-        font_sub = ImageFont.load_default()
+    font_hdr = _get_cjk_font(14)
+    font_sub = _get_cjk_font(12)
 
     photo_sheets: list[str] = []
     manifest_tiles: list[dict[str, Any]] = []

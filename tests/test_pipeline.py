@@ -672,3 +672,37 @@ def test_antigravity_skill_cli_and_global_sync(tmp_path: Path, sample_media_dir:
     )
     assert not (skill_proj / "timeline.yaml").exists()
     assert (skill_proj / "project_meta.json").exists()
+
+
+def test_cross_platform_macbook_pro_2019_hardware_encoding_and_filters(monkeypatch) -> None:
+    """Verify 2019 MacBook Pro (Intel + AMD Radeon Pro + Apple T2 VideoToolbox / Boot Camp AMF) support."""
+    from video_editing_ai.renderer import ken_burns
+
+    # 1. Simulate 2019 MacBook Pro on macOS (hevc_videotoolbox)
+    monkeypatch.setattr(ken_burns, "detect_best_video_encoder", lambda hdr=True: "hevc_videotoolbox" if hdr else "h264_videotoolbox")
+    vt_hdr_args = ken_burns.get_video_encoder_args(hdr=True)
+    assert "hevc_videotoolbox" in vt_hdr_args
+    assert "main10" in vt_hdr_args
+    assert "p010le" in vt_hdr_args
+
+    vt_sdr_args = ken_burns.get_video_encoder_args(hdr=False)
+    assert "h264_videotoolbox" in vt_sdr_args
+
+    # 2. Simulate 2019 MacBook Pro on Windows Boot Camp (AMD Radeon Pro 5500M -> hevc_amf)
+    monkeypatch.setattr(ken_burns, "detect_best_video_encoder", lambda hdr=True: "hevc_amf" if hdr else "h264_amf")
+    amf_hdr_args = ken_burns.get_video_encoder_args(hdr=True)
+    assert "hevc_amf" in amf_hdr_args
+    assert "p010le" in amf_hdr_args
+
+    # 3. Simulate macOS FFmpeg build without libzimg (zscale unavailable)
+    monkeypatch.setattr(ken_burns, "has_ffmpeg_filter", lambda name: False)
+    hdr_filters_no_zscale = ken_burns.build_hdr_color_filters("709")
+    assert all("zscale" not in f for f in hdr_filters_no_zscale)
+    assert "format=p010le" in hdr_filters_no_zscale
+    assert any("arib-std-b67" in f for f in hdr_filters_no_zscale)
+
+    # 4. Simulate FFmpeg build with zscale available
+    monkeypatch.setattr(ken_burns, "has_ffmpeg_filter", lambda name: True)
+    hdr_filters_with_zscale = ken_burns.build_hdr_color_filters("709")
+    assert any("zscale" in f for f in hdr_filters_with_zscale)
+

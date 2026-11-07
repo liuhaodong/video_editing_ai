@@ -14,11 +14,17 @@ def _get_whisper_model(model_size: str = "small"):
     if model_size not in _WHISPER_MODEL_CACHE:
         from faster_whisper import WhisperModel
 
-        _WHISPER_MODEL_CACHE[model_size] = WhisperModel(
-            model_size,
-            device="cpu",
-            compute_type="int8",
-        )
+        for compute_type in ("int8", "default", "float32"):
+            try:
+                _WHISPER_MODEL_CACHE[model_size] = WhisperModel(
+                    model_size,
+                    device="cpu",
+                    compute_type=compute_type,
+                )
+                break
+            except Exception:
+                if compute_type == "float32":
+                    raise
     return _WHISPER_MODEL_CACHE[model_size]
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 from ..models.schema import EditTimeline
 
@@ -57,7 +58,9 @@ def export_ass_subtitles(timeline: EditTimeline, output_ass: str | Path) -> Path
     w = timeline.settings.width
     h = timeline.settings.height
     scale = w / 1920.0
-    font_name = timeline.subtitles.font_name or "Microsoft YaHei"
+    font_name = timeline.subtitles.font_name or ("PingFang SC" if sys.platform == "darwin" else "Microsoft YaHei")
+    if sys.platform == "darwin" and font_name == "Microsoft YaHei":
+        font_name = "PingFang SC"
     font_size = max(24, int(round(timeline.subtitles.font_size * scale)))
     sec_font_size = max(18, int(round(font_size * 0.68)))
     margin_v = int(round(48 * scale))

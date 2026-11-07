@@ -16,7 +16,9 @@ This skill orchestrates an **11-Agent AI Film & Vlog Editing Room** that transfo
 
 All programmatic steps write structured JSON/YAML contracts to disk in `<project_dir>` via the skill's standalone helper CLI:
 - **Helper CLI**: [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py)
-- **Python Interpreter**: `C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe`
+- **Python Interpreter**:
+  - **Windows**: `C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe` (or `python`)
+  - **macOS (2019 MacBook Pro Intel + AMD Radeon Pro / Apple Silicon)**: `python3` (uses `hevc_videotoolbox` hardware encoding, macOS fonts, and native Finder folder picker automatically)
 
 ---
 

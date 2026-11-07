@@ -8,11 +8,18 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any, Callable, Optional
 
 from ..analyzer.media_probe import probe_video_file
 from ..models.schema import EditTimeline, EffectTrackItem, VisualTrackItem
-from .ken_burns import has_hevc_nvenc, render_frosted_video_overlay_png, render_photo_clip
+from .ken_burns import (
+    build_hdr_color_filters,
+    get_video_encoder_args,
+    has_hevc_nvenc,
+    render_frosted_video_overlay_png,
+    render_photo_clip,
+)
 from .subtitles import export_ass_subtitles, export_srt_subtitles
 from .titles import render_title_png
 
@@ -37,62 +44,8 @@ def register_effect_filter(effect_type: str, builder: Callable[[EffectTrackItem]
 
 
 def _video_encoder_args(hdr: bool, force_software: bool = False) -> list[str]:
-    if hdr:
-        if not force_software and has_hevc_nvenc():
-            return [
-                "-c:v",
-                "hevc_nvenc",
-                "-preset",
-                "p4",
-                "-tune",
-                "hq",
-                "-profile:v",
-                "main10",
-                "-rc",
-                "vbr",
-                "-cq",
-                "19",
-                "-b:v",
-                "28M",
-                "-color_primaries",
-                "bt2020",
-                "-color_trc",
-                "arib-std-b67",
-                "-colorspace",
-                "bt2020nc",
-                "-tag:v",
-                "hvc1",
-            ]
-        return [
-            "-c:v",
-            "libx265",
-            "-pix_fmt",
-            "yuv420p10le",
-            "-preset",
-            "superfast",
-            "-crf",
-            "18",
-            "-color_primaries",
-            "bt2020",
-            "-color_trc",
-            "arib-std-b67",
-            "-colorspace",
-            "bt2020nc",
-            "-x265-params",
-            "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
-            "-tag:v",
-            "hvc1",
-        ]
-    return [
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
-    ]
+    """Return cross-platform hardware-accelerated encoder arguments (VideoToolbox / NVENC / AMF / QSV / libx265)."""
+    return get_video_encoder_args(hdr=hdr, force_software=force_software)
 
 
 def _render_video_segment(
@@ -143,17 +96,7 @@ def _render_video_segment(
         post_filters.append(f"fade=t=out:st={st:.3f}:d={fd:.3f}")
 
     if hdr:
-        if src_trc not in ("arib-std-b67", "smpte2084"):
-            post_filters.append(
-                "zscale=primariesin=709:transferin=709:matrixin=709:"
-                "primaries=2020:transfer=arib-std-b67:matrix=2020_ncl"
-            )
-        post_filters.extend(
-            [
-                "format=p010le",
-                "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
-            ]
-        )
+        post_filters.extend(build_hdr_color_filters(src_trc if src_trc != "bt709" else "709"))
     else:
         post_filters.append("format=yuv420p")
 
@@ -403,8 +346,9 @@ def render_timeline(
         return t_idx, t_mp4
 
     if tasks_to_run:
-        # 5 concurrent workers stays within consumer NVIDIA GeForce NVENC session limits while saturating CPU PIL threads
-        max_workers = min(5, max(1, (os.cpu_count() or 8) // 4), len(tasks_to_run))
+        # 5 concurrent workers stays within consumer NVIDIA GeForce NVENC session limits; 4 on macOS keeps 2019 Intel MacBook Pro thermally balanced
+        worker_cap = 4 if sys.platform == "darwin" else 5
+        max_workers = min(worker_cap, max(1, (os.cpu_count() or 8) // 4), len(tasks_to_run))
         completed_count = num_clips - len(tasks_to_run)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(_render_one_v1, t): t for t in tasks_to_run}

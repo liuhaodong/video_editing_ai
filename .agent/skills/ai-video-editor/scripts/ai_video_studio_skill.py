@@ -27,15 +27,23 @@ import sys
 from typing import Any
 
 # Resolve repository src/ path whether invoked from workspace .agent/skills/ or global ~/.gemini/config/skills/
-_CANDIDATE_REPO_ROOTS = [
-    Path(__file__).resolve().parents[4],
-    Path(r"C:\Users\hihao\Documents\projects\video_editing_ai"),
-]
-for _root in _CANDIDATE_REPO_ROOTS:
-    _src = _root / "src"
-    if (_src / "video_editing_ai").exists() and str(_src) not in sys.path:
-        sys.path.insert(0, str(_src))
-        break
+def _resolve_workspace_root() -> Path:
+    candidates = [
+        Path(__file__).resolve().parents[4],
+        Path.cwd(),
+        Path.home() / "Documents" / "projects" / "video_editing_ai",
+        Path(r"C:\Users\hihao\Documents\projects\video_editing_ai"),
+    ]
+    for root in candidates:
+        if (root / "src" / "video_editing_ai").exists():
+            return root
+    return Path.cwd()
+
+
+_WORKSPACE_ROOT = _resolve_workspace_root()
+_src = _WORKSPACE_ROOT / "src"
+if (_src / "video_editing_ai").exists() and str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
 
 from video_editing_ai.agents import (  # noqa: E402
     AgentRegistry,
@@ -76,7 +84,7 @@ def cmd_inspect_library(args: argparse.Namespace) -> int:
         print(f"Error: media_dir does not exist: {media_dir}", file=sys.stderr)
         return 1
 
-    workspace_root = Path(r"C:\Users\hihao\Documents\projects\video_editing_ai")
+    workspace_root = _WORKSPACE_ROOT
     lib_info = inspect_media_library(media_dir, workspace_root=workspace_root)
     questions = [q.model_dump(mode="json") for q in generate_intake_questions(media_dir, args.prompt or "")]
     dur_rec = compute_director_duration_recommendation(lib_info)
@@ -599,7 +607,7 @@ def cmd_render_segment(args: argparse.Namespace) -> int:
 
 
 def cmd_project(args: argparse.Namespace) -> int:
-    workspace_root = Path(r"C:\Users\hihao\Documents\projects\video_editing_ai")
+    workspace_root = _WORKSPACE_ROOT
     action = args.action
 
     if action == "list":
