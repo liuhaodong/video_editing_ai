@@ -136,11 +136,17 @@ def _evaluate_photo_taste_metrics(img_path: str | Path, filename: str) -> dict[s
     else:
         inferred_cat = "sculpture"
 
+    is_dedicated_camera = filename.upper().startswith(("_DSC", "DSC", "A7C", "DSCF", "L10"))
+    camera_bonus = 0.55 if is_dedicated_camera else 0.0
     overall = round(
-        0.32 * saliency_score
-        + 0.26 * composition_score
-        + 0.24 * art_arch_score
-        + 0.18 * portrait_warmth_score,
+        min(
+            9.95,
+            0.32 * saliency_score
+            + 0.26 * composition_score
+            + 0.24 * art_arch_score
+            + 0.18 * portrait_warmth_score
+            + camera_bonus,
+        ),
         2,
     )
 
@@ -158,20 +164,10 @@ def _evaluate_photo_taste_metrics(img_path: str | Path, filename: str) -> dict[s
 def _build_camera_badge(
     filename: str,
     camera_make_model: Optional[str] = None,
-    project_badge_tag: str = "4K HDR ARCHIVE",
+    project_badge_tag: str = "",
 ) -> str:
-    if camera_make_model and camera_make_model.strip():
-        cam = camera_make_model.strip().upper()
-    elif filename.upper().startswith(("_DSC", "DSC", "A7C")):
-        cam = "SONY ALPHA · FULL FRAME"
-    elif filename.upper().startswith("PXL_"):
-        cam = "GOOGLE PIXEL · HDR"
-    elif filename.upper().startswith("IMG_"):
-        cam = "APPLE IPHONE · HDR"
-    else:
-        cam = "DIGITAL CAMERA · HDR"
-    tag = (project_badge_tag or "4K HDR ARCHIVE").strip().upper()[:24]
-    return f"{cam} · {tag}"
+    """Return an empty badge by default so captions remain clean and free of technical camera/EXIF metadata."""
+    return ""
 
 
 def _generate_semantic_annotation(
@@ -913,7 +909,7 @@ def apply_vision_curation_overrides(
         new_sub = ov.get("annotation_subtitle") or ov.get("caption_subtitle")
         if new_sub:
             target_item.annotation_subtitle = str(new_sub)
-        if ov.get("camera_badge"):
+        if "camera_badge" in ov and ov["camera_badge"] is not None:
             target_item.camera_badge = str(ov["camera_badge"])
         if ov.get("subject_category"):
             target_item.subject_category = str(ov["subject_category"])

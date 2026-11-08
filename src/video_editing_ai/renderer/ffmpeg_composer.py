@@ -215,6 +215,8 @@ def _render_video_segment(
         cmd.extend(
             [
                 *_video_encoder_args(hdr, force_software=force_sw),
+                "-metadata:s:v:0",
+                "rotate=0",
                 "-video_track_timescale",
                 "30000",
                 "-c:a",
@@ -434,6 +436,8 @@ def render_timeline(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-display_rotation",
+        "0",
         "-f",
         "concat",
         "-safe",
@@ -442,6 +446,8 @@ def render_timeline(
         str(concat_list_path),
         "-c",
         "copy",
+        "-metadata:s:v:0",
+        "rotate=0",
         str(base_concat_mp4),
     ]
     proc = subprocess.run(concat_cmd, capture_output=True, text=True, check=False)

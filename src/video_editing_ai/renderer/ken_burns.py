@@ -170,10 +170,10 @@ def _build_frosted_card_assets(
     bottom_pad = int(round(18 * s))
     cur_y = top_pad
     if badge_str:
-        cur_y += int(round(25 * s))
-    cur_y += int(round(38 * s))  # title height
+        cur_y += max(12, int(round(25 * s)))
+    cur_y += max(14, int(round(38 * s)))  # title height
     if sub_lines:
-        cur_y += int(round(6 * s)) + len(sub_lines) * int(round(28 * s))
+        cur_y += max(3, int(round(6 * s))) + len(sub_lines) * max(13, int(round(28 * s)))
     ph = cur_y + bottom_pad
 
     # 1. Smooth rounded-rectangle alpha mask for frosted glass region
@@ -213,19 +213,19 @@ def _build_frosted_card_assets(
     if badge_str:
         draw.text((tx + 1, ty + 1), badge_str, font=f_badge, fill=(0, 0, 0, 180))
         draw.text((tx, ty), badge_str, font=f_badge, fill=(238, 198, 102, 245))
-        ty += int(round(25 * s))
+        ty += max(12, int(round(25 * s)))
 
     # Crisp editorial headline with soft drop shadow
     draw.text((tx + 2, ty + 2), caption_title, font=f_title, fill=(0, 0, 0, 200))
     draw.text((tx, ty), caption_title, font=f_title, fill=(255, 255, 255, 255))
-    ty += int(round(38 * s))
+    ty += max(14, int(round(38 * s)))
 
     if sub_lines:
-        ty += int(round(4 * s))
+        ty += max(2, int(round(4 * s)))
         for ln in sub_lines:
             draw.text((tx + 1, ty + 1), ln, font=f_sub, fill=(0, 0, 0, 185))
             draw.text((tx, ty), ln, font=f_sub, fill=(226, 232, 242, 248))
-            ty += int(round(28 * s))
+            ty += max(13, int(round(28 * s)))
 
     # Center horizontally in the lower fifth for balanced documentary composition
     px = (width - pw) // 2
@@ -897,11 +897,12 @@ def _build_editorial_magazine_assets(
     max_text_w = right_w - pad_x * 2
     cur_y = int(height * 0.24)
 
-    # 1. Camera / Location Overline Badge
-    badge_str = (kb.camera_badge or "CURATED ARCHIVE · 4K HDR").upper().replace("📍", "").strip()
-    f_badge = _load_editorial_font(int(round(15 * scale_factor)), bold=True, serif=False)
-    draw.text((pad_x, cur_y), badge_str, font=f_badge, fill=(234, 194, 96))
-    cur_y += int(round(34 * scale_factor))
+    # 1. Location Overline Badge (only if explicitly provided)
+    badge_str = (kb.camera_badge or "").upper().replace("📍", "").strip()
+    if badge_str:
+        f_badge = _load_editorial_font(int(round(15 * scale_factor)), bold=True, serif=False)
+        draw.text((pad_x, cur_y), badge_str, font=f_badge, fill=(234, 194, 96))
+        cur_y += int(round(34 * scale_factor))
 
     # Gold accent bar
     draw.rectangle([pad_x, cur_y, pad_x + int(round(68 * scale_factor)), cur_y + max(2, int(round(3 * scale_factor)))], fill=(234, 194, 96))
@@ -912,9 +913,9 @@ def _build_editorial_magazine_assets(
     f_title = _load_editorial_font(int(round(34 * scale_factor)), bold=True, serif=True)
     for line in textwrap.wrap(title_str, width=22)[:4]:
         draw.text((pad_x, cur_y), line, font=f_title, fill=(252, 250, 245))
-        cur_y += int(round(46 * scale_factor))
+        cur_y += max(14, int(round(46 * scale_factor)))
 
-    cur_y += int(round(18 * scale_factor))
+    cur_y += max(6, int(round(18 * scale_factor)))
 
     # 3. Multi-line Curatorial Essay / Bilingual Subtitle
     sub_str = (kb.caption_subtitle or "").strip()
@@ -922,16 +923,17 @@ def _build_editorial_magazine_assets(
         f_sub = _load_editorial_font(int(round(21 * scale_factor)), bold=False, serif=False)
         for line in textwrap.wrap(sub_str, width=32)[:6]:
             draw.text((pad_x, cur_y), line, font=f_sub, fill=(198, 208, 222))
-            cur_y += int(round(32 * scale_factor))
+            cur_y += max(13, int(round(32 * scale_factor)))
 
-    # Bottom monograph folio stamp
-    f_folio = _load_editorial_font(int(round(14 * scale_factor)), bold=False, serif=True)
-    draw.text(
-        (pad_x, int(height * 0.89)),
-        "EXHIBITION MONOGRAPH  ·  10-BIT HLG MASTER",
-        font=f_folio,
-        fill=(132, 140, 156),
-    )
+    # Bottom monograph folio stamp (only rendered if an explicit location/folio badge is provided)
+    if badge_str:
+        f_folio = _load_editorial_font(int(round(14 * scale_factor)), bold=False, serif=True)
+        draw.text(
+            (pad_x, int(height * 0.89)),
+            badge_str,
+            font=f_folio,
+            fill=(132, 140, 156),
+        )
     return left_oversampled, col, left_w
 
 

@@ -130,8 +130,8 @@ class StoryProducerAgent(BaseEditingAgent):
                         if p.subclip_id not in used_as_v2_cutaway and not p.secondary_source_path
                     ]
                     cutaway_candidate = None
-                    if avail_cutaways:
-                        cutaway_candidate = max(
+                    if avail_cutaways and v_words:
+                        best_cand = max(
                             avail_cutaways,
                             key=lambda p: (
                                 sum(
@@ -142,30 +142,24 @@ class StoryProducerAgent(BaseEditingAgent):
                                 p.aesthetic_score,
                             ),
                         )
+                        overlap = sum(
+                            1
+                            for w in v_words
+                            if w in ((best_cand.annotation_title or "") + " " + best_cand.summary).lower()
+                        )
+                        if overlap >= 2:
+                            cutaway_candidate = best_cand
                     if cutaway_candidate is not None:
                         broll_anchor_map[v.subclip_id] = [cutaway_candidate.subclip_id]
                         used_as_v2_cutaway.add(cutaway_candidate.subclip_id)
 
             primary_photos = [p for p in c_photos if p.subclip_id not in used_as_v2_cutaway]
-            # Sort primary photos so wide establishing landmarks lead, followed by medium/closeup portraits & details
-            scale_rank = {"wide": 0, "medium": 1, "closeup": 2}
-            primary_photos.sort(
-                key=lambda p: (
-                    scale_rank.get(p.shot_scale, 1),
-                    p.normalized_timestamp,
-                )
+            # Sort primary photos strictly chronologically so out-of-order scenes never occur
+            primary_photos.sort(key=lambda p: (p.normalized_timestamp, p.filename))
+            ordered_selects: list[CulledSubClip] = sorted(
+                [*c_vids, *primary_photos],
+                key=lambda s: (s.normalized_timestamp, s.filename),
             )
-            ordered_selects: list[CulledSubClip] = []
-            p_cursor = 0
-            for v in c_vids:
-                ordered_selects.append(v)
-                take_n = 2 if len(primary_photos) - p_cursor >= 2 else max(0, len(primary_photos) - p_cursor)
-                for _ in range(take_n):
-                    ordered_selects.append(primary_photos[p_cursor])
-                    p_cursor += 1
-            while p_cursor < len(primary_photos):
-                ordered_selects.append(primary_photos[p_cursor])
-                p_cursor += 1
 
             has_aroll = any(s.roll_type == "a_roll" for s in c_vids)
             editing_mode = "dialogue_with_broll" if has_aroll else "music_montage"

@@ -714,7 +714,7 @@ def cmd_apply_bgm_plan(args: argparse.Namespace) -> int:
     target_dur = float(args.target_duration or 0.0)
     tl: Optional[EditTimeline] = None
     if tl_path.exists():
-        tl = EditTimeline.from_yaml_file(tl_path)
+        tl = EditTimeline.from_yaml(tl_path)
         if target_dur <= 0.0:
             target_dur = max(60.0, float(tl.total_duration))
     if target_dur <= 0.0:
@@ -760,7 +760,7 @@ def cmd_apply_bgm_plan(args: argparse.Namespace) -> int:
                 fade_out=3.0,
             )
         ]
-        tl.to_yaml_file(tl_path)
+        tl.to_yaml(tl_path)
 
     report_data = {
         "mastered_soundtrack_path": str(out_mp3.resolve()),

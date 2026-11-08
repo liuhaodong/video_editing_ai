@@ -92,7 +92,7 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
 
     # 2. Main Opening Title Card on Track V3 (drops right after Cold-Open Hook if present)
     clean_proj_title = paper.project_title.replace("_", " ").strip().upper() or "FEATURED STORY"
-    opening_sub = f"{clean_proj_title} · 4K 10-BIT HLG HDR DOCUMENTARY | 光影与记忆典藏"
+    opening_sub = f"{clean_proj_title} · A Cinematic Documentary | 光影与记忆典藏"
 
     opening_start = round(cursor + 0.35, 2)
     title_track.append(

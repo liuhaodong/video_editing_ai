@@ -71,7 +71,7 @@ def _synthesize_video_scene_caption_and_transition(
             else ("Closing Finale Vista" if v_idx == total_videos else f"{motion_label} ({shot_scale.capitalize()})")
         )
         title = f"{stage_label} — Scene {v_idx:02d}"
-        sub = "4K HDR 动态实景镜头 · 光影与现场氛围记录"
+        sub = "实景动态镜头 · 光影与现场氛围记录"
         trans = "fade_black" if v_idx in (1, total_videos) else ("dissolve" if shot_scale == "wide" else "crossfade")
         rationale = f"Selected golden window ({shot_scale} {cam_motion}) for visual rhythm and continuity."
 
@@ -515,8 +515,8 @@ class CullerAgent(BaseEditingAgent):
                     )
                 )
             else:
-                # Extract 2.0s - 4.5s Golden Window (or up to 6.8s anchor window for long clips in compact sets)
-                win_cap = 6.8 if (vid.duration >= 8.0 and len(sorted_videos) <= 6) else max_broll_sec
+                # Preserve full natural scene context (up to 10.5s-14.0s for scenic clips so viewers understand the action)
+                win_cap = max(max_broll_sec, 12.0 if vid.duration >= 10.0 else 8.5)
                 best_in = 0.0
                 best_out = min(vid.duration, win_cap)
                 if vid.scenes:
