@@ -1,18 +1,18 @@
 ---
 name: ai-video-editor
 description: >-
-  End-to-end 11-agent AI photo and video editing skill for family travel, museum trips, vlogs, and unscripted highlights. Use whenever the user asks to edit a video from a folder of clips/photos, run interactive client intake and get the Director's length recommendation (30s-600s), scout/download royalty-free BGM, curate and annotate photos with aesthetic taste and museum plaques, apply 2.5D parallax and diptych photo effects, supervise editing quality with the Executive Movie Production Director, manage editing projects (create/load/reset), or render 4K 10-bit HLG HDR MP4 videos and NLE timelines (.fcpxml, .edl, .otio).
+  End-to-end 16-agent AI photo and video editing skill for family travel, museum trips, vlogs, and unscripted highlights. Use whenever the user asks to edit a video from a folder of clips/photos, run interactive client intake and get the Director's length recommendation (30s-600s), scout/download royalty-free BGM, curate and annotate photos with aesthetic taste and museum plaques, apply 2.5D parallax and diptych photo effects, script documentary voiceover narration, pair vertical 9:16 videos into Live Video+Photo Diptychs, render GPS route progression maps, apply 10-bit DI camera color matching, synthesize spatial soundscapes, supervise editing quality with the Executive Movie Production Director, manage editing projects (create/load/reset), or render 4K 10-bit HLG HDR MP4 videos and NLE timelines (.fcpxml, .edl, .otio).
 ---
 
 # AI Photo & Video Story Studio Skill (`ai-video-editor`)
 
 ## Overview
 
-This skill orchestrates an **11-Agent AI Film & Vlog Editing Room** that transforms raw folders of multi-camera videos (`.MP4`, `.MOV`) and photos (`.JPG`, `.HEIC`, `.PNG`) into a **4K 10-bit HLG HDR Master Video (`final_story.mp4`)** plus professional NLE timelines (`timeline.fcpxml`, `timeline.edl`, `timeline.otio`).
+This skill orchestrates a **16-Agent Big-Budget AI Film & Vlog Post-Production Studio** that transforms raw folders of multi-camera videos (`.MP4`, `.MOV`) and photos (`.JPG`, `.HEIC`, `.PNG`) into a **4K 10-bit HLG HDR Master Video (`final_story.mp4`)** plus professional NLE timelines (`timeline.fcpxml`, `timeline.edl`, `timeline.otio`).
 
 > **Core Architectural Rule**:
-> - **Anything mechanical** (contact-sheet grid rendering, FFmpeg segment slicing, ripple timecode shifting, LUFS audio ducking, JSON/YAML contract serialization) is executed **programmatically** via [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py).
-> - **Anything requiring creativity, visual intelligence, or storytelling taste** (inspecting contact sheets to identify artworks/landmarks/expressions, choosing the Cold-Open Teaser Hook, pairing diptychs, writing poetic exhibition plaques, and interpreting user revision notes) is **always delegated to the AI Agent** (`read_file` vision inspection or `invoke_subagent`).
+> - **Anything mechanical** (contact-sheet grid rendering, FFmpeg segment slicing, ripple timecode shifting, LUFS audio ducking, RGB histogram & Kelvin white-balance measurement, EXIF GPS extraction, JSON/YAML contract serialization) is executed **programmatically** via [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py).
+> - **Anything requiring creativity, visual intelligence, or storytelling taste** (inspecting contact sheets to identify artworks/landmarks/expressions, choosing the Cold-Open Teaser Hook, pairing diptychs, scripting voiceover narration, selecting chapter film-stock color looks, scoring spatial soundscapes, and interpreting user revision notes) is **always delegated to the AI Agent** (`read_file` vision inspection or `invoke_subagent`).
 
 All programmatic steps write structured JSON/YAML contracts to disk in `<project_dir>` via the skill's standalone helper CLI:
 - **Helper CLI**: [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py)
@@ -22,7 +22,7 @@ All programmatic steps write structured JSON/YAML contracts to disk in `<project
 
 ---
 
-## 1. Progressive Disclosure: 11 Sub-Agent Role Playbooks (`references/`)
+## 1. Progressive Disclosure: 16 Sub-Agent Role Playbooks (`references/`)
 
 Read only the specific reference file(s) needed for your current step or when spawning native Antigravity subagents via `define_subagent` / `invoke_subagent`:
 
@@ -32,11 +32,16 @@ Read only the specific reference file(s) needed for your current step or when sp
 4. **Stage 10 — Sound & Vibe Beat Specialist (`audio_vibe`)**: [references/04_audio_vibe_agent.md](references/04_audio_vibe_agent.md) → `beat_grid.json`
 5. **Stage 15 — Aesthetic Photo Curator & Museum Annotator (`photo_curator`)**: [references/09_photo_curator_agent.md](references/09_photo_curator_agent.md) → `photo_curation.json`
 6. **Stage 20 — Story Producer (`story_producer`)**: [references/02_story_producer_agent.md](references/02_story_producer_agent.md) → `paper_edit.json`
-7. **Stage 30 — Dual Picture Editors (`dialogue_editor` + `montage_editor`)**: [references/03_picture_editors.md](references/03_picture_editors.md) → `timeline.yaml`
-8. **Stage 40 — 2.5D Parallax, Diptych & HDR Polish Designer (`vfx_designer`)**: [references/06_vfx_agent.md](references/06_vfx_agent.md) → `vfx_manifest.json`
-9. **Stage 50 — Showrunner & Pacing Critic (`showrunner`)**: [references/05_showrunner_agent.md](references/05_showrunner_agent.md) → `pacing_audit.json`
-10. **Stage 60 & Cross-Stage Supervisor — Executive Movie Production Director (`production_director`)**: [references/07_production_director_agent.md](references/07_production_director_agent.md) → `director_review.json`
-11. **JSON Contracts & 4K HLG HDR Rendering Spec**: [references/10_contracts_and_rendering.md](references/10_contracts_and_rendering.md)
+7. **Stage 25 — Documentary Scriptwriter & Voiceover Narrator (`narrator_voiceover`)**: [references/10_narrator_voiceover_agent.md](references/10_narrator_voiceover_agent.md) → `narration_script.json`
+8. **Stage 30 — Dual Picture Editors (`dialogue_editor` + `montage_editor`)**: [references/03_picture_editors.md](references/03_picture_editors.md) → `timeline.yaml`
+9. **Stage 32 — Cinematography, Stabilization & Video Diptych Operator (`camera_operator`)**: [references/11_camera_operator_agent.md](references/11_camera_operator_agent.md) → `cinematography_report.json`
+10. **Stage 38 — Motion Graphics & GPS Journey Map Animator (`motion_graphics`)**: [references/12_motion_graphics_agent.md](references/12_motion_graphics_agent.md) → `motion_graphics_plan.json`
+11. **Stage 40 — 2.5D Parallax, Diptych & HDR Polish Designer (`vfx_designer`)**: [references/06_vfx_agent.md](references/06_vfx_agent.md) → `vfx_manifest.json`
+12. **Stage 42 — Senior DI Colorist & Camera Matcher (`colorist`)**: [references/13_colorist_agent.md](references/13_colorist_agent.md) → `color_grade_plan.json`
+13. **Stage 45 — Supervising Sound Designer & Foley Mixer (`sound_designer`)**: [references/14_sound_designer_agent.md](references/14_sound_designer_agent.md) → `sound_design_plan.json`
+14. **Stage 50 — Showrunner & Pacing Critic (`showrunner`)**: [references/05_showrunner_agent.md](references/05_showrunner_agent.md) → `pacing_audit.json`
+15. **Stage 60 & Cross-Stage Supervisor — Executive Movie Production Director (`production_director`)**: [references/07_production_director_agent.md](references/07_production_director_agent.md) → `director_review.json`
+16. **JSON Contracts & 4K HLG HDR Rendering Spec**: [references/10_contracts_and_rendering.md](references/10_contracts_and_rendering.md)
 
 ---
 

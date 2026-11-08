@@ -351,12 +351,74 @@ def _extract_exif_camera_info(img: Image.Image, photo_path: Optional[Path] = Non
     return cam_badge, exif_summary or ""
 
 
+def _extract_exif_gps(img: Image.Image) -> tuple[Optional[float], Optional[float]]:
+    """Mechanically extract signed decimal (latitude, longitude) from EXIF GPSInfo (0x8825)."""
+    try:
+        exif = img.getexif()
+        if not exif:
+            return None, None
+        gps_ifd = exif.get_ifd(0x8825)
+        if not gps_ifd:
+            return None, None
+
+        def _dms_to_deg(dms: Any, ref: str) -> Optional[float]:
+            if not dms or len(dms) < 3:
+                return None
+            deg = float(dms[0]) + float(dms[1]) / 60.0 + float(dms[2]) / 3600.0
+            if str(ref).upper().strip() in ("S", "W"):
+                deg = -deg
+            return round(deg, 6)
+
+        lat = _dms_to_deg(gps_ifd.get(2), str(gps_ifd.get(1, "N")))
+        lon = _dms_to_deg(gps_ifd.get(4), str(gps_ifd.get(3, "E")))
+        if lat is not None and lon is not None:
+            return lat, lon
+    except Exception:
+        pass
+    return None, None
+
+
+def compute_image_color_stats(img: Image.Image) -> dict[str, float]:
+    """Mechanically compute RGB channel means, luminance percentiles (p05, p50, p95), and estimated Kelvin."""
+    try:
+        small = img.convert("RGB").resize((64, 64), Image.Resampling.BILINEAR)
+        arr = np.asarray(small, dtype=np.float32)
+        mean_r = float(arr[:, :, 0].mean())
+        mean_g = float(arr[:, :, 1].mean())
+        mean_b = float(arr[:, :, 2].mean())
+        luma = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+        p05, p50, p95 = np.percentile(luma, [5, 50, 95])
+        # Approximate correlated color temperature from R/B ratio around 5500K neutral daylight
+        rb_ratio = (mean_r + 1.0) / (mean_b + 1.0)
+        est_kelvin = max(2800.0, min(9000.0, 5500.0 / (rb_ratio ** 0.65)))
+        return {
+            "mean_r": round(mean_r, 2),
+            "mean_g": round(mean_g, 2),
+            "mean_b": round(mean_b, 2),
+            "p05_luma": round(float(p05), 2),
+            "p50_luma": round(float(p50), 2),
+            "p95_luma": round(float(p95), 2),
+            "est_kelvin": round(est_kelvin, 0),
+        }
+    except Exception:
+        return {
+            "mean_r": 128.0,
+            "mean_g": 128.0,
+            "mean_b": 128.0,
+            "p05_luma": 24.0,
+            "p50_luma": 128.0,
+            "p95_luma": 232.0,
+            "est_kelvin": 5500.0,
+        }
+
+
 def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
     """Open a photo (.HEIC, .JPG, .PNG), extract EXIF/dimensions, save RGB preview JPEG, and compute focal point."""
     previews_dir.mkdir(parents=True, exist_ok=True)
     img = Image.open(photo_path)
     creation_time = _extract_exif_datetime(img, photo_path)
     camera_make_model, exif_summary = _extract_exif_camera_info(img, photo_path)
+    gps_lat, gps_lon = _extract_exif_gps(img)
     orig_w, orig_h = img.size
     try:
         exif_orient = img.getexif().get(274, 1)
@@ -374,6 +436,7 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
 
     img = ImageOps.exif_transpose(img).convert("RGB")
     w, h = orig_w, orig_h
+    color_stats = compute_image_color_stats(img)
 
     if w > h * 1.05:
         orientation = "landscape"
@@ -402,6 +465,9 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
         creation_time=creation_time,
         camera_make_model=camera_make_model,
         exif_summary=exif_summary or None,
+        gps_lat=gps_lat,
+        gps_lon=gps_lon,
+        color_stats=color_stats,
         caption=f"Photo {photo_path.name} ({orientation}, {w}x{h})",
         subjects=[],
         mood="warm",
@@ -522,6 +588,15 @@ def build_initial_catalog(
         if ext in VIDEO_EXTENSIONS:
             info = probe_video_file(f)
             scenes = detect_scenes_and_extract_keyframes(f, info["duration"], keyframes_dir)
+            v_color_stats: dict[str, float] = {}
+            for sc in scenes:
+                if sc.keyframe_path and Path(sc.keyframe_path).exists():
+                    try:
+                        with Image.open(sc.keyframe_path) as kf_im:
+                            v_color_stats = compute_image_color_stats(kf_im)
+                        break
+                    except Exception:
+                        pass
             videos.append(
                 VideoAsset(
                     id=f"vid_{f.stem}",
@@ -536,6 +611,7 @@ def build_initial_catalog(
                     color_space=info["color_space"],
                     has_audio=info["has_audio"],
                     creation_time=info["creation_time"],
+                    color_stats=v_color_stats,
                     overall_summary=f"Video clip {f.name} ({info['duration']:.1f}s, {info['width']}x{info['height']})",
                     scenes=scenes,
                     dialogues=[],

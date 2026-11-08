@@ -24,7 +24,7 @@ from .subtitles import export_ass_subtitles, export_srt_subtitles
 from .titles import render_title_png
 
 
-# Extensible registry mapping Stage-40 EffectTrackItem.effect_type -> FFmpeg filter builder
+# Extensible registry mapping Stage-40/32/42 EffectTrackItem.effect_type -> FFmpeg filter builder
 EFFECT_FILTER_BUILDERS: dict[str, Callable[[EffectTrackItem], str]] = {
     "warm_glow": lambda fx: (
         f"eq=saturation={float(fx.parameters.get('saturation', 1.08)):.2f}:"
@@ -34,6 +34,17 @@ EFFECT_FILTER_BUILDERS: dict[str, Callable[[EffectTrackItem], str]] = {
     "contrast_pop": lambda fx: (
         f"eq=contrast={float(fx.parameters.get('contrast', 1.06)):.2f}:"
         f"saturation={float(fx.parameters.get('saturation', 1.05)):.2f}"
+    ),
+    "color_grade": lambda fx: (
+        f"colorbalance=rs={float(fx.parameters.get('rs', 0.0)):.3f}:"
+        f"gs={float(fx.parameters.get('gs', 0.0)):.3f}:"
+        f"bs={float(fx.parameters.get('bs', 0.0)):.3f},"
+        f"eq=contrast={float(fx.parameters.get('contrast', 1.04)):.2f}:"
+        f"saturation={float(fx.parameters.get('saturation', 1.04)):.2f}:"
+        f"gamma={float(fx.parameters.get('gamma', 1.00)):.2f}"
+    ),
+    "video_stabilize": lambda fx: (
+        f"deshake=rx={int(fx.parameters.get('rx', 16))}:ry={int(fx.parameters.get('ry', 16))}:edge=mirror"
     ),
 }
 
@@ -69,17 +80,47 @@ def _render_video_segment(
 
     kb = item.ken_burns
     has_doc_card = bool(kb and kb.caption_title and kb.caption_title.strip())
+    has_paired_photo = bool(
+        is_portrait
+        and item.paired_visual_source
+        and Path(item.paired_visual_source).exists()
+    )
     card_png: Optional[Path] = None
-    if has_doc_card:
+    if has_doc_card or has_paired_photo:
         card_png = output_mp4.with_suffix(".card.png")
-        render_frosted_video_overlay_png(
-            output_png=card_png,
-            width=width,
-            height=height,
-            caption_title=kb.caption_title or "",
-            caption_subtitle=kb.caption_subtitle or "",
-            camera_badge=kb.camera_badge or "",
-        )
+        if has_doc_card:
+            render_frosted_video_overlay_png(
+                output_png=card_png,
+                width=width,
+                height=height,
+                caption_title=kb.caption_title or "",
+                caption_subtitle=kb.caption_subtitle or "",
+                camera_badge=kb.camera_badge or "",
+            )
+        else:
+            from PIL import Image
+
+            Image.new("RGBA", (width, height), (0, 0, 0, 0)).save(card_png, "PNG")
+
+        if has_paired_photo and item.paired_visual_source:
+            try:
+                from PIL import Image, ImageOps
+                from .ken_burns import _build_double_matte_card
+
+                base_ov = Image.open(card_png).convert("RGBA")
+                p_img = ImageOps.exif_transpose(Image.open(item.paired_visual_source)).convert("RGB")
+                p_card = _build_double_matte_card(
+                    p_img,
+                    max_w=int(width * 0.40),
+                    max_h=int(height * (0.74 if has_doc_card else 0.80)),
+                    scale_factor=width / 1920.0,
+                )
+                rx = int(width * 0.72) - p_card.width // 2
+                ry = int(height * (0.43 if has_doc_card else 0.48)) - p_card.height // 2
+                base_ov.paste(p_card, (rx, max(8, ry)), p_card)
+                base_ov.save(card_png, "PNG")
+            except Exception:
+                has_paired_photo = False
 
     post_filters: list[str] = [f"fps={fps}", "setsar=1:1"]
     for fx in attached_effects or []:
@@ -118,21 +159,22 @@ def _render_video_segment(
 
     speed_prefix = f"setpts={1.0 / item.speed:.4f}*PTS," if (item.speed != 1.0 and item.speed > 0) else ""
 
-    # Build filtergraph: handles portrait 9:16 ambient blurred backdrop + optional frosted documentary card overlay
+    # Build filtergraph: handles portrait 9:16 ambient blurred backdrop (+ optional Live Video+Photo Diptych) + frosted card
     filter_complex_parts: list[str] = []
     if is_portrait:
-        fg_h = int(round(height * (0.76 if has_doc_card else 0.84)))
+        fg_h = int(round(height * (0.74 if (has_doc_card or has_paired_photo) else 0.84)))
         fg_h = fg_h - (fg_h % 2)
         pad_px = max(6, int(round(12 * (width / 1920.0))))
         pad_px = pad_px - (pad_px % 2)
-        y_pos = int(round(height * (0.04 if has_doc_card else 0.08)))
+        y_pos = int(round(height * (0.05 if (has_doc_card or has_paired_photo) else 0.08)))
+        x_expr = "(W*28/100)-(w/2)" if has_paired_photo else "(W-w)/2"
         filter_complex_parts.append(
             f"[0:v]{speed_prefix}split=2[vbg][vfg];"
             f"[vbg]scale={width // 4}:{height // 4}:force_original_aspect_ratio=increase,"
             f"crop={width // 4}:{height // 4},boxblur=16:8,eq=brightness=-0.18:saturation=0.85,"
             f"scale={width}:{height}[bg_blur];"
             f"[vfg]scale=-2:{fg_h},pad=iw+{pad_px * 2}:ih+{pad_px * 2}:{pad_px}:{pad_px}:color=#F8F6F0[fg_framed];"
-            f"[bg_blur][fg_framed]overlay=(W-w)/2:{y_pos}[vbase]"
+            f"[bg_blur][fg_framed]overlay={x_expr}:{y_pos}[vbase]"
         )
     else:
         filter_complex_parts.append(
@@ -256,6 +298,11 @@ def _build_ducking_volume_expr(
     for clip in timeline.visual_track:
         if clip.type == "video" and clip.volume >= 0.45:
             windows.append((clip.timeline_start, clip.timeline_start + clip.duration))
+
+    for a_trk in timeline.audio_tracks:
+        if a_trk.role == "voiceover":
+            vo_dur = a_trk.duration or 3.2
+            windows.append((max(0.0, a_trk.timeline_start - 0.25), a_trk.timeline_start + vo_dur + 0.35))
 
     if not windows:
         return f"{base_vol:.3f}"
@@ -497,8 +544,11 @@ def render_timeline(
 
         bgm_input_start_idx = title_input_start_idx + len(active_titles)
         for a_item in active_bgm:
-            # Always enable -stream_loop -1 so BGM never cuts out before the end of the video!
-            final_cmd.extend(["-stream_loop", "-1", "-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
+            if a_item.role == "music":
+                # Enable -stream_loop -1 on BGM music tracks so they cover the full video runtime
+                final_cmd.extend(["-stream_loop", "-1", "-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
+            else:
+                final_cmd.extend(["-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
 
         filter_parts: list[str] = []
         cur_v = "[0:v]"
@@ -551,8 +601,11 @@ def render_timeline(
             mix_inputs = ["[0:a]"]
             for a_idx, a_item in enumerate(active_bgm):
                 in_idx = bgm_input_start_idx + a_idx
-                # Ensure primary BGM covers 100% of total_dur when starting at 0.0
-                a_dur = total_dur if a_item.timeline_start <= 0.1 else min(total_dur - a_item.timeline_start, a_item.duration or total_dur)
+                # Ensure primary BGM covers 100% of total_dur when starting at 0.0, while voiceover/sfx play their exact duration
+                if a_item.role == "music" and a_item.timeline_start <= 0.1:
+                    a_dur = total_dur
+                else:
+                    a_dur = min(max(0.2, total_dur - a_item.timeline_start), a_item.duration or total_dur)
                 vol_expr = (
                     _build_ducking_volume_expr(timeline, a_item.volume, a_item.duck_volume)
                     if a_item.duck_under_dialogue

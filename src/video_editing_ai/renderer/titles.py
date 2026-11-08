@@ -153,6 +153,82 @@ def render_title_png(
                 scale=s,
             )
 
+    elif item.style == "route_map_card":
+        # Sleek National Geographic / Apple TV+ smoked-glass Route & Chapter Waypoint Progression Card
+        _draw_bottom_scrim(img, scrim_height_ratio=0.26, max_alpha=115)
+        draw = ImageDraw.Draw(img)
+
+        f_title = _load_font(int(round(25 * s)), bold=True, serif=True)
+        f_sub = _load_font(int(round(16 * s)), bold=False, serif=False)
+        f_wp = _load_font(int(round(14 * s)), bold=True, serif=False)
+
+        waypoints = item.map_waypoints or [
+            {"label": "Departure", "completed": True, "active": False},
+            {"label": item.text[:20], "completed": True, "active": True},
+            {"label": "Finale", "completed": False, "active": False},
+        ]
+
+        pw = min(int(width * 0.78), max(int(round(580 * s)), len(waypoints) * int(round(170 * s))))
+        ph = int(round(126 * s))
+        pl = (width - pw) // 2
+        pt = height - ph - int(round(36 * s))
+        pr, pb = pl + pw, pt + ph
+        radius = int(round(14 * s))
+
+        draw.rounded_rectangle(
+            [pl, pt, pr, pb],
+            radius=radius,
+            fill=(12, 14, 18, 156),
+            outline=(255, 255, 255, 42),
+            width=max(1, int(round(1.0 * s))),
+        )
+
+        # Draw connected route waypoint nodes across the upper half of the card
+        n_wp = max(1, len(waypoints))
+        track_pad = int(round(68 * s))
+        node_y = pt + int(round(32 * s))
+        x_start = pl + track_pad
+        x_end = pr - track_pad
+        if n_wp > 1:
+            draw.line(
+                [(x_start, node_y), (x_end, node_y)],
+                fill=(120, 126, 138, 165),
+                width=max(2, int(round(2.0 * s))),
+            )
+
+        for idx_w, wp in enumerate(waypoints):
+            wx = x_start + int(round((x_end - x_start) * (idx_w / max(1, n_wp - 1)))) if n_wp > 1 else (pl + pr) // 2
+            is_act = bool(wp.get("active"))
+            is_comp = bool(wp.get("completed")) or is_act
+            rad_outer = int(round((8 if is_act else 5) * s))
+            if is_act:
+                draw.ellipse(
+                    [wx - rad_outer - 4, node_y - rad_outer - 4, wx + rad_outer + 4, node_y + rad_outer + 4],
+                    fill=(232, 228, 220, 68),
+                )
+            node_fill = (250, 248, 244, 255) if is_act else ((186, 192, 202, 225) if is_comp else (96, 102, 112, 190))
+            draw.ellipse([wx - rad_outer, node_y - rad_outer, wx + rad_outer, node_y + rad_outer], fill=node_fill)
+
+            lbl = str(wp.get("label") or f"Stop {idx_w + 1}")[:18]
+            lw = draw.textbbox((0, 0), lbl, font=f_wp)[2]
+            lbl_col = (250, 248, 244, 245) if is_act else (168, 174, 184, 210)
+            draw.text((wx - lw // 2, node_y + int(round(11 * s))), lbl, font=f_wp, fill=lbl_col)
+
+        # Chapter headline & waypoint subtitle centered in the lower section
+        tw = draw.textbbox((0, 0), item.text, font=f_title)[2]
+        ty = pt + int(round(68 * s))
+        _draw_cinema_text(draw, (pl + (pw - tw) // 2, ty), item.text, font=f_title, fill=(250, 248, 244, 255), scale=s)
+        if sub_text:
+            sw = draw.textbbox((0, 0), sub_text, font=f_sub)[2]
+            _draw_cinema_text(
+                draw,
+                (pl + (pw - sw) // 2, ty + int(round(30 * s))),
+                sub_text,
+                font=f_sub,
+                fill=(196, 202, 212, 230),
+                scale=s,
+            )
+
     else:
         # Refined smoked-glass documentary lower-third card (no yellow bars, no technical header)
         _draw_bottom_scrim(img, scrim_height_ratio=0.22, max_alpha=100)

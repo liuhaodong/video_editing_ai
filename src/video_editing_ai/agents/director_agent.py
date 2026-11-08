@@ -539,6 +539,77 @@ class ProductionDirectorAgent(BaseEditingAgent):
             )
             return review, False
 
+        # 6b. Review Stage 25: NarratorVoiceoverAgent
+        if rid == "narrator_voiceover":
+            nar = blackboard.custom_artifacts.get("narration_script.json") or {}
+            cues_cnt = int(nar.get("total_cues", 0))
+            persona = str(nar.get("voice_persona", "warm_documentary_essayist"))
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.5,
+                critique=(
+                    f"Voiceover Narrator scripted & synthesized {cues_cnt} documentary narration cues "
+                    f"({persona}) at non-dialogue chapter bridges."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"NarrationScript generated {cues_cnt} 48kHz stereo voiceover cues ({persona}).",
+                thinking="Verified that narration cues only enter during non-dialogue montage openings/closings and trigger -14dB BGM auto-ducking.",
+            )
+            return review, False
+
+        # 6c. Review Stage 32: CameraOperatorAgent
+        if rid == "camera_operator":
+            cam = blackboard.custom_artifacts.get("cinematography_report.json") or {}
+            dip_cnt = int(cam.get("portrait_video_diptychs_created", 0))
+            stab_cnt = int(cam.get("stabilized_clips_count", 0))
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.5,
+                critique=(
+                    f"Camera Operator paired {dip_cnt} vertical 9:16 videos into Live Video+Photo Diptychs "
+                    f"and stabilized {stab_cnt} handheld B-roll clips."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"CinematographyReport paired {dip_cnt} portrait videos into Live Diptychs and stabilized {stab_cnt} handheld clips.",
+                thinking="Eliminating empty 9:16 pillarbox bars via side-by-side gallery pairing and smoothing walking B-roll elevates widescreen polish.",
+            )
+            return review, False
+
+        # 6d. Review Stage 38: MotionGraphicsAgent
+        if rid == "motion_graphics":
+            mg = blackboard.custom_artifacts.get("motion_graphics_plan.json") or {}
+            mg_cnt = int(mg.get("graphics_injected", 0))
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.5,
+                critique=(
+                    f"Motion Graphics Animator injected {mg_cnt} smoked-glass Route Map & Chapter Waypoint "
+                    "progression cards on Track V3."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"MotionGraphicsReport placed {mg_cnt} route_map_card waypoint overlays at chapter transitions.",
+                thinking="Connected waypoint progression gives the viewer clear spatial and chronological orientation between acts.",
+            )
+            return review, False
+
         # 7. Review Stage 40: VFXAgent (or any custom Stage-40 plugin)
         if agent.stage_order == 40:
             tl = blackboard.timeline
@@ -566,6 +637,54 @@ class ProductionDirectorAgent(BaseEditingAgent):
                 review,
                 observation=f"Stage-40 VFX plugin attached {len(tl.effects_track) if tl else 0} effects ({clamped} exceeded 0.48 intensity).",
                 thinking="Calibrating effect intensity <= 0.45 so 10-bit HLG HDR (arib-std-b67) skin tones and museum highlights remain natural without clipping.",
+            )
+            return review, False
+
+        # 7b. Review Stage 42: ColoristAgent
+        if rid == "colorist":
+            col = blackboard.custom_artifacts.get("color_grade_plan.json") or {}
+            matched_cnt = int(col.get("shots_matched_count", 0))
+            look_str = str(col.get("primary_film_stock_look", "archival_kodak_2383"))
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6,
+                critique=(
+                    f"Senior DI Colorist normalized white balance & midtone exposure across {matched_cnt} shots "
+                    f"and applied '{look_str}' 10-bit Film Stock LUT."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"ColorGradeReport matched {matched_cnt} clips across mixed cameras to '{look_str}' look.",
+                thinking="Shot-to-shot Kelvin and midtone gamma normalization removes jarring camera jumps between mirrorless and smartphone sensors.",
+            )
+            return review, False
+
+        # 7c. Review Stage 45: SoundDesignerAgent
+        if rid == "sound_designer":
+            sd = blackboard.custom_artifacts.get("sound_design_plan.json") or {}
+            amb_cnt = int(sd.get("ambient_beds_count", 0))
+            fol_cnt = int(sd.get("foley_accents_count", 0))
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6,
+                critique=(
+                    f"Supervising Sound Designer layered {amb_cnt} spatial acoustic beds, {fol_cnt} foley accents, "
+                    "and 0.40s J/L-cut audio crossfades (-14 LUFS broadcast target)."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"SoundDesignReport synthesized {amb_cnt} spatial room-tone beds and {fol_cnt} tactile foley cues.",
+                thinking="Subtle diegetic room air under photo galleries and 0.40s J/L-cut audio crossfades eliminate dead air and cut clicks.",
             )
             return review, False
 

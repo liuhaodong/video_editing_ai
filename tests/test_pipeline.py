@@ -996,6 +996,73 @@ def test_zero_project_specific_hardcodings_and_pure_ai_delegation(tmp_path: Path
     assert any(it.annotation_title == "AI-Analyzed Botanical Conservatory Dome" for it in pc.items)
     assert any(it.recommended_photo_mode == "curator_loupe" for it in pc.items)
 
+    # Verify all 5 new big-budget post-production departments executed and wrote their contracts
+    from video_editing_ai.models.schema import (
+        CinematographyReport,
+        ColorGradeReport,
+        MotionGraphicsReport,
+        NarrationScriptReport,
+        SoundDesignReport,
+        TitleOverlayItem,
+    )
+    from video_editing_ai.renderer.titles import render_title_png
+
+    executed_roles = {a["role_id"] for a in bb.executed_agents}
+    for required_role in (
+        "narrator_voiceover",
+        "camera_operator",
+        "motion_graphics",
+        "colorist",
+        "sound_designer",
+    ):
+        assert required_role in executed_roles, f"Missing big-budget agent {required_role}"
+
+    nar_report = NarrationScriptReport.from_json_file(proj_dir / "narration_script.json")
+    assert nar_report.total_cues >= 1
+    assert Path(nar_report.cues[0].audio_path).exists()
+
+    cam_report = CinematographyReport.from_json_file(proj_dir / "cinematography_report.json")
+    assert len(cam_report.operations) >= 1
+
+    mg_report = MotionGraphicsReport.from_json_file(proj_dir / "motion_graphics_plan.json")
+    assert mg_report.graphics_injected >= 1
+
+    col_report = ColorGradeReport.from_json_file(proj_dir / "color_grade_plan.json")
+    assert col_report.shots_matched_count >= 1
+    assert col_report.primary_film_stock_look in (
+        "archival_kodak_2383",
+        "museum_chiaroscuro",
+        "golden_hour_warmth",
+        "twilight_teal_amber",
+        "neutral_reference",
+    )
+
+    sd_report = SoundDesignReport.from_json_file(proj_dir / "sound_design_plan.json")
+    assert sd_report.j_l_cut_crossfade_sec >= 0.40
+
+    # Verify route_map_card rendering via render_title_png
+    route_png = tmp_path / "route_map_test.png"
+    render_title_png(
+        TitleOverlayItem(
+            id="mg_route_01",
+            style="route_map_card",
+            text="Chapter 2: Botanical Glasshouse",
+            subtitle="Journey Waypoint 2 of 4 · Conservatory Wing",
+            timeline_start=12.0,
+            duration=3.2,
+            map_waypoints=[
+                {"label": "Entrance", "completed": True, "active": False},
+                {"label": "Glasshouse", "completed": True, "active": True},
+                {"label": "Terrace", "completed": False, "active": False},
+            ],
+        ),
+        route_png,
+        width=960,
+        height=540,
+    )
+    assert route_png.exists() and route_png.stat().st_size > 2000
+
+
 
 
 

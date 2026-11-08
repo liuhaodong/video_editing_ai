@@ -20,7 +20,14 @@ from . import (
 )
 from .base import AgentRegistry, BaseEditingAgent, PipelineBlackboard
 from .director_agent import ProductionDirectorAgent
-from .plugins import vfx_agent as _vfx  # noqa: F401
+from .plugins import (
+    camera_operator_agent as _camera_op,  # noqa: F401
+    colorist_agent as _colorist,  # noqa: F401
+    motion_graphics_agent as _motion_gfx,  # noqa: F401
+    narrator_agent as _narrator,  # noqa: F401
+    sound_designer_agent as _sound_des,  # noqa: F401
+    vfx_agent as _vfx,  # noqa: F401
+)
 
 
 class MultiAgentOrchestrator:

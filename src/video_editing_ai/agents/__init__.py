@@ -28,6 +28,11 @@ from .picture_editors import (
     MontageEditorAgent,
     apply_timeline_intelligence_overrides,
 )
+from .plugins.camera_operator_agent import CameraOperatorAgent
+from .plugins.colorist_agent import ColoristAgent
+from .plugins.motion_graphics_agent import MotionGraphicsAgent
+from .plugins.narrator_agent import NarratorVoiceoverAgent
+from .plugins.sound_designer_agent import SoundDesignerAgent
 from .plugins.vfx_agent import VFXAgent
 from .showrunner_agent import ShowrunnerAgent
 from .story_producer_agent import StoryProducerAgent, apply_story_plan_overrides
@@ -36,16 +41,21 @@ __all__ = [
     "AgentRegistry",
     "AudioVibeAgent",
     "BaseEditingAgent",
+    "CameraOperatorAgent",
     "ClientIntakeAgent",
+    "ColoristAgent",
     "CullerAgent",
     "DialogueEditorAgent",
     "MontageEditorAgent",
+    "MotionGraphicsAgent",
     "MultiAgentOrchestrator",
     "MusicSupervisorAgent",
+    "NarratorVoiceoverAgent",
     "PhotoCuratorAgent",
     "PipelineBlackboard",
     "ProductionDirectorAgent",
     "ShowrunnerAgent",
+    "SoundDesignerAgent",
     "StoryProducerAgent",
     "VFXAgent",
     "apply_story_plan_overrides",

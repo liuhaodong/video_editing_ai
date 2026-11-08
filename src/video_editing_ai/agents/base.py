@@ -231,13 +231,21 @@ class PipelineBlackboard:
                 self.director_review = DirectorReviewReport.from_json_file(p / "director_review.json")
             except Exception:
                 pass
-        if (p / "vfx_manifest.json").exists() and "vfx_manifest.json" not in self.custom_artifacts:
-            try:
-                self.custom_artifacts["vfx_manifest.json"] = json.loads(
-                    (p / "vfx_manifest.json").read_text(encoding="utf-8")
-                )
-            except Exception:
-                pass
+        for custom_fname in (
+            "vfx_manifest.json",
+            "narration_script.json",
+            "cinematography_report.json",
+            "motion_graphics_plan.json",
+            "color_grade_plan.json",
+            "sound_design_plan.json",
+        ):
+            if (p / custom_fname).exists() and custom_fname not in self.custom_artifacts:
+                try:
+                    self.custom_artifacts[custom_fname] = json.loads(
+                        (p / custom_fname).read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    pass
         if (p / "blackboard.json").exists() and not self.messages:
             try:
                 bb_doc = json.loads((p / "blackboard.json").read_text(encoding="utf-8"))

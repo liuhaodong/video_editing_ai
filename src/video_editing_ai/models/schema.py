@@ -97,6 +97,12 @@ class VideoAsset(BaseModel):
     color_space: str = Field(default="bt709")
     has_audio: bool = Field(default=True)
     creation_time: Optional[str] = Field(default=None)
+    gps_lat: Optional[float] = Field(default=None, description="Decimal latitude extracted from metadata")
+    gps_lon: Optional[float] = Field(default=None, description="Decimal longitude extracted from metadata")
+    color_stats: dict[str, float] = Field(
+        default_factory=dict,
+        description="Mechanically measured RGB means, luminance percentiles (p05, p50, p95), and estimated Kelvin",
+    )
     overall_summary: str = Field(default="", description="High-level summary of the clip and its story value")
     scenes: list[SceneSegment] = Field(default_factory=list)
     dialogues: list[DialogueSegment] = Field(default_factory=list)
@@ -118,6 +124,12 @@ class PhotoAsset(BaseModel):
     )
     exif_summary: Optional[str] = Field(
         default=None, description="Mechanically extracted EXIF exposure summary (focal length, aperture, ISO)"
+    )
+    gps_lat: Optional[float] = Field(default=None, description="Decimal latitude extracted from EXIF GPSInfo")
+    gps_lon: Optional[float] = Field(default=None, description="Decimal longitude extracted from EXIF GPSInfo")
+    color_stats: dict[str, float] = Field(
+        default_factory=dict,
+        description="Mechanically measured RGB means, luminance percentiles (p05, p50, p95), and estimated Kelvin",
     )
     caption: str = Field(default="", description="Detailed description of what is in the photo")
     subjects: list[str] = Field(default_factory=list, description="Main people, objects, or landmarks")
@@ -742,6 +754,10 @@ class VisualTrackItem(BaseModel):
         le=2.0,
         description="10-frame (0.33s) audio crossfade to prevent ambient sound clicks/pops",
     )
+    paired_visual_source: Optional[str] = Field(
+        default=None,
+        description="Optional paired vertical photo/video path for rendering a 9:16 portrait video as a Live Video+Photo Diptych",
+    )
     ken_burns: Optional[KenBurnsConfig] = Field(default=None, description="Ken Burns / Gallery Frame settings for photos")
     transition_in: TransitionConfig = Field(default_factory=TransitionConfig)
     transition_out: TransitionConfig = Field(default_factory=TransitionConfig)
@@ -766,7 +782,7 @@ class EffectTrackItem(BaseModel):
     id: str
     effect_type: str = Field(
         ...,
-        description="Pluggable effect identifier (e.g., 'warm_glow', 'vignette_focus', 'contrast_pop', 'speed_ramp')",
+        description="Pluggable effect identifier (e.g., 'warm_glow', 'vignette_focus', 'contrast_pop', 'color_grade', 'video_stabilize')",
     )
     target_clip_id: Optional[str] = Field(default=None, description="Optional clip ID this effect attaches to")
     timeline_start: float = Field(..., ge=0.0)
@@ -777,12 +793,17 @@ class EffectTrackItem(BaseModel):
 
 
 class TitleOverlayItem(BaseModel):
-    """A graphical title card, chapter banner, or lower-third callout (Track V3)."""
+    """A graphical title card, chapter banner, route map, or lower-third callout (Track V3)."""
 
     id: str
-    style: Literal["opening_card", "act_banner", "lower_third", "dialogue_badge", "closing_card"] = Field(
-        default="lower_third"
-    )
+    style: Literal[
+        "opening_card",
+        "act_banner",
+        "lower_third",
+        "dialogue_badge",
+        "closing_card",
+        "route_map_card",
+    ] = Field(default="lower_third")
     text: str = Field(..., description="Primary title or callout headline")
     subtitle: Optional[str] = Field(default=None, description="Secondary line or English/bilingual subtitle")
     timeline_start: float = Field(..., ge=0.0)
@@ -790,6 +811,187 @@ class TitleOverlayItem(BaseModel):
     fade_in: float = Field(default=0.35, ge=0.0)
     fade_out: float = Field(default=0.35, ge=0.0)
     accent_color: str = Field(default="#E8E4DC", description="Hex color for subtle pearl/alabaster highlight")
+    map_waypoints: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Optional route waypoints [{'label': '...', 'active': True, 'lat': ..., 'lon': ...}] for route_map_card",
+    )
+
+
+# ============================================================================
+# Big-Budget Post-Production Department Contracts (Stages 25, 32, 38, 42, 45)
+# ============================================================================
+
+
+class NarrationCue(BaseModel):
+    """A single documentary voiceover narration cue produced by Stage 25 NarratorVoiceoverAgent."""
+
+    cue_id: str
+    chapter_id: str
+    target_timeline_sec: float = Field(default=0.0, ge=0.0)
+    duration_sec: float = Field(default=3.2, gt=0.5)
+    spoken_text: str
+    subtitle_translation: Optional[str] = None
+    voice_persona: str = "warm_documentary_narrator"
+    audio_path: str = ""
+    rationale: str = ""
+
+
+class NarrationScriptReport(BaseModel):
+    """Stage 25 Output (narration_script.json): Documentary script & synthesized voiceover report."""
+
+    project_title: str
+    voice_persona: str = "warm_documentary_narrator"
+    synthesis_engine: str = "acoustic_tts"
+    total_cues: int = 0
+    cues: list[NarrationCue] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "NarrationScriptReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class ClipCameraOperation(BaseModel):
+    """A per-clip stabilization, smart-reframe, or vertical video diptych pairing operation (Stage 32)."""
+
+    clip_id: str
+    operation_type: Literal["video_diptych_pair", "optical_stabilize", "subtle_push_in", "keep_native"] = "keep_native"
+    paired_visual_source: Optional[str] = None
+    stabilize_strength: float = Field(default=0.35, ge=0.0, le=1.0)
+    rationale: str = ""
+
+
+class CinematographyReport(BaseModel):
+    """Stage 32 Output (cinematography_report.json): Camera Operator stabilization & video diptych report."""
+
+    project_title: str
+    portrait_video_diptychs_created: int = 0
+    stabilized_clips_count: int = 0
+    operations: list[ClipCameraOperation] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "CinematographyReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class MotionGraphicItem(BaseModel):
+    """A single route map or chapter progression graphic card planned by Stage 38 MotionGraphicsAgent."""
+
+    graphic_id: str
+    chapter_id: str
+    title: str
+    subtitle: str = ""
+    timeline_start: float = Field(default=0.0, ge=0.0)
+    duration: float = Field(default=3.2, gt=0.5)
+    waypoints: list[dict[str, Any]] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class MotionGraphicsReport(BaseModel):
+    """Stage 38 Output (motion_graphics_plan.json): GPS route map & chapter progression graphics plan."""
+
+    project_title: str
+    gps_Tagged_assets_found: int = 0
+    graphics_injected: int = 0
+    items: list[MotionGraphicItem] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "MotionGraphicsReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class ClipColorGrade(BaseModel):
+    """Per-clip shot-to-shot white-balance normalization and film-stock look parameters (Stage 42)."""
+
+    clip_id: str
+    chapter_look: Literal[
+        "archival_kodak_2383",
+        "museum_chiaroscuro",
+        "golden_hour_warmth",
+        "twilight_teal_amber",
+        "neutral_reference",
+    ] = "archival_kodak_2383"
+    measured_kelvin: float = 5500.0
+    wb_red_shift: float = 0.0
+    wb_green_shift: float = 0.0
+    wb_blue_shift: float = 0.0
+    contrast: float = 1.04
+    saturation: float = 1.04
+    gamma: float = 1.00
+    rationale: str = ""
+
+
+class ColorGradeReport(BaseModel):
+    """Stage 42 Output (color_grade_plan.json): Senior DI Colorist camera matching & look report."""
+
+    project_title: str
+    primary_film_stock_look: str = "archival_kodak_2383"
+    shots_matched_count: int = 0
+    chapter_looks: dict[str, str] = Field(default_factory=dict)
+    clip_grades: list[ClipColorGrade] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "ColorGradeReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class SoundDesignCue(BaseModel):
+    """A spatial acoustic ambience bed or transition foley cue synthesized by Stage 45 SoundDesignerAgent."""
+
+    cue_id: str
+    cue_type: Literal[
+        "gallery_hall_air",
+        "outdoor_breeze_water",
+        "cafe_porcelain_murmur",
+        "warm_room_tone",
+        "velvet_whoosh",
+        "polaroid_shutter",
+        "optical_loupe_chime",
+    ] = "warm_room_tone"
+    timeline_start: float = Field(default=0.0, ge=0.0)
+    duration: float = Field(default=4.0, gt=0.2)
+    volume: float = Field(default=0.08, ge=0.0, le=1.0)
+    audio_path: str = ""
+    rationale: str = ""
+
+
+class SoundDesignReport(BaseModel):
+    """Stage 45 Output (sound_design_plan.json): Supervising Sound Designer ambience & foley mix plan."""
+
+    project_title: str
+    target_loudness_lufs: float = -14.0
+    j_l_cut_crossfade_sec: float = 0.40
+    ambient_beds_count: int = 0
+    foley_accents_count: int = 0
+    cues: list[SoundDesignCue] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "SoundDesignReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 class AudioTrackItem(BaseModel):

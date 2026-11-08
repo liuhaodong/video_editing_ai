@@ -477,7 +477,18 @@ def cmd_apply_story_plan(args: argparse.Namespace) -> int:
             use_antigravity=False,
         )
         bb.load_existing_contracts()
-        for role_id in ["aroll_editor", "broll_editor", "montage_editor", "vfx_designer", "sound_mixer", "production_director"]:
+        for role_id in [
+            "narrator_voiceover",
+            "dialogue_editor",
+            "montage_editor",
+            "camera_operator",
+            "motion_graphics",
+            "vfx_designer",
+            "colorist",
+            "sound_designer",
+            "showrunner",
+            "production_director",
+        ]:
             cls = AgentRegistry.get(role_id)
             if cls:
                 cls().run(bb)
