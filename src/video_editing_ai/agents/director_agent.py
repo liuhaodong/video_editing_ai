@@ -622,7 +622,10 @@ class ProductionDirectorAgent(BaseEditingAgent):
             if b_item.timeline_start + b_item.duration > total_dur:
                 b_item.timeline_start = round(max(0.5, total_dur - b_item.duration - 0.5), 2)
 
-        # 2. Ensure Track V3 title cards have clean separation and never exceed total_dur
+        # 2. Ensure Track V3 title cards have clean separation, remove cluttered act_banner/dialogue_badge boxes, and never exceed total_dur
+        tl.title_track = [
+            t for t in tl.title_track if t.style not in ("act_banner", "dialogue_badge")
+        ]
         tl.title_track.sort(key=lambda t: t.timeline_start)
         for idx, t_item in enumerate(tl.title_track):
             if idx > 0:
@@ -637,10 +640,9 @@ class ProductionDirectorAgent(BaseEditingAgent):
             if item.type == "photo" and item.ken_burns is not None:
                 c_title = (item.ken_burns.caption_title or "").strip()
                 if not c_title or re.match(r"^(IMG_|_?DSC|PXL_|Capture\s)", c_title, re.IGNORECASE):
-                    act_label = (item.act or "Curated Gallery Plate").split("-")[0].strip()
-                    item.ken_burns.caption_title = f"{act_label} — Curated Keepsake Plate #{p_idx + 1:02d}"
+                    item.ken_burns.caption_title = f"Curated Keepsake Plate #{p_idx + 1:02d}"
                     if not item.ken_burns.caption_subtitle:
-                        item.ken_burns.caption_subtitle = "4K HDR 精选视觉记忆 · 珍藏光影瞬间"
+                        item.ken_burns.caption_subtitle = "Selected Visual Memory"
                     captions_upgraded += 1
 
         # 2c. Render Multimodal Timeline Screening Contact Sheet & run AI Executive Director inspection

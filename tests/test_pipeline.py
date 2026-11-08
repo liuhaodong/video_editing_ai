@@ -734,6 +734,8 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
         ("curator_loupe", "museum_spotlight"),
         ("editorial_magazine", "none"),
         ("cinema_anamorphic", "champagne_bokeh"),
+        ("diptych_frame", "none"),
+        ("parallax_gallery", "none"),
     ]
     for mode_name, fx_name in new_modes_and_finishers:
         kb = KenBurnsConfig(
@@ -743,11 +745,15 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
             tertiary_source=str(p3),
             caption_title=f"Title for {mode_name}",
             caption_subtitle=f"Subtitle with {fx_name} finisher",
-            camera_badge="PARIS 4K HDR",
+            camera_badge="GALLERY 4K HDR",
         )
         ctx = _prepare_photo_scene_context(p1, width=480, height=270, kb=kb)
-        frame = _render_photo_frame_from_context(ctx, t_norm=0.5, f_idx=15, duration=2.0, fps=24)
-        assert frame.size == (480, 270)
+        for t_check in (0.0, 0.5, 1.0):
+            frame = _render_photo_frame_from_context(ctx, t_norm=t_check, f_idx=15, duration=2.0, fps=24)
+            assert frame.size == (480, 270)
+            # Ensure no out-of-bounds black bar on left or right edges at any point in the animation
+            assert frame.getpixel((0, 135)) != (0, 0, 0), f"Left edge black bar in {mode_name} at t={t_check}"
+            assert frame.getpixel((479, 135)) != (0, 0, 0), f"Right edge black bar in {mode_name} at t={t_check}"
 
     # Render an actual MP4 clip with cinematic_depth_3d + golden_light_leak
     out_mp4 = tmp_path / "depth_3d_clip.mp4"
@@ -918,17 +924,34 @@ def test_zero_project_specific_hardcodings_and_pure_ai_delegation(tmp_path: Path
     assert not hasattr(photo_curator_agent, "LOUVRE_CURATED_MASTERPIECES")
 
     repo_root = Path(__file__).resolve().parent.parent
-    py_files = list((repo_root / "src").rglob("*.py")) + list((repo_root / ".agent").rglob("*.py"))
+    checked_files = (
+        list((repo_root / "src").rglob("*.py"))
+        + list((repo_root / "src").rglob("*.html"))
+        + list((repo_root / ".agent").rglob("*.py"))
+        + list((repo_root / ".agent").rglob("*.md"))
+    )
     forbidden_pattern = re.compile(
-        r"(LOUVRE_CURATED_MASTERPIECES|\bis_louvre\b|\bis_halloween\b|\blouvre_paris\b|\bhalloween_park\b|_DSC4025|PXL_20260419)",
+        r"(LOUVRE_CURATED_MASTERPIECES|\bis_louvre\b|\bis_halloween\b|\blouvre_paris\b|\bhalloween_park\b"
+        r"|_DSC4025|PXL_20260419|ILCE-7CM2|is_dedicated_camera|louvre_day_trip_project|2026-10-31|hihao)",
         re.IGNORECASE,
     )
     violations: list[str] = []
-    for p in py_files:
+    for p in checked_files:
         text = p.read_text(encoding="utf-8", errors="ignore")
         for m in forbidden_pattern.finditer(text):
             violations.append(f"{p.relative_to(repo_root)}: {m.group(0)}")
     assert violations == [], f"Found project-specific hardcodings: {violations}"
+
+    cjk_pattern = re.compile(r"[\u4e00-\u9fff]+")
+    cjk_violations: list[str] = []
+    allowed_multilingual_parsers = {"intake_agent.py", "transcriber.py"}
+    for p in (repo_root / "src").rglob("*.py"):
+        if p.name in allowed_multilingual_parsers:
+            continue
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        for m in cjk_pattern.finditer(text):
+            cjk_violations.append(f"{p.relative_to(repo_root)}: {m.group(0)}")
+    assert cjk_violations == [], f"Found hardcoded CJK fallback strings in src/: {cjk_violations}"
 
     # Verify AI delegation via ai_decisions/photo_curator.json
     proj_dir = tmp_path / "pure_ai_proj"

@@ -10,6 +10,7 @@ from ..analyzer.media_probe import (
     AUDIO_EXTENSIONS,
     PHOTO_EXTENSIONS,
     VIDEO_EXTENSIONS,
+    _extract_exif_camera_info,
     iter_media_files_recursive,
 )
 from ..models.schema import (
@@ -81,17 +82,20 @@ def inspect_media_library(
             if len(sample_files) < 6:
                 sample_files.append(fname)
 
-            if fname.startswith(("_DSC", "A7C")):
-                cameras.add("Sony A7C II (33MP / 4K XAVC-S)")
-            elif fname.startswith("PXL_"):
-                cameras.add("Google Pixel (4K HDR)")
-            elif fname.startswith(("IMG_", "MVI_")):
-                cameras.add("Apple iPhone / Canon")
-
             if ext in VIDEO_EXTENSIONS:
                 v_count += 1
             elif ext in PHOTO_EXTENSIONS:
                 p_count += 1
+                if len(cameras) < 4 and p_count <= 16:
+                    try:
+                        from PIL import Image
+
+                        with Image.open(f) as im:
+                            cam_badge, _ = _extract_exif_camera_info(im, f)
+                            if cam_badge:
+                                cameras.add(cam_badge)
+                    except Exception:
+                        pass
             elif ext in AUDIO_EXTENSIONS:
                 a_count += 1
 
@@ -276,12 +280,12 @@ def generate_intake_questions(
             question="3. Premium Photo Presentation Effects Suite (Multi-Select — Pick all styles to choreograph across chapters)",
             options=[
                 "cinematic_depth_3d (Recommended) — 3-Plane Subject Depth-Mask Parallax & Bokeh Rack-Focus (Hero Landmarks & Sculptures)",
-                "triptych_cinematic (Recommended) — 3-Panel Staggered Storyboard Triptych (3-Course French Meals & Architectural Sequences)",
+                "triptych_cinematic (Recommended) — 3-Panel Staggered Storyboard Triptych (Culinary Courses & Architectural Sequences)",
                 "polaroid_scrapbook (Recommended) — Tilted Vintage Instant-Film Polaroid Stack (Candid Selfies, Café & Keepsakes)",
-                "curator_loupe (Recommended) — 1.65x Optical Magnifying Glass Spotlight with Gold Bezel (Cathedral Carvings, Menus & Artworks)",
+                "curator_loupe (Recommended) — 1.65x Optical Magnifying Glass Spotlight (Architectural Carvings, Menus & Artworks)",
                 "editorial_magazine (Recommended) — Asymmetric 62/38 Luxury Architectural Monograph Spread (Chapter Openers)",
-                "cinema_anamorphic (Recommended) — 2.39:1 CinemaScope Widescreen Letterbox with 35mm Highlight Halation (River & City Panoramas)",
-                "parallax_gallery (Recommended) — 2.5D Counter-Panning Double Ivory/Gold Museum Frame",
+                "cinema_anamorphic (Recommended) — 2.39:1 CinemaScope Widescreen Letterbox with 35mm Highlight Halation (Waterfront & City Panoramas)",
+                "parallax_gallery (Recommended) — 2.5D Counter-Panning Double Archival Matte Frame",
                 "diptych_frame (Recommended) — Side-by-Side Vertical Portrait Diptych Split-Screen",
                 "gallery_frame — Classic Static Floating Gallery Frame",
                 "full_bleed — Full-Screen 16:9 Crop with Classic Ken Burns Pan/Zoom",
@@ -557,9 +561,9 @@ def refine_intake_interactively(
     answers["photo_overlay_finishers"] = ", ".join(enabled_overlays)
 
     # 4. BGM mood refinement
-    if any(k in msg_low for k in ["classical", "satie", "piano", "french", "chamber", "orchestral"]):
+    if any(k in msg_low for k in ["classical", "satie", "piano", "impressionist", "chamber", "orchestral"]):
         answers["bgm_mood"] = "classical_chamber"
-        refinements_applied.append("Soundtrack -> Classical Chamber Piano & Strings (Erik Satie / French Impressionist)")
+        refinements_applied.append("Soundtrack -> Classical Chamber Piano & Strings")
     elif any(k in msg_low for k in ["acoustic", "guitar", "warm", "folk"]):
         answers["bgm_mood"] = "warm_acoustic"
         refinements_applied.append("Soundtrack -> Heartwarming Acoustic Guitar & Piano")

@@ -17,7 +17,7 @@ This skill orchestrates an **11-Agent AI Film & Vlog Editing Room** that transfo
 All programmatic steps write structured JSON/YAML contracts to disk in `<project_dir>` via the skill's standalone helper CLI:
 - **Helper CLI**: [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py)
 - **Python Interpreter**:
-  - **Windows**: `C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe` (or `python`)
+  - **Windows**: `python`
   - **macOS (2019 MacBook Pro Intel + AMD Radeon Pro / Apple Silicon)**: `python3` (uses `hevc_videotoolbox` hardware encoding, macOS fonts, and native Finder folder picker automatically)
 
 ---
@@ -45,57 +45,57 @@ Read only the specific reference file(s) needed for your current step or when sp
 When the user asks you to edit a video from a media folder, follow these 6 phases:
 
 ### Phase 1: Project Setup & Media Library Inspection (`inspect-library` & `project`)
-Scan the raw media folder to detect video/photo counts, camera models (`Sony A7C II`, `Google Pixel`, `Apple iPhone`), and the **Executive Director's Recommended Video Length (`30s–600s`)**:
+Scan the raw media folder to detect video/photo counts, EXIF camera models, and the **Executive Director's Recommended Video Length (`30s–600s`)**:
 ```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py inspect-library --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>"
+python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py inspect-library --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>"
 ```
 - Read `<project_dir>/library_inspection.json` to inspect `director_duration_recommendation` (`director_recommended_duration_sec`, `recommended_photo_plates`, `director_duration_rationale`).
 - To create, load, list, or reset a project workspace:
   ```powershell
-  C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py project --action create --name "Louvre Family Trip" --media-dir "<media_dir>" --project-dir "<project_dir>"
+  python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py project --action create --name "Featured Story" --media-dir "<media_dir>" --project-dir "<project_dir>"
   ```
 
 ### Phase 2: Interactive Multi-Choice Client Intake & Director Recommendations (`ask_question` & `intake-refine`)
 Read `ask_question_tool_payload` from `<project_dir>/library_inspection.json` and call Antigravity's native `ask_question` tool to present interactive single-choice and **multi-select (`is_multi_select: true`)** questions with `(Recommended)` prefixed on the Director's context-aware recommendations (covering Target Duration `30s–600s`, Multi-Select 10-Mode Photo Effects Suite, Soundtrack Direction, and Multi-Select Must-Include Chapters). Then run `intake-refine` to lock `creative_brief.json`:
 ```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain" --bgm-mood auto_match
+python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain" --bgm-mood auto_match
 ```
 
 ### Phase 3: Run the 11-Agent Pipeline & Delegate Creative Curation to the AI Agent
 - **Option A — Full 11-Agent Pipeline + Contact Sheet Generation (`run-pipeline`)**:
   ```powershell
-  C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py run-pipeline --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --render
+  python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-pipeline --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --render
   ```
 - **Option B — Mechanical Contact Sheets → AI Agent Visual Curation → Mechanical Persistence (`render-contact-sheets` & `apply-vision-curation`)**:
   1. **Mechanical Step**: Generate numbered `5x4` photo contact sheets (`contact_sheet_01.jpg`, ...) + video subclips keyframe sheet (`video_subclips_sheet.jpg`) in `<project_dir>/contact_sheets/`:
      ```powershell
-     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-contact-sheets --project-dir "<project_dir>"
+     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-contact-sheets --project-dir "<project_dir>"
      ```
   2. **AI Agent Creative Step**: Call `read_file` on `<project_dir>/contact_sheets/contact_sheet_01.jpg` (and `video_subclips_sheet.jpg`) to visually inspect every candidate photo & clip. Identify specific artworks, landmarks, facial expressions, and vertical diptych pairs, and reject blurry/accidental shots.
-  3. **Mechanical Persistence Step (`apply-vision-curation` & `apply-video-curation`)**: Write your creative photo & video clip decisions (golden-window `[in_tc, out_tc]`, semantic transitions, bilingual video & photo captions, and 10-mode photo effects) into `photo_curation.json`, `media_index.json`, and `timeline.yaml`:
+  3. **Mechanical Persistence Step (`apply-vision-curation` & `apply-video-curation`)**: Write your creative photo & video clip decisions (golden-window `[in_tc, out_tc]`, semantic transitions, video & photo captions, and 10-mode photo effects) into `photo_curation.json`, `media_index.json`, and `timeline.yaml`:
      ```powershell
-     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-vision-curation --project-dir "<project_dir>" --overrides-json "[{\"filename\":\"IMG_7553.JPG\",\"selected\":true,\"hero_pick\":true,\"recommended_photo_mode\":\"curator_loupe\",\"overlay_fx\":\"museum_spotlight\",\"caption_title\":\"Mona Lisa (La Joconde)\",\"caption_subtitle\":\"Leonardo da Vinci · Denon Wing, Room 711\"}]"
-     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-video-curation --project-dir "<project_dir>" --overrides-json "{\"videos\":{\"vid_broll_01\":{\"in_tc\":1.0,\"out_tc\":7.5,\"recommended_transition\":\"dissolve\",\"annotation_title\":\"Pont Alexandre III & Seine Panorama\",\"annotation_subtitle\":\"亚历山大三世桥与塞纳河远眺\"}}}"
+     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-vision-curation --project-dir "<project_dir>" --overrides-json "[{\"tile_id\":\"#01\",\"selected\":true,\"hero_pick\":true,\"recommended_photo_mode\":\"curator_loupe\",\"overlay_fx\":\"museum_spotlight\",\"caption_title\":\"Curated Architectural Detail\",\"caption_subtitle\":\"Gallery Exhibition Study\"}]"
+     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-video-curation --project-dir "<project_dir>" --overrides-json "{\"videos\":{\"vid_broll_01\":{\"in_tc\":1.0,\"out_tc\":7.5,\"recommended_transition\":\"dissolve\",\"annotation_title\":\"Opening Establishing Vista\",\"annotation_subtitle\":\"Panoramic Tracking Shot\"}}}"
      ```
 - **Option C — AI-Directed Cold-Open Teaser Hook (`0.0s–3.8s`) & Story Architecture (`apply-story-plan`)**:
   1. Read `<project_dir>/candidate_story_digest.json` and `<project_dir>/contact_sheets/video_subclips_sheet.jpg` to choose the most emotionally magnetic 3.0s–3.8s **Cold-Open Teaser Hook (`clip_000_hook`)** before the Main Title Card (`title_opening`).
   2. Apply your creative story plan overrides and optionally reassemble `timeline.yaml`:
      ```powershell
-     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-story-plan --project-dir "<project_dir>" --overrides-json "{\"cold_open_subclip_id\":\"sub_002\",\"cold_open_hook_caption\":\"Inside the Louvre · A Family Day in Paris\"}" --reassemble-timeline
+     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-story-plan --project-dir "<project_dir>" --overrides-json "{\"cold_open_subclip_id\":\"vid_broll_01\",\"cold_open_hook_caption\":\"Opening Teaser Hook\"}" --reassemble-timeline
      ```
 - **Option D — Dedicated Royalty-Free BGM Scouting & Full-Length Mastering Agent (`scout-bgm` & `apply-bgm-plan`)**:
   1. **Mechanical Step**: Search and download royalty-free candidate tracks from online catalogs (Pixabay Music / Incompetech 1,443-track CC-BY API / Public Domain) and measure each candidate's exact `duration_sec`, `mean_volume_db`, and `tempo_bpm`:
      ```powershell
-     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py scout-bgm --project-dir "<project_dir>" --keywords "paris,accordion,waltz,cafe,piano" --mood-profile parisian_classical_museum
+     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py scout-bgm --project-dir "<project_dir>" --keywords "cinematic,chamber,waltz,piano,documentary" --mood-profile classical_chamber_documentary
      ```
   2. **AI Agent Creative Step**: Read `<project_dir>/bgm_candidates.json` (or delegate to a dedicated BGM subagent via `invoke_subagent`) to pick the best single track or **Multi-Chapter BGM Suite** matching the emotional progression of the chapters.
   3. **Mechanical Mastering Step**: Chain/crossfade the selected tracks and master to **100% of `timeline.total_duration`** with broadcast **EBU R128 (`-14.0 LUFS`)** loudness normalization so the music never ends early and sits at a warm, vibrant volume:
      ```powershell
-     C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py apply-bgm-plan --project-dir "<project_dir>" --tracks "parisian_accordion.mp3,valse_gymnopedie.mp3,evening_debussy_chamber.mp3,jazz_brunch_bistro.mp3" --target-lufs -14.0 --bgm-volume 0.90
+     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-bgm-plan --project-dir "<project_dir>" --tracks "valse_gymnopedie.mp3,evening_debussy_chamber.mp3" --target-lufs -14.0 --bgm-volume 0.90
      ```
 - **Documentary Reading-Paced Scene Durations, 10 Premium Photo Modes & Unified Frosted-Glass Captions**:
   - For annotated educational/travel scenes, give viewers comfortable reading time (`160–180 WPM` + visual appreciation): **`5.5s–6.8s`** per photo plate and **`6.5s–9.0s`** per video clip.
-  - Attach `caption_title`, `caption_subtitle`, and `camera_badge` directly to `item.ken_burns` on both `photo` and `video` clips so the renderer composites a single unified **Apple TV+ / National Geographic Frosted-Glass Documentary Lower-Third Card** (avoiding redundant overlapping Track V3 subtitle boxes).
+  - Attach `caption_title`, `caption_subtitle`, and `camera_badge` directly to `item.ken_burns` on both `photo` and `video` clips so the renderer composites a single unified **Smoked-Glass Museum Plaque** (avoiding redundant overlapping Track V3 subtitle boxes).
   - Curate a diverse choreography of the **10 Premium Photo Presentation Modes (`mode`)** and **4 Composable Atmospheric Finishers (`overlay_fx`)** across chapters (preview all 10 modes side-by-side via `preview-photo-effects --project-dir "<project_dir>"`):
     - **Modes (`mode`)**: `cinematic_depth_3d` (3-plane saliency depth + bokeh rack-focus), `triptych_cinematic` (3-panel staggered storyboard reveal), `polaroid_scrapbook` (tilted vintage instant-film print stack), `curator_loupe` (`1.65x` optical magnifying glass spotlight), `editorial_magazine` (asymmetric `62/38` luxury monograph spread), `cinema_anamorphic` (`2.39:1` widescreen + 35mm highlight halation), `parallax_gallery`, `diptych_frame`, `gallery_frame`, `full_bleed`.
     - **Finishers (`overlay_fx`)**: `golden_light_leak`, `champagne_bokeh`, `museum_spotlight`, `nostalgic_film_grain`, `none`.
@@ -105,27 +105,27 @@ When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *
 1. **AI Agent Creative Step**: Read `<project_dir>/timeline.yaml` and translate the user's natural-language feedback into surgical operation(s) (`update-plaque`, `trim`, `drop`, `swap`, `move`, `set-cold-open`, `audio-mix`).
 2. **Mechanical Ripple Edit (`edit-cut`)**: Execute the surgical edit with automatic downstream ripple-shifting across V1, V2, V3 titles, VFX, markers, and subtitles:
    ```powershell
-   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py edit-cut --project-dir "<project_dir>" --action trim --clip-id clip_001 --delta-sec -1.0
+   python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py edit-cut --project-dir "<project_dir>" --action trim --clip-id clip_001 --delta-sec -1.0
    ```
 3. **Mechanical Fast Segment Render (`render-segment`)**: Render only the affected `[start_sec, end_sec]` window in ~2 seconds (`720p` fast preview or `--full-quality` 4K HLG HDR) and inspect frames via `read_file`:
    ```powershell
-   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-segment --project-dir "<project_dir>" --start 0 --end 10 --fast-preview --extract-frames "1,5,8"
+   python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-segment --project-dir "<project_dir>" --start 0 --end 10 --fast-preview --extract-frames "1,5,8"
    ```
 
 ### Phase 5: Executive Movie Production Director Visual Screening (`render-screening-sheet` & `director-audit`) & Full 4K HDR Render (`render-video`)
 1. Render the **4x3 Multimodal Director Screening Sheet** (`<project_dir>/cache/curation/director_screening_sheet.jpg`) and inspect it via `read_file` to verify that every chapter's photo modes, burned-in museum plaques, Track V3 lower-third video captions, and transitions look cohesive:
    ```powershell
-   C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-screening-sheet --project-dir "<project_dir>"
+   python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-screening-sheet --project-dir "<project_dir>"
    ```
 2. Apply any final transition, duration, or Track V3 lower-third refinements via `apply-timeline-intelligence`, verify `director_review.json` (`overall_quality_score >= 9.0`), and render the full 4K 10-bit HLG HDR master:
 ```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe C:\Users\hihao\Documents\projects\video_editing_ai\.agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py render-video --project-dir "<project_dir>" --extract-frames "2,6,16,30,52"
+python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-video --project-dir "<project_dir>" --extract-frames "2,6,16,30,52"
 ```
 
 ### Phase 6: Interactive 5-Tab Web Studio (`serve`)
 To let the user interactively manage projects, co-refine intake, watch real-time Agent Doing + Director Thinking streams, or download the newly rendered `.mp4` in their browser:
 ```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe -m video_editing_ai.cli serve --project-dir "<project_dir>" --host 0.0.0.0 --port 8000
+python -m video_editing_ai.cli serve --project-dir "<project_dir>" --host 0.0.0.0 --port 8000
 ```
 
 ---

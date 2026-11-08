@@ -341,30 +341,11 @@ def _extract_exif_camera_info(img: Image.Image, photo_path: Optional[Path] = Non
     except Exception:
         pass
 
-    combined = f"{make_str} {model_str}".strip()
-    up = combined.upper()
-    if "ILCE-7CM2" in up or "A7C2" in up or "A7C II" in up:
-        cam_badge = "SONY A7C II · 33MP"
-    elif "ILCE-" in up or "SONY" in up:
-        cam_badge = combined.upper()
-    elif "PIXEL" in up:
-        cam_badge = combined.upper() if "GOOGLE" in up else f"GOOGLE {combined.upper()}"
-    elif "IPHONE" in up:
-        cam_badge = combined.upper() if "APPLE" in up else f"APPLE {combined.upper()}"
-    elif combined:
-        cam_badge = combined.upper()
-    elif photo_path is not None:
-        fname_up = photo_path.name.upper()
-        if fname_up.startswith(("_DSC", "DSC", "A7C")):
-            cam_badge = "SONY ALPHA · FULL FRAME"
-        elif fname_up.startswith("PXL_"):
-            cam_badge = "GOOGLE PIXEL · HDR"
-        elif fname_up.startswith("IMG_"):
-            cam_badge = "APPLE IPHONE · HDR"
-        else:
-            cam_badge = "DIGITAL CAMERA · HDR"
+    if make_str and model_str and model_str.lower().startswith(make_str.lower()):
+        combined = model_str
     else:
-        cam_badge = "DIGITAL CAMERA · HDR"
+        combined = f"{make_str} {model_str}".strip()
+    cam_badge = combined.upper() if combined else ""
 
     exif_summary = " · ".join(exposure_parts) if exposure_parts else None
     return cam_badge, exif_summary or ""

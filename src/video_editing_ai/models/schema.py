@@ -789,7 +789,7 @@ class TitleOverlayItem(BaseModel):
     duration: float = Field(default=3.5, gt=0.2)
     fade_in: float = Field(default=0.35, ge=0.0)
     fade_out: float = Field(default=0.35, ge=0.0)
-    accent_color: str = Field(default="#FFD740", description="Hex color for border/title highlight")
+    accent_color: str = Field(default="#E8E4DC", description="Hex color for subtle pearl/alabaster highlight")
 
 
 class AudioTrackItem(BaseModel):

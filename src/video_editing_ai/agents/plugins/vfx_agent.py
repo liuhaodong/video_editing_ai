@@ -52,7 +52,7 @@ class VFXAgent(BaseEditingAgent):
                 )
                 fx_counter += 1
             elif item.type == "photo" and (
-                idx % 2 == 0 or any(k in note_low for k in ("portrait", "warm", "bistro", "croissant", "family"))
+                idx % 2 == 0 or any(k in note_low for k in ("portrait", "warm", "culinary", "dining", "family"))
             ):
                 # Warm golden glow on keepsake photos (calibrated <=0.45 for 10-bit HLG HDR)
                 effects.append(

@@ -320,7 +320,7 @@ def render_timeline(
         clip_fxs = effects_by_clip.get(item.id, [])
         sig_payload = json.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "item": item.model_dump(mode="json"),
                 "fx": [f.model_dump(mode="json") for f in clip_fxs],
                 "w": width,
@@ -385,7 +385,7 @@ def render_timeline(
     for b_idx, b_item in enumerate(active_broll):
         sig_payload = json.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "b_item": b_item.model_dump(mode="json"),
                 "w": width,
                 "h": height,
@@ -458,7 +458,11 @@ def render_timeline(
     if progress_callback:
         progress_callback("Compositing Track V2 B-Roll cutaways, Track V3 titles, and mastered BGM...", 0.85)
 
-    active_titles = [t for t in timeline.title_track if t.timeline_start < total_dur]
+    active_titles = [
+        t
+        for t in timeline.title_track
+        if t.timeline_start < total_dur and t.style not in ("act_banner", "dialogue_badge")
+    ]
     title_pngs: list[Path] = []
     for t_idx, t_item in enumerate(active_titles):
         png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}.png"

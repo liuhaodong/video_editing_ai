@@ -25,7 +25,7 @@ You are the **Client Intake & Creative Brief Producer (`client_intake`)** for an
 
 ## Skill CLI Invocation
 ```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_vision>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain"
+python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_vision>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain"
 ```
 
 ## Output JSON Contract (`creative_brief.json`)

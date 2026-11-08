@@ -54,7 +54,7 @@ def _synthesize_video_scene_caption_and_transition(
     elif has_speech and spoken_text.strip():
         quote_short = spoken_text.strip()[:44]
         title = f'Live Story Moment — "{quote_short}"'
-        sub = "现场原声记录 · 真实对话与故事瞬间"
+        sub = "Candid Spoken Dialogue & Live Audio"
         trans = "crossfade"
         rationale = "Preserved spoken dialogue window with -0.35s J-cut audio pre-lap."
     else:
@@ -71,7 +71,7 @@ def _synthesize_video_scene_caption_and_transition(
             else ("Closing Finale Vista" if v_idx == total_videos else f"{motion_label} ({shot_scale.capitalize()})")
         )
         title = f"{stage_label} — Scene {v_idx:02d}"
-        sub = "实景动态镜头 · 光影与现场氛围记录"
+        sub = "Live Scene & Natural Atmosphere"
         trans = "fade_black" if v_idx in (1, total_videos) else ("dissolve" if shot_scale == "wide" else "crossfade")
         rationale = f"Selected golden window ({shot_scale} {cam_motion}) for visual rhythm and continuity."
 
@@ -489,7 +489,7 @@ class CullerAgent(BaseEditingAgent):
                         source_path=vid.path,
                         filename=vid.filename,
                         media_type="video",
-                        normalized_timestamp=vid.creation_time or f"2026-10-31T18:{v_idx:02d}:00Z",
+                        normalized_timestamp=vid.creation_time or f"1970-01-01T00:{v_idx:02d}:00Z",
                         in_tc=in_tc,
                         out_tc=out_tc,
                         duration=round(max(0.5, out_tc - in_tc), 2),
@@ -550,7 +550,7 @@ class CullerAgent(BaseEditingAgent):
                         source_path=vid.path,
                         filename=vid.filename,
                         media_type="video",
-                        normalized_timestamp=vid.creation_time or f"2026-10-31T18:{v_idx:02d}:30Z",
+                        normalized_timestamp=vid.creation_time or f"1970-01-01T00:{v_idx:02d}:30Z",
                         in_tc=best_in,
                         out_tc=best_out,
                         duration=round(max(0.5, best_out - best_in), 2),
@@ -594,7 +594,7 @@ class CullerAgent(BaseEditingAgent):
                     source_path=ph.path,
                     filename=ph.filename,
                     media_type="photo",
-                    normalized_timestamp=ph.creation_time or f"2026-10-31T19:{p_idx % 60:02d}:00Z",
+                    normalized_timestamp=ph.creation_time or f"1970-01-01T01:{p_idx % 60:02d}:00Z",
                     in_tc=0.0,
                     out_tc=3.2,
                     duration=3.2,

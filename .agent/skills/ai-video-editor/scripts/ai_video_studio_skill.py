@@ -32,7 +32,6 @@ def _resolve_workspace_root() -> Path:
         Path(__file__).resolve().parents[4],
         Path.cwd(),
         Path.home() / "Documents" / "projects" / "video_editing_ai",
-        Path(r"C:\Users\hihao\Documents\projects\video_editing_ai"),
     ]
     for root in candidates:
         if (root / "src" / "video_editing_ai").exists():

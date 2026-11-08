@@ -88,9 +88,9 @@ def _build_double_matte_card(
     scale_factor: float,
     border_px: Optional[int] = None,
 ) -> Image.Image:
-    """Create a foreground photo card with a double museum matte (warm ivory outer + antique gold inner hairline) and 3D drop shadow."""
+    """Create a foreground photo card with a double museum passe-partout matte (warm cotton-rag ivory + subtle archival stone bevel) and 3D drop shadow."""
     b_px = border_px if border_px is not None else max(10, int(round(14 * scale_factor)))
-    gold_pad = max(3, int(round(4 * scale_factor)))
+    bevel_pad = max(2, int(round(3 * scale_factor)))
     shadow_margin = max(18, int(round(28 * scale_factor)))
     shadow_offset = max(4, int(round(7 * scale_factor)))
     shadow_blur = max(10, int(round(16 * scale_factor)))
@@ -98,19 +98,19 @@ def _build_double_matte_card(
     fg = img.copy()
     fg.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
 
-    fw = fg.width + (b_px + gold_pad) * 2
-    fh = fg.height + (b_px + gold_pad) * 2
+    fw = fg.width + (b_px + bevel_pad) * 2
+    fh = fg.height + (b_px + bevel_pad) * 2
 
-    # Warm museum ivory outer matte
-    framed = Image.new("RGBA", (fw, fh), (248, 246, 240, 255))
+    # Warm museum cotton-rag ivory outer matte
+    framed = Image.new("RGBA", (fw, fh), (247, 245, 240, 255))
     f_draw = ImageDraw.Draw(framed)
-    # Subtle antique gold inner fillet hairline around the artwork
+    # Subtle archival warm-stone inner bevel around the artwork (no garish yellow)
     f_draw.rectangle(
         [b_px - 2, b_px - 2, fw - b_px + 1, fh - b_px + 1],
-        outline=(208, 174, 78, 225),
-        width=max(2, int(round(2.0 * scale_factor))),
+        outline=(212, 208, 198, 230),
+        width=max(1, int(round(1.5 * scale_factor))),
     )
-    framed.paste(fg, (b_px + gold_pad, b_px + gold_pad))
+    framed.paste(fg, (b_px + bevel_pad, b_px + bevel_pad))
 
     # Floating 3D drop shadow
     sw, sh = fw + shadow_margin * 2, fh + shadow_margin * 2
@@ -123,11 +123,42 @@ def _build_double_matte_card(
             shadow_margin + fw,
             shadow_margin + fh + shadow_offset,
         ],
-        fill=(0, 0, 0, 170),
+        fill=(0, 0, 0, 165),
     )
     shadow = shadow.filter(ImageFilter.GaussianBlur(radius=shadow_blur))
     shadow.paste(framed, (shadow_margin, shadow_margin), framed)
     return shadow
+
+
+_TECH_BADGE_TOKENS = (
+    "SONY",
+    "GOOGLE",
+    "PIXEL",
+    "APPLE",
+    "IPHONE",
+    "A7C",
+    "33MP",
+    "FULL FRAME",
+    "DIGITAL CAMERA",
+    "4K HDR",
+    "HDR",
+    "EXIF",
+    "SOLO DAY TRIP",
+)
+
+
+def _clean_editorial_badge(raw_badge: str) -> str:
+    """Filter out technical camera/sensor metadata from overline badges so plaques stay clean and artistic."""
+    if not raw_badge:
+        return ""
+    cleaned = raw_badge.upper().replace("📍", "").strip()
+    parts = [p.strip() for p in re.split(r"[·•|]", cleaned) if p.strip()]
+    kept = [
+        p
+        for p in parts
+        if not any(tok in p for tok in _TECH_BADGE_TOKENS) and len(p) >= 3
+    ]
+    return " · ".join(kept[:2])
 
 
 def _build_frosted_card_assets(
@@ -138,19 +169,19 @@ def _build_frosted_card_assets(
     camera_badge: str = "",
 ) -> tuple[Image.Image, Image.Image, Image.Image, int, int]:
     """
-    Pre-render the static typography & glass highlight layers of an Apple TV+ / National Geographic
-    style Frosted-Glass Documentary Lower-Third Card.
+    Pre-render the static typography & smoked-glass highlight layers of an A24 / Criterion / Apple TV+
+    style Museum & Documentary Lower-Third Plaque (free of garish yellow bars or camera jargon).
     Returns (text_fg_rgba, card_mask_l, dark_tint_rgb, card_x, card_y).
     """
     s = width / 1920.0
-    f_badge = _load_editorial_font(int(round(16 * s)), bold=True, serif=False)
-    f_title = _load_editorial_font(int(round(29 * s)), bold=True, serif=True)
-    f_sub = _load_editorial_font(int(round(21 * s)), bold=False, serif=False)
+    f_badge = _load_editorial_font(int(round(13 * s)), bold=True, serif=False)
+    f_title = _load_editorial_font(int(round(26 * s)), bold=True, serif=True)
+    f_sub = _load_editorial_font(int(round(18 * s)), bold=False, serif=False)
 
     dummy = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
     d_draw = ImageDraw.Draw(dummy)
 
-    badge_str = camera_badge.upper().replace("📍", "").strip()
+    badge_str = _clean_editorial_badge(camera_badge)
     sub_lines: list[str] = []
     if caption_subtitle:
         wrapped = textwrap.wrap(caption_subtitle.strip(), width=78)
@@ -160,72 +191,71 @@ def _build_frosted_card_assets(
     bw = d_draw.textbbox((0, 0), badge_str, font=f_badge)[2] if badge_str else 0
     sw = max((d_draw.textbbox((0, 0), ln, font=f_sub)[2] for ln in sub_lines), default=0)
 
-    pad_left = int(round(38 * s))
-    pad_right = int(round(36 * s))
-    pw = min(int(width * 0.84), max(tw, sw, bw) + pad_left + pad_right + int(round(24 * s)))
-    pw = max(pw, int(round(520 * s)))
+    pad_left = int(round(32 * s))
+    pad_right = int(round(32 * s))
+    pw = min(int(width * 0.80), max(tw, sw, bw) + pad_left + pad_right + int(round(18 * s)))
+    pw = max(pw, int(round(380 * s)))
 
-    # Compute exact vertical layout with generous breathing room
-    top_pad = int(round(16 * s))
-    bottom_pad = int(round(18 * s))
+    # Compute exact vertical layout with balanced breathing room
+    top_pad = int(round(14 * s))
+    bottom_pad = int(round(15 * s))
     cur_y = top_pad
     if badge_str:
-        cur_y += max(12, int(round(25 * s)))
-    cur_y += max(14, int(round(38 * s)))  # title height
+        cur_y += max(10, int(round(20 * s)))
+    cur_y += max(14, int(round(34 * s)))  # title height
     if sub_lines:
-        cur_y += max(3, int(round(6 * s))) + len(sub_lines) * max(13, int(round(28 * s)))
+        cur_y += max(2, int(round(4 * s))) + len(sub_lines) * max(12, int(round(25 * s)))
     ph = cur_y + bottom_pad
 
-    # 1. Smooth rounded-rectangle alpha mask for frosted glass region
-    radius = int(round(20 * s))
+    # 1. Smooth rounded-rectangle alpha mask for smoked-glass region
+    radius = int(round(14 * s))
     card_mask_l = Image.new("L", (pw, ph), 0)
     m_draw = ImageDraw.Draw(card_mask_l)
     m_draw.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=radius, fill=255)
 
-    # 2. Dark obsidian glass tint canvas
-    dark_tint_rgb = Image.new("RGB", (pw, ph), (10, 14, 22))
+    # 2. Neutral charcoal smoked-glass tint canvas
+    dark_tint_rgb = Image.new("RGB", (pw, ph), (12, 14, 18))
 
-    # 3. Foreground typography + subtle 1px specular glass rim + champagne-gold left accent bar
+    # 3. Foreground typography + subtle 1px neutral pearl specular rim + warm alabaster-silver hairline
     text_fg = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
     draw = ImageDraw.Draw(text_fg)
 
-    # Subtle 1.5px translucent pearl-gold specular border (never harsh neon yellow!)
     draw.rounded_rectangle(
         [0, 0, pw - 1, ph - 1],
         radius=radius,
         fill=(0, 0, 0, 0),
-        outline=(255, 245, 220, 68),
-        width=max(1, int(round(1.5 * s))),
+        outline=(255, 255, 255, 38),
+        width=max(1, int(round(1.0 * s))),
     )
 
-    # Champagne-gold vertical accent pill on the left
-    bar_x = int(round(18 * s))
-    bar_w = max(4, int(round(4.5 * s)))
+    # Delicate 2px warm pearl-silver vertical hairline on the left (never harsh yellow)
+    bar_x = int(round(16 * s))
+    bar_w = max(2, int(round(2.5 * s)))
     draw.rounded_rectangle(
-        [bar_x, int(round(16 * s)), bar_x + bar_w, ph - int(round(16 * s))],
-        radius=max(2, bar_w // 2),
-        fill=(234, 194, 96, 245),
+        [bar_x, int(round(14 * s)), bar_x + bar_w, ph - int(round(14 * s))],
+        radius=max(1, bar_w // 2),
+        fill=(228, 224, 216, 185),
     )
 
-    tx = bar_x + bar_w + int(round(16 * s))
+    tx = bar_x + bar_w + int(round(14 * s))
     ty = top_pad
 
     if badge_str:
-        draw.text((tx + 1, ty + 1), badge_str, font=f_badge, fill=(0, 0, 0, 180))
-        draw.text((tx, ty), badge_str, font=f_badge, fill=(238, 198, 102, 245))
-        ty += max(12, int(round(25 * s)))
+        draw.text((tx + 1, ty + 1), badge_str, font=f_badge, fill=(0, 0, 0, 160))
+        draw.text((tx, ty), badge_str, font=f_badge, fill=(172, 168, 160, 225))
+        ty += max(10, int(round(20 * s)))
 
-    # Crisp editorial headline with soft drop shadow
-    draw.text((tx + 2, ty + 2), caption_title, font=f_title, fill=(0, 0, 0, 200))
-    draw.text((tx, ty), caption_title, font=f_title, fill=(255, 255, 255, 255))
-    ty += max(14, int(round(38 * s)))
+    # Crisp editorial headline in Warm Alabaster with soft drop shadow
+    draw.text((tx + 2, ty + 2), caption_title, font=f_title, fill=(0, 0, 0, 190))
+    draw.text((tx, ty), caption_title, font=f_title, fill=(250, 248, 244, 255))
+    ty += max(14, int(round(34 * s)))
 
     if sub_lines:
         ty += max(2, int(round(4 * s)))
         for ln in sub_lines:
-            draw.text((tx + 1, ty + 1), ln, font=f_sub, fill=(0, 0, 0, 185))
-            draw.text((tx, ty), ln, font=f_sub, fill=(226, 232, 242, 248))
-            ty += max(13, int(round(28 * s)))
+            draw.text((tx + 1, ty + 1), ln, font=f_sub, fill=(0, 0, 0, 175))
+            draw.text((tx, ty), ln, font=f_sub, fill=(202, 208, 216, 238))
+            ty += max(12, int(round(25 * s)))
 
     # Center horizontally in the lower fifth for balanced documentary composition
     px = (width - pw) // 2
@@ -241,16 +271,16 @@ def render_frosted_video_overlay_png(
     caption_subtitle: str = "",
     camera_badge: str = "",
 ) -> Path:
-    """Render a full-frame RGBA overlay PNG containing a soft bottom scrim + frosted documentary lower-third card for video segments."""
+    """Render a full-frame RGBA overlay PNG containing a soft bottom scrim + smoked-glass lower-third card for video segments."""
     output_png.parent.mkdir(parents=True, exist_ok=True)
     canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
-    # 1. Soft bottom vertical gradient scrim (22% height)
-    scrim_h = max(16, int(round(height * 0.22)))
+    # 1. Soft bottom vertical gradient scrim (20% height)
+    scrim_h = max(16, int(round(height * 0.20)))
     grad_1d = Image.new("RGBA", (1, scrim_h), (0, 0, 0, 0))
     for y in range(scrim_h):
         t = y / max(1, scrim_h - 1)
-        grad_1d.putpixel((0, y), (6, 8, 14, int(round(96 * (t * t)))))
+        grad_1d.putpixel((0, y), (8, 10, 14, int(round(88 * (t * t)))))
     scrim_strip = grad_1d.resize((width, scrim_h), Image.Resampling.BILINEAR)
     canvas.paste(scrim_strip, (0, height - scrim_h), scrim_strip)
 
@@ -263,8 +293,8 @@ def render_frosted_video_overlay_png(
         camera_badge=camera_badge,
     )
     pw, ph = text_fg.size
-    card_body = Image.new("RGBA", (pw, ph), (10, 14, 22, 212))
-    card_body.putalpha(card_mask_l.point(lambda p: int(p * (212 / 255.0))))
+    card_body = Image.new("RGBA", (pw, ph), (12, 14, 18, 148))
+    card_body.putalpha(card_mask_l.point(lambda p: int(p * (148 / 255.0))))
     card_body = Image.alpha_composite(card_body, text_fg)
     canvas.paste(card_body, (px, py), card_body)
     canvas.save(output_png, "PNG")
@@ -282,16 +312,16 @@ def _composite_frosted_card_on_rgb(
     slide_y: int = 0,
 ) -> None:
     """
-    In-place composite of the frosted-glass documentary card onto `frame_rgb`:
+    In-place composite of the smoked-glass documentary card onto `frame_rgb`:
     Crops only the small `(pw, ph)` region, blurs it at 1/4 scale (16x faster than full-res blur),
-    tints it with dark obsidian glass, layers the typography, and pastes back onto `frame_rgb`.
+    tints it with translucent charcoal glass (0.58 blend), layers the typography, and pastes back onto `frame_rgb`.
     """
     pw, ph = text_fg_rgba.size
     w, h = frame_rgb.size
     dst_x = max(0, min(w - pw, px))
     dst_y = max(0, min(h - ph, py + slide_y))
 
-    # 1. Fast backdrop blur on the underlying scene patch (melts away any sharp photo borders behind text!)
+    # 1. Fast backdrop blur on the underlying scene patch
     patch = frame_rgb.crop((dst_x, dst_y, dst_x + pw, dst_y + ph))
     small_w = max(16, pw // 4)
     small_h = max(16, ph // 4)
@@ -301,8 +331,8 @@ def _composite_frosted_card_on_rgb(
         .resize((pw, ph), Image.Resampling.BILINEAR)
     )
 
-    # 2. Blend with warm obsidian glass tint (72% opacity so scene colors glow softly through the glass)
-    frosted_rgb = Image.blend(blurred_patch, dark_tint_rgb, 0.72)
+    # 2. Blend with neutral smoked charcoal glass (58% opacity so scene colors glow softly through the glass)
+    frosted_rgb = Image.blend(blurred_patch, dark_tint_rgb, 0.58)
 
     # 3. Composite crisp typography & specular rim onto the frosted glass patch
     frosted_rgb.paste(text_fg_rgba, (0, 0), text_fg_rgba)
@@ -826,33 +856,33 @@ def _build_curator_loupe_assets(
     m_draw = ImageDraw.Draw(loupe_mask_l)
     m_draw.ellipse([2, 2, diam - 3, diam - 3], fill=255)
 
-    # Brushed champagne-gold bezel + glass specular crescent + outer shadow
+    # Brushed platinum-silver optical lens bezel + glass specular crescent + outer shadow
     pad = max(18, int(round(26 * scale_factor)))
     bz_size = diam + pad * 2
     bezel = Image.new("RGBA", (bz_size, bz_size), (0, 0, 0, 0))
     b_draw = ImageDraw.Draw(bezel)
     # Soft outer shadow ring
     b_draw.ellipse(
-        [pad - 4, pad + 4, pad + diam + 4, pad + diam + 12],
-        outline=(0, 0, 0, 165),
-        width=max(6, int(round(10 * scale_factor))),
+        [pad - 3, pad + 3, pad + diam + 3, pad + diam + 10],
+        outline=(0, 0, 0, 155),
+        width=max(5, int(round(8 * scale_factor))),
     )
-    bezel = bezel.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(9 * scale_factor)))))
+    bezel = bezel.filter(ImageFilter.GaussianBlur(radius=max(5, int(round(8 * scale_factor)))))
     b_draw = ImageDraw.Draw(bezel)
-    # Champagne-gold metallic rim
-    rim_w = max(3, int(round(5 * scale_factor)))
+    # Refined optical platinum-silver glass rim (no garish yellow)
+    rim_w = max(2, int(round(3.0 * scale_factor)))
     b_draw.ellipse(
         [pad, pad, pad + diam - 1, pad + diam - 1],
-        outline=(234, 194, 96, 248),
+        outline=(232, 235, 240, 215),
         width=rim_w,
     )
-    # Inner pearl glass specular highlight arc
+    # Inner crystal glass specular highlight arc
     b_draw.arc(
         [pad + rim_w + 3, pad + rim_w + 3, pad + diam - rim_w - 4, pad + diam - rim_w - 4],
         start=200,
         end=325,
-        fill=(255, 250, 235, 115),
-        width=max(2, int(round(2.5 * scale_factor))),
+        fill=(255, 255, 255, 130),
+        width=max(1, int(round(2.0 * scale_factor))),
     )
     return dimmed_canvas, sharp_canvas, loupe_mask_l, bezel, radius_px
 
@@ -865,7 +895,7 @@ def _build_editorial_magazine_assets(
     scale_factor: float,
 ) -> tuple[Image.Image, Image.Image, int]:
     """
-    Build asymmetric 62% / 38% luxury Architectural Digest / Kinfolk editorial spread:
+    Build asymmetric 62% / 38% luxury Kinfolk / Criterion editorial monograph spread:
     Returns (left_oversampled_rgb, right_column_rgb, left_w).
     """
     left_w = int(round(width * 0.62))
@@ -877,62 +907,56 @@ def _build_editorial_magazine_assets(
     oh = int(round(height * oversample))
     left_oversampled = ImageOps.fit(raw_primary, (ow, oh), method=Image.Resampling.LANCZOS)
 
-    # Right 38% luxury dark-velvet editorial monograph column
-    col = Image.new("RGB", (right_w, height), (12, 15, 23))
+    # Right 38% warm gallery charcoal editorial monograph column
+    col = Image.new("RGB", (right_w, height), (14, 16, 20))
     draw = ImageDraw.Draw(col)
 
-    # Subtle vertical champagne-gold divider rule on the left seam
-    seam_w = max(2, int(round(3 * scale_factor)))
-    draw.rectangle([0, 0, seam_w, height], fill=(214, 176, 84))
-    draw.rectangle([seam_w + int(round(8 * scale_factor)), int(height * 0.08), seam_w + int(round(9 * scale_factor)), int(height * 0.92)], fill=(52, 48, 42))
-
-    # Giant subtle background watermark derived dynamically from badge/title
-    wm_raw = (kb.camera_badge or kb.caption_title or "GALLERY").upper()
-    wm_tokens = [w for w in re.findall(r"[A-Z]{4,10}", wm_raw) if w not in ("SONY", "GOOGLE", "APPLE", "PIXEL", "IPHONE", "FULL", "FRAME", "ARCHIVE", "DIGITAL", "CAMERA")]
-    wm_word = wm_tokens[-1] if wm_tokens else "GALLERY"
-    f_wm = _load_editorial_font(int(round(130 * scale_factor)), bold=True, serif=True)
-    draw.text((int(right_w * 0.08), int(height * 0.06)), wm_word[:8], font=f_wm, fill=(22, 27, 39))
+    # Subtle vertical stone-pewter divider rule on the left seam
+    seam_w = max(1, int(round(1.5 * scale_factor)))
+    draw.rectangle([0, 0, seam_w, height], fill=(56, 60, 68))
 
     pad_x = int(round(48 * scale_factor))
-    max_text_w = right_w - pad_x * 2
-    cur_y = int(height * 0.24)
+    cur_y = int(height * 0.25)
 
-    # 1. Location Overline Badge (only if explicitly provided)
-    badge_str = (kb.camera_badge or "").upper().replace("📍", "").strip()
+    # 1. Cleaned Location Overline Badge (only if non-technical location/collection text is present)
+    badge_str = _clean_editorial_badge(kb.camera_badge or "")
     if badge_str:
-        f_badge = _load_editorial_font(int(round(15 * scale_factor)), bold=True, serif=False)
-        draw.text((pad_x, cur_y), badge_str, font=f_badge, fill=(234, 194, 96))
-        cur_y += int(round(34 * scale_factor))
+        f_badge = _load_editorial_font(int(round(14 * scale_factor)), bold=True, serif=False)
+        draw.text((pad_x, cur_y), badge_str, font=f_badge, fill=(168, 164, 156))
+        cur_y += max(12, int(round(30 * scale_factor)))
 
-    # Gold accent bar
-    draw.rectangle([pad_x, cur_y, pad_x + int(round(68 * scale_factor)), cur_y + max(2, int(round(3 * scale_factor)))], fill=(234, 194, 96))
-    cur_y += int(round(28 * scale_factor))
+    # Delicate warm alabaster-silver horizontal rule (no bright yellow)
+    draw.rectangle(
+        [pad_x, cur_y, pad_x + int(round(52 * scale_factor)), cur_y + max(1, int(round(2 * scale_factor)))],
+        fill=(196, 192, 184),
+    )
+    cur_y += max(10, int(round(26 * scale_factor)))
 
-    # 2. Multi-line Serif Monograph Title
+    # 2. Multi-line Serif Monograph Title in Warm Alabaster
     title_str = (kb.caption_title or "Curated Masterpiece").strip()
-    f_title = _load_editorial_font(int(round(34 * scale_factor)), bold=True, serif=True)
+    f_title = _load_editorial_font(int(round(32 * scale_factor)), bold=True, serif=True)
     for line in textwrap.wrap(title_str, width=22)[:4]:
-        draw.text((pad_x, cur_y), line, font=f_title, fill=(252, 250, 245))
-        cur_y += max(14, int(round(46 * scale_factor)))
+        draw.text((pad_x, cur_y), line, font=f_title, fill=(248, 246, 240))
+        cur_y += max(14, int(round(44 * scale_factor)))
 
-    cur_y += max(6, int(round(18 * scale_factor)))
+    cur_y += max(6, int(round(16 * scale_factor)))
 
-    # 3. Multi-line Curatorial Essay / Bilingual Subtitle
+    # 3. Multi-line Curatorial Essay / Bilingual Subtitle in Soft Pearl Stone
     sub_str = (kb.caption_subtitle or "").strip()
     if sub_str:
-        f_sub = _load_editorial_font(int(round(21 * scale_factor)), bold=False, serif=False)
+        f_sub = _load_editorial_font(int(round(20 * scale_factor)), bold=False, serif=False)
         for line in textwrap.wrap(sub_str, width=32)[:6]:
-            draw.text((pad_x, cur_y), line, font=f_sub, fill=(198, 208, 222))
-            cur_y += max(13, int(round(32 * scale_factor)))
+            draw.text((pad_x, cur_y), line, font=f_sub, fill=(192, 198, 208))
+            cur_y += max(12, int(round(30 * scale_factor)))
 
-    # Bottom monograph folio stamp (only rendered if an explicit location/folio badge is provided)
+    # Bottom monograph folio stamp (only rendered if a clean location/folio badge is present)
     if badge_str:
-        f_folio = _load_editorial_font(int(round(14 * scale_factor)), bold=False, serif=True)
+        f_folio = _load_editorial_font(int(round(13 * scale_factor)), bold=False, serif=True)
         draw.text(
             (pad_x, int(height * 0.89)),
             badge_str,
             font=f_folio,
-            fill=(132, 140, 156),
+            fill=(128, 134, 144),
         )
     return left_oversampled, col, left_w
 
@@ -1189,7 +1213,7 @@ def _prepare_photo_scene_context(
         )
 
     elif mode == "polaroid_scrapbook":
-        stamp_1 = kb.caption_title or kb.camera_badge or "MEMORY ARCHIVE"
+        stamp_1 = "" if has_card else (kb.caption_title or "")
         max_w = int(width * (0.42 if kb.secondary_source else 0.56))
         max_h = int(height * card_max_h_ratio)
         ctx["polaroid_1"] = _build_polaroid_card(
@@ -1197,9 +1221,8 @@ def _prepare_photo_scene_context(
         )
         if kb.secondary_source and Path(kb.secondary_source).exists():
             raw_sec = ImageOps.exif_transpose(Image.open(kb.secondary_source)).convert("RGB")
-            stamp_2 = (kb.camera_badge or "KEEPSAKE PRINT").replace("📍", "").strip()
             ctx["polaroid_2"] = _build_polaroid_card(
-                raw_sec, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=3.6, stamp_text=stamp_2
+                raw_sec, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=3.6, stamp_text=""
             )
         else:
             ctx["polaroid_2"] = None
@@ -1296,13 +1319,13 @@ def _render_photo_frame_from_context(
     if mode == "diptych_frame":
         fg_card_1 = ctx["fg_card_1"]
         fg_card_2 = ctx["fg_card_2"]
-        bg_zoom = 1.05 - 0.04 * eased
+        bg_zoom = 1.10 - 0.04 * eased
         bg_cx = 0.52 - 0.04 * eased
         bg_cy = 0.50
         bw_crop = bg_w / bg_zoom
         bh_crop = bg_h / bg_zoom
-        bx0 = bg_cx * bg_w - bw_crop * 0.5
-        by0 = bg_cy * bg_h - bh_crop * 0.5
+        bx0 = min(max(0.0, bg_cx * bg_w - bw_crop * 0.5), bg_w - bw_crop)
+        by0 = min(max(0.0, bg_cy * bg_h - bh_crop * 0.5), bg_h - bh_crop)
         frame = bg_plane.transform(
             (width, height),
             Image.Transform.EXTENT,
@@ -1322,11 +1345,12 @@ def _render_photo_frame_from_context(
 
     elif mode == "triptych_cinematic":
         panels: list[Image.Image] = ctx["triptych_panels"]
-        bg_zoom = 1.05 - 0.04 * eased
+        bg_zoom = 1.10 - 0.04 * eased
         bw_crop = bg_w / bg_zoom
         bh_crop = bg_h / bg_zoom
-        bx0 = (0.50 - 0.03 * (eased - 0.5)) * bg_w - bw_crop * 0.5
-        by0 = 0.50 * bg_h - bh_crop * 0.5
+        bg_cx = 0.50 - 0.03 * (eased - 0.5)
+        bx0 = min(max(0.0, bg_cx * bg_w - bw_crop * 0.5), bg_w - bw_crop)
+        by0 = min(max(0.0, 0.50 * bg_h - bh_crop * 0.5), bg_h - bh_crop)
         frame = bg_plane.transform(
             (width, height),
             Image.Transform.EXTENT,
@@ -1351,11 +1375,12 @@ def _render_photo_frame_from_context(
     elif mode == "polaroid_scrapbook":
         p1: Image.Image = ctx["polaroid_1"]
         p2: Optional[Image.Image] = ctx["polaroid_2"]
-        bg_zoom = 1.06 - 0.04 * eased
+        bg_zoom = 1.10 - 0.04 * eased
         bw_crop = bg_w / bg_zoom
         bh_crop = bg_h / bg_zoom
-        bx0 = (0.50 + 0.03 * (eased - 0.5)) * bg_w - bw_crop * 0.5
-        by0 = 0.50 * bg_h - bh_crop * 0.5
+        bg_cx = 0.50 + 0.03 * (eased - 0.5)
+        bx0 = min(max(0.0, bg_cx * bg_w - bw_crop * 0.5), bg_w - bw_crop)
+        by0 = min(max(0.0, 0.50 * bg_h - bh_crop * 0.5), bg_h - bh_crop)
         frame = bg_plane.transform(
             (width, height),
             Image.Transform.EXTENT,
@@ -1390,8 +1415,8 @@ def _render_photo_frame_from_context(
         bg_bokeh: Image.Image = ctx["depth_bg_bokeh"]
         fg_rgba: Image.Image = ctx["depth_fg_rgba"]
 
-        # Plane 1: Background counter-zooms (1.06 -> 1.00) and racks focus into creamy bokeh
-        bg_zoom = 1.06 - 0.05 * eased
+        # Plane 1: Background counter-zooms (1.10 -> 1.06) and racks focus into creamy bokeh
+        bg_zoom = 1.10 - 0.04 * eased
         fg_dx = (ex - sx) * eased
         fg_dy = (ey - sy) * eased
         bg_cx = 0.5 - fg_dx * 0.45
@@ -1500,7 +1525,7 @@ def _render_photo_frame_from_context(
 
     elif mode == "parallax_gallery":
         fg_card_1 = ctx["fg_card_1"]
-        bg_zoom = 1.06 - 0.05 * eased
+        bg_zoom = 1.10 - 0.04 * eased
         fg_dx = (ex - sx) * eased
         fg_dy = (ey - sy) * eased
         bg_cx = 0.5 - fg_dx * 0.55
@@ -1551,15 +1576,12 @@ def _render_photo_frame_from_context(
     # Apply composable atmospheric finisher (golden_light_leak, champagne_bokeh, museum_spotlight, nostalgic_film_grain)
     frame = _apply_overlay_fx(frame, ctx["fx_assets"], t_norm=t_norm, f_idx=f_idx, scale_factor=scale_factor)
 
-    # If 2.39:1 cinema_anamorphic, mask top & bottom CinemaScope letterbox bars after atmospheric finishers so bars remain pure black
+    # If 2.39:1 cinema_anamorphic, mask top & bottom CinemaScope letterbox bars after atmospheric finishers so bars remain pure theatrical black
     if mode == "cinema_anamorphic":
         bar_h: int = ctx["anamorphic_bar_h"]
         draw = ImageDraw.Draw(frame)
         draw.rectangle([0, 0, width, bar_h], fill=(4, 5, 8))
         draw.rectangle([0, height - bar_h, width, height], fill=(4, 5, 8))
-        line_w = max(1, int(round(1.5 * scale_factor)))
-        draw.line([(0, bar_h), (width, bar_h)], fill=(208, 174, 78), width=line_w)
-        draw.line([(0, height - bar_h), (width, height - bar_h)], fill=(208, 174, 78), width=line_w)
 
     # Plane 3: Frosted-Glass Documentary Lower-Third Card (with smooth upward glide + fade)
     if ctx["has_card"] and ctx["card_fg"] is not None and ctx["card_mask"] is not None and ctx["card_tint"] is not None:

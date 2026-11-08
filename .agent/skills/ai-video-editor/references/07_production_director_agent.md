@@ -36,5 +36,5 @@ Score each dimension from `0.0` to `10.0` (`approved_for_master_render = True` w
 
 ## Skill CLI Invocation
 ```powershell
-C:\Users\hihao\AppData\Local\Programs\Python\Python312\python.exe .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py director-audit --project-dir "<project_dir>"
+python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py director-audit --project-dir "<project_dir>"
 ```

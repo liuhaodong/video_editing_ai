@@ -105,13 +105,13 @@ class ShowrunnerAgent(BaseEditingAgent):
                 TitleOverlayItem(
                     id="title_closing",
                     style="closing_card",
-                    text="WONDERFUL FAMILY MEMORIES",
-                    subtitle="4K 10-bit HLG HDR · 珍藏美好家庭时光",
+                    text="Timeless Memories",
+                    subtitle="A Curated Visual Archive",
                     timeline_start=closing_start,
                     duration=3.4,
-                    fade_in=0.4,
-                    fade_out=0.6,
-                    accent_color="#FFD740",
+                    fade_in=0.45,
+                    fade_out=0.65,
+                    accent_color="#E8E4DC",
                 )
             )
             entries.append(

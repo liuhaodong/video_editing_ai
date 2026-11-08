@@ -694,8 +694,8 @@ def create_app(default_project_dir: str | Path = "active_video_project") -> Fast
         prompt: str = Query(default=""),
     ) -> dict:
         if not media_dir or not Path(media_dir).exists():
-            libs = _discover_sample_libraries()
-            media_dir = libs[0]["path"] if libs else str(workspace_root)
+            libs = _discover_local_media_libraries(workspace_root)
+            media_dir = libs[0]["media_dir"] if libs else str(workspace_root)
         lib_info = inspect_media_library(media_dir, workspace_root=workspace_root)
         questions = generate_intake_questions(media_dir=media_dir, initial_prompt=prompt)
         initial_refinement = refine_intake_interactively(

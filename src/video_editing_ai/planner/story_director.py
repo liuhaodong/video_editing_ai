@@ -100,8 +100,8 @@ def _build_baseline_timeline(
 
     acts = [
         ("Act 1: Arrival & Opening", "Green", "Setting the scene, anticipation, and opening moments"),
-        ("Act 2: Adventure & Action", "Yellow", "Dynamic motion, rides, activities, and joyful reactions"),
-        ("Act 3: Iconic Highlights & Exploration", "Sand", "Signature landmarks, costumes, and group portraits"),
+        ("Act 2: Adventure & Action", "Yellow", "Dynamic motion, activities, and candid reactions"),
+        ("Act 3: Iconic Highlights & Exploration", "Sand", "Signature landmarks, details, and group portraits"),
         ("Act 4: Twilight Magic & Finale", "Purple", "Atmospheric evening highlights, music, and warm closing"),
     ]
 
@@ -154,22 +154,10 @@ def _build_baseline_timeline(
                         id="title_opening",
                         style="opening_card",
                         text=project_title,
-                        subtitle=user_prompt[:70] if user_prompt else "AI Story Cut • Highlight Reel",
+                        subtitle=user_prompt[:70] if user_prompt else "A Curated Story Film",
                         timeline_start=round(cursor + 0.3, 2),
                         duration=4.2,
-                        accent_color="#FFD740",
-                    )
-                )
-            else:
-                title_track.append(
-                    TitleOverlayItem(
-                        id=f"title_act_{act_idx + 1}",
-                        style="act_banner",
-                        text=act_name,
-                        subtitle=act_desc,
-                        timeline_start=round(cursor + 0.2, 2),
-                        duration=3.5,
-                        accent_color="#00E5FF" if act_idx < 3 else "#E040FB",
+                        accent_color="#E8E4DC",
                     )
                 )
 
@@ -213,18 +201,6 @@ def _build_baseline_timeline(
                                 secondary_text=d.translation,
                             )
                         )
-                        if d_idx == 0 and (sub_end - sub_start) >= 1.5:
-                            title_track.append(
-                                TitleOverlayItem(
-                                    id=f"callout_{clip_id}",
-                                    style="dialogue_badge",
-                                    text=f"“{d.text}”",
-                                    subtitle=d.translation,
-                                    timeline_start=sub_start,
-                                    duration=round(min(4.5, sub_end - sub_start + 0.4), 2),
-                                    accent_color="#FFD740",
-                                )
-                            )
 
             cursor = round(cursor + clip_dur, 2)
         else:
@@ -283,11 +259,11 @@ def _build_baseline_timeline(
             TitleOverlayItem(
                 id="title_closing",
                 style="closing_card",
-                text=f"{project_title} • Wonderful Memories",
-                subtitle="Created with AI Video Editor",
+                text=f"{project_title} • Timeless Memories",
+                subtitle="A Curated Visual Archive",
                 timeline_start=round(max(0.0, last_clip.timeline_start), 2),
                 duration=last_clip.duration,
-                accent_color="#FFD740",
+                accent_color="#E8E4DC",
             )
         )
 

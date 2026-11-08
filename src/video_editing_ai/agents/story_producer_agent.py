@@ -58,7 +58,7 @@ class StoryProducerAgent(BaseEditingAgent):
             (
                 "chap_01",
                 "Act I - Opening & Arrival",
-                "启程 · 第一印象",
+                "Opening & First Impressions",
                 "Opening Chapter",
                 "morning",
                 "Establishing the setting, atmosphere, and opening anticipation.",
@@ -66,7 +66,7 @@ class StoryProducerAgent(BaseEditingAgent):
             (
                 "chap_02",
                 "Act II - Exploration & Discovery",
-                "探索 · 光影漫步",
+                "Architecture & Motion",
                 "Exploration",
                 "afternoon",
                 "Dynamic scenes, architectural scale, and candid exploration.",
@@ -74,7 +74,7 @@ class StoryProducerAgent(BaseEditingAgent):
             (
                 "chap_03",
                 "Act III - Signature Highlights & Details",
-                "定格 · 核心瞬间",
+                "Curated Focal Moments",
                 "Signature Highlights",
                 "twilight",
                 "Curated focal points, artistic details, and emotional keepsakes.",
@@ -82,7 +82,7 @@ class StoryProducerAgent(BaseEditingAgent):
             (
                 "chap_04",
                 "Act IV - Golden Hour & Closing Finale",
-                "终章 · 难忘回忆",
+                "Reflections & Finale",
                 "Evening Finale",
                 "night",
                 "Warm closing reflections, culinary or evening atmosphere, and final cadence.",

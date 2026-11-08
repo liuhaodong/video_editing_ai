@@ -91,8 +91,12 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
         cursor = round(hook_dur, 3)
 
     # 2. Main Opening Title Card on Track V3 (drops right after Cold-Open Hook if present)
-    clean_proj_title = paper.project_title.replace("_", " ").strip().upper() or "FEATURED STORY"
-    opening_sub = f"{clean_proj_title} · A Cinematic Documentary | 光影与记忆典藏"
+    clean_proj_title = paper.project_title.replace("_", " ").strip() or "Featured Story"
+    if len(clean_proj_title) > 42:
+        clean_proj_title = " ".join(clean_proj_title.split()[:5]).title()
+    else:
+        clean_proj_title = clean_proj_title.title()
+    opening_sub = "A Curated Documentary Film"
 
     opening_start = round(cursor + 0.35, 2)
     title_track.append(
@@ -103,9 +107,9 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
             subtitle=opening_sub,
             timeline_start=opening_start,
             duration=3.6,
-            fade_in=0.4,
-            fade_out=0.5,
-            accent_color="#FFD740",
+            fade_in=0.45,
+            fade_out=0.55,
+            accent_color="#E8E4DC",
         )
     )
 
@@ -117,21 +121,6 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
                 name=chapter.title,
                 color=marker_colors[c_idx % len(marker_colors)],
                 note=chapter.narrative_goal,
-            )
-        )
-        # Add chapter banner title (after opening card with >=1.4s breathing room if c_idx == 0)
-        banner_start = round(chapter_start + (5.4 if c_idx == 0 else 0.35), 2)
-        title_track.append(
-            TitleOverlayItem(
-                id=f"title_chap_{c_idx + 1:02d}",
-                style="act_banner",
-                text=chapter.title,
-                subtitle=chapter.subtitle or chapter.narrative_goal,
-                timeline_start=banner_start,
-                duration=3.2,
-                fade_in=0.35,
-                fade_out=0.35,
-                accent_color="#FFAB40" if c_idx % 2 == 1 else "#FFD740",
             )
         )
 
@@ -177,22 +166,26 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
                 )
                 visual_track.append(v_item)
 
-                # Add contextual bilingual lower_third scene caption for B-roll / establishing video clips
-                if sc.annotation_title and sc.roll_type == "b_roll" and v_item.duration >= 3.2:
+                # Add contextual bilingual lower_third scene caption for B-roll video clips only when a curated non-boilerplate title is present
+                is_mechanical_vid_title = bool(
+                    sc.annotation_title
+                    and ("— Scene " in sc.annotation_title or "Highlight from " in sc.annotation_title)
+                )
+                if sc.annotation_title and not is_mechanical_vid_title and sc.roll_type == "b_roll" and v_item.duration >= 3.6:
                     lt_start = round(v_item.timeline_start + 0.5, 2)
-                    lt_dur = round(min(3.4, max(2.0, v_item.duration - 0.9)), 2)
-                    if not any(abs(t.timeline_start - lt_start) < 3.6 for t in title_track):
+                    lt_dur = round(min(3.2, max(2.0, v_item.duration - 1.0)), 2)
+                    if not any(abs(t.timeline_start - lt_start) < 4.0 for t in title_track):
                         title_track.append(
                             TitleOverlayItem(
                                 id=f"title_lt_{clip_id}",
                                 style="lower_third",
                                 text=sc.annotation_title,
-                                subtitle=sc.annotation_subtitle or chapter.location_tag,
+                                subtitle=sc.annotation_subtitle or "",
                                 timeline_start=lt_start,
                                 duration=lt_dur,
-                                fade_in=0.30,
-                                fade_out=0.30,
-                                accent_color="#FFD740",
+                                fade_in=0.35,
+                                fade_out=0.35,
+                                accent_color="#E8E4DC",
                             )
                         )
 
@@ -337,8 +330,12 @@ class DialogueEditorAgent(BaseEditingAgent):
     produces_artifacts = []
     skill_reference_file = "03_picture_editors.md"
 
-    def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
-        timeline = blackboard.timeline or _ensure_timeline_initialized(blackboard)
+    def run(self, blackboard: PipelineBlackboard, realign_only: bool = False) -> dict[str, Any]:
+        timeline = (
+            (blackboard.timeline or _ensure_timeline_initialized(blackboard))
+            if realign_only
+            else _ensure_timeline_initialized(blackboard)
+        )
         catalog = blackboard.catalog
 
         # Map source path -> VideoAsset for exact dialogue segment lookup
@@ -401,12 +398,12 @@ class DialogueEditorAgent(BaseEditingAgent):
                         id="title_director_quote_badge",
                         style="dialogue_badge",
                         text=f'"{best_sub.text[:36]}"',
-                        subtitle=best_sub.secondary_text or "Candid Family Moment · 精彩原声",
+                        subtitle=best_sub.secondary_text or "Candid Spoken Moment",
                         timeline_start=badge_start,
                         duration=min(3.2, max(1.8, best_sub.end - best_sub.start)),
                         fade_in=0.3,
                         fade_out=0.3,
-                        accent_color="#00E5FF",
+                        accent_color="#E8E4DC",
                     )
                 )
 
@@ -505,18 +502,26 @@ class MontageEditorAgent(BaseEditingAgent):
                 snapped_count += 1
 
         # Recalculate sequential Track V1 timeline_start positions and update subtitles + V2 cutaways + lower_thirds
-        old_starts = {item.id: item.timeline_start for item in timeline.visual_track}
         timeline.recalculate_sequential_starts()
         new_starts = {item.id: item.timeline_start for item in timeline.visual_track}
+        clip_by_id = {item.id: item for item in timeline.visual_track}
+        kept_titles: list[TitleOverlayItem] = []
         for t_item in timeline.title_track:
+            if t_item.style == "act_banner":
+                continue
             if t_item.id.startswith("title_lt_clip_"):
                 cid_ref = t_item.id.replace("title_lt_", "")
-                if cid_ref in new_starts:
-                    t_item.timeline_start = round(new_starts[cid_ref] + 0.5, 2)
+                parent_v = clip_by_id.get(cid_ref)
+                if parent_v is None or parent_v.type != "video" or parent_v.duration < 3.2:
+                    continue
+                t_item.timeline_start = round(parent_v.timeline_start + 0.45, 2)
+                t_item.duration = round(min(t_item.duration, max(1.8, parent_v.duration - 0.9)), 2)
+            kept_titles.append(t_item)
+        timeline.title_track = kept_titles
 
         # Re-align subtitles to updated V1 A-roll start times
         if blackboard.catalog is not None:
-            DialogueEditorAgent().run(blackboard)
+            DialogueEditorAgent().run(blackboard, realign_only=True)
 
         # Re-align Track V2 B-Roll cutaways to their parent A-roll clips and beat-snap their durations
         for b_item, parent, rel_offset in v2_parent_info:
@@ -542,14 +547,26 @@ class MontageEditorAgent(BaseEditingAgent):
                     item.ken_burns.preset = kb_cycle[(idx + 1) % len(kb_cycle)]  # type: ignore[assignment]
                 prev_preset = item.ken_burns.preset
 
-        # Sort and space out title_track overlays so titles never collide (>= 1.4s breathing room)
+        # Sort title_track and drop any non-opening/closing lower-third that collides with an existing title or lands on a photo plate
         timeline.title_track.sort(key=lambda t: t.timeline_start)
-        for i in range(1, len(timeline.title_track)):
-            prev_t = timeline.title_track[i - 1]
-            cur_t = timeline.title_track[i]
-            min_start = round(prev_t.timeline_start + prev_t.duration + 1.4, 2)
-            if cur_t.timeline_start < min_start and min_start + cur_t.duration < timeline.total_duration:
-                cur_t.timeline_start = min_start
+        non_colliding_titles: list[TitleOverlayItem] = []
+        for cur_t in timeline.title_track:
+            if cur_t.style not in ("opening_card", "closing_card"):
+                mid_t = cur_t.timeline_start + cur_t.duration * 0.5
+                under_clip = next(
+                    (c for c in timeline.visual_track if c.timeline_start <= mid_t <= (c.timeline_start + c.duration)),
+                    None,
+                )
+                if under_clip is not None and under_clip.type == "photo" and under_clip.caption_title:
+                    continue
+            if non_colliding_titles:
+                prev_t = non_colliding_titles[-1]
+                if cur_t.timeline_start < prev_t.timeline_start + prev_t.duration + 1.0:
+                    if cur_t.style in ("opening_card", "closing_card"):
+                        non_colliding_titles[-1] = cur_t
+                    continue
+            non_colliding_titles.append(cur_t)
+        timeline.title_track = non_colliding_titles
 
         # Configure Track A3 Background Music with -14dB auto-ducking & 1.0s smooth ramps
         audio_source = ""
@@ -688,7 +705,7 @@ def _apply_timeline_intelligence_to_obj(timeline: EditTimeline, overrides: dict[
                         duration=float(lt.get("duration", 3.2)),
                         fade_in=0.30,
                         fade_out=0.30,
-                        accent_color=str(lt.get("accent_color") or "#FFD740"),
+                        accent_color=str(lt.get("accent_color") or "#E8E4DC"),
                     )
                 )
             updated += 1

@@ -136,16 +136,13 @@ def _evaluate_photo_taste_metrics(img_path: str | Path, filename: str) -> dict[s
     else:
         inferred_cat = "sculpture"
 
-    is_dedicated_camera = filename.upper().startswith(("_DSC", "DSC", "A7C", "DSCF", "L10"))
-    camera_bonus = 0.55 if is_dedicated_camera else 0.0
     overall = round(
         min(
             9.95,
-            0.32 * saliency_score
-            + 0.26 * composition_score
-            + 0.24 * art_arch_score
-            + 0.18 * portrait_warmth_score
-            + camera_bonus,
+            0.34 * saliency_score
+            + 0.28 * composition_score
+            + 0.22 * art_arch_score
+            + 0.16 * portrait_warmth_score,
         ),
         2,
     )
@@ -178,42 +175,39 @@ def _generate_semantic_annotation(
     project_label: str = "Featured Story",
 ) -> tuple[str, str, str]:
     """Return baseline mechanical (annotation_title, annotation_subtitle, curation_rationale) prior to AI Vision curation."""
-    act_num = 1 if story_pct < 25 else (2 if story_pct < 55 else (3 if story_pct < 80 else 4))
-    clean_label = (project_label or "Featured Story").replace("_", " ").strip()[:32]
-
     if inferred_category == "masterpiece_painting":
         return (
-            f"{clean_label} — Fine Art & Cultural Detail (Act {act_num})",
-            "艺术细节与文化典藏 · 传世光影印记",
+            "Fine Art & Cultural Detail",
+            f"{project_label} · Curated Visual Study",
             "Selected for high color richness, central framing, and detailed visual texture.",
         )
     if inferred_category == "sculpture":
         return (
-            f"{clean_label} — Sculptural & Structural Study (Act {act_num})",
-            "立体雕塑与空间结构 · 光影与线条之美",
+            "Sculptural & Architectural Study",
+            f"{project_label} · Form & Light",
             "Selected for strong central subject saliency and balanced lighting.",
         )
     if inferred_category == "family_portrait":
         return (
-            f"{clean_label} — Keepsake Portrait (Act {act_num})",
-            "温暖人物肖像 · 珍贵记忆时刻",
+            "Candid Keepsake Portrait",
+            f"{project_label} · Personal Moment",
             "Selected for warm skin-tone balance and personal storytelling value.",
         )
     if story_pct < 25:
         return (
-            f"{clean_label} — Opening Establishing Vista",
-            "开篇全景观览 · 开启旅程篇章",
-            "Selected as a wide establishing composition in Act I.",
+            "Opening Horizon & Establishing Vista",
+            f"{project_label} · Opening Chapter",
+            "Selected as a wide establishing composition in the opening chapter.",
         )
     if story_pct > 75:
         return (
-            f"{clean_label} — Golden Hour & Closing Finale",
-            "暮色余晖与终章印记 · 难忘时光珍藏",
-            "Selected for warm tonal balance in the closing act.",
+            "Twilight Atmosphere & Closing Finale",
+            f"{project_label} · Closing Chapter",
+            "Selected for warm tonal balance in the closing chapter.",
         )
     return (
-        f"{clean_label} — Architectural & Scenic Highlight ({orientation.capitalize()})",
-        "建筑与风景精选 · 空间对称与构图之美",
+        "Architectural & Scenic Perspective",
+        f"{project_label} · Selected Frame",
         "Selected for balanced structural symmetry and subject focus.",
     )
 
@@ -400,7 +394,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 p1.annotation_title = f"Curated Diptych: {t1_short} & {t2_short}"
                 s1_short = p1.annotation_subtitle.split("·")[0].strip()
                 s2_short = p2.annotation_subtitle.split("·")[0].strip()
-                p1.annotation_subtitle = f"{s1_short} · {s2_short} (双联画展陈)"
+                p1.annotation_subtitle = f"{s1_short} · {s2_short}"
             absorbed_partner_ids.add(p2.subclip_id)
 
         # Assign semantic AI-paired photo modes & atmospheric finishers to remaining primary selects,
@@ -455,13 +449,13 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 continue
 
             blob_low = f"{sel_it.annotation_title} {sel_it.annotation_subtitle} {sel_it.subject_category}".lower()
-            if any(k in blob_low for k in ("mosaic", "sculpture", "nymph", "painting", "stained glass", "dome", "carving", "apsis", "detail", "masterpiece")):
+            if any(k in blob_low for k in ("mosaic", "sculpture", "relief", "painting", "stained glass", "dome", "carving", "fresco", "detail", "masterpiece")):
                 semantic_prefs = ["curator_loupe", "parallax_gallery", "editorial_magazine", "cinematic_depth_3d"]
-            elif any(k in blob_low for k in ("croissant", "bistro", "cheese", "café", "cafe", "boeuf", "dining", "food", "pastry", "candid", "smile", "selfie")):
+            elif any(k in blob_low for k in ("culinary", "bakery", "cheese", "café", "cafe", "menu", "dining", "food", "pastry", "candid", "smile", "selfie")):
                 semantic_prefs = ["polaroid_scrapbook", "cinematic_depth_3d", "parallax_gallery", "editorial_magazine"]
             elif sel_it.subject_category == "family_portrait" or sel_it.portrait_warmth_score >= 8.9:
                 semantic_prefs = ["cinematic_depth_3d", "polaroid_scrapbook", "parallax_gallery", "editorial_magazine"]
-            elif any(k in blob_low for k in ("panorama", "skyline", "seine", "twilight", "horizon", "illuminated", "night")):
+            elif any(k in blob_low for k in ("panorama", "skyline", "river", "waterfront", "twilight", "horizon", "illuminated", "night")):
                 semantic_prefs = ["cinema_anamorphic", "editorial_magazine", "parallax_gallery", "cinematic_depth_3d"]
             else:
                 semantic_prefs = ["editorial_magazine", "parallax_gallery", "triptych_cinematic", "cinematic_depth_3d", "curator_loupe"]
@@ -877,6 +871,19 @@ def apply_vision_curation_overrides(
 
     item_by_subclip = {it.subclip_id: it for it in report.items}
     item_by_filename = {it.filename.lower(): it for it in report.items}
+
+    explicit_selected_count = sum(
+        1 for ov in override_list if isinstance(ov, dict) and (ov.get("is_selected") or ov.get("selected"))
+    )
+    exclusive_slate = (
+        (isinstance(overrides, dict) and bool(overrides.get("exclusive_selection")))
+        or explicit_selected_count >= 10
+    )
+    if exclusive_slate:
+        for it in report.items:
+            if it.is_selected:
+                it.is_selected = False
+                it.rejection_reason = "not_in_ai_curated_slate"
 
     applied_count = 0
     for ov in override_list:
