@@ -91,20 +91,15 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
         cursor = round(hook_dur, 3)
 
     # 2. Main Opening Title Card on Track V3 (drops right after Cold-Open Hook if present)
-    title_low = paper.project_title.lower()
-    if "louvre" in title_low or "paris" in title_low:
-        opening_sub = "PARIS · LOUVRE MUSEUM · 4K HDR FAMILY STORY | 巴黎卢浮宫 · 家庭旅行记忆"
-    elif "halloween" in title_low or "gilroy" in title_low:
-        opening_sub = "GILROY GARDENS · 4K HDR FAMILY MEMORIES | 万圣夜游园 · 温暖家庭时光"
-    else:
-        opening_sub = "4K 10-BIT HLG HDR · FAMILY TRAVEL STORY | 珍藏美好家庭时光"
+    clean_proj_title = paper.project_title.replace("_", " ").strip().upper() or "FEATURED STORY"
+    opening_sub = f"{clean_proj_title} · 4K 10-BIT HLG HDR DOCUMENTARY | 光影与记忆典藏"
 
     opening_start = round(cursor + 0.35, 2)
     title_track.append(
         TitleOverlayItem(
             id="title_opening",
             style="opening_card",
-            text=paper.project_title.replace("_", " ").upper(),
+            text=clean_proj_title,
             subtitle=opening_sub,
             timeline_start=opening_start,
             duration=3.6,

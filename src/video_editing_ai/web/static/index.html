@@ -106,7 +106,7 @@
           <div style="margin-bottom:14px;">
             <label for="mediaDirInput">Selected Media Folder</label>
             <div class="input-with-buttons">
-              <input id="mediaDirInput" type="text" value="C:\Users\hihao\Documents\projects\clips\louvre" placeholder="Path to folder with videos &amp; photos..." />
+              <input id="mediaDirInput" type="text" value="" placeholder="Select or browse to a folder with videos &amp; photos..." />
               <button class="btn secondary" id="btnBrowseModal" type="button">📂 Browse</button>
               <button class="btn secondary" id="btnPickNativeFolder" type="button">🪟 OS Picker</button>
               <button class="btn secondary" id="btnInspectFolder" type="button">🔄 Scan</button>
@@ -116,15 +116,15 @@
           <div id="mediaLibrarySummaryBanner" class="library-summary-banner">
             <div class="summary-stat">
               <span class="stat-label">Library</span>
-              <strong id="libTitleText">Louvre Museum Paris Family Day Trip</strong>
+              <strong id="libTitleText">Select a Media Library</strong>
             </div>
             <div class="summary-stat">
               <span class="stat-label">Detected Media</span>
-              <strong id="libCountsText">🎬 4 Videos • 📸 349 Photos</strong>
+              <strong id="libCountsText">🎬 -- Videos • 📸 -- Photos</strong>
             </div>
             <div class="summary-stat">
               <span class="stat-label">Detected Cameras</span>
-              <strong id="libCamerasText">Sony A7C II • Google Pixel</strong>
+              <strong id="libCamerasText">Auto-Detected via EXIF</strong>
             </div>
             <div class="summary-stat">
               <span class="stat-label">Total Size</span>
@@ -162,7 +162,7 @@
               <span class="muted" style="font-weight:400; font-size:0.75rem;">Auto-refines as you type</span>
             </label>
             <div class="prompt-box-with-btn">
-              <textarea id="agentPromptInput" rows="3" placeholder="Tell the Intake Agent &amp; Director what you want in your video, how long it should feel, or which moments matter most...">Create a cinematic, heartwarming 4-act family day trip highlight video at the Louvre Museum in Paris. Combine our Sony A7C2 mirrorless camera and Pixel phone clips and photos, showcase the Louvre Pyramid, iconic masterpieces, sculptures, and family portraits with museum annotations and 2.5D parallax motion.</textarea>
+              <textarea id="agentPromptInput" rows="3" placeholder="Tell the Intake Agent &amp; Director what you want in your video, how long it should feel, or which moments matter most...">Create a cinematic, heartwarming 4-act highlight documentary. Balance candid spoken moments with beat-synced B-roll, curated high-taste photos with bilingual annotations and 2.5D parallax motion, and a mood-matched soundtrack in 4K 10-bit HLG HDR.</textarea>
               <button class="btn primary" id="btnRefineIntakeNow" type="button">✨ Refine Brief</button>
             </div>
 

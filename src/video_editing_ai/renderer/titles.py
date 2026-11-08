@@ -198,7 +198,7 @@ def render_title_png(
         f_title = _load_font(int(round(29 * s)), bold=True, serif=True)
         f_sub = _load_font(int(round(21 * s)), bold=False, serif=False)
 
-        badge_str = "LIVE SCENE  ·  PARIS DOCUMENTARY"
+        badge_str = "LIVE SCENE  ·  4K HDR STORY"
         sub_lines = textwrap.wrap(sub_text, width=78)[:2] if sub_text else []
 
         tw = draw.textbbox((0, 0), item.text, font=f_title)[2]

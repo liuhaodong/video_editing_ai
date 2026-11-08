@@ -54,124 +54,40 @@ class StoryProducerAgent(BaseEditingAgent):
                     photos.append(s)
 
         prompt_text = (brief.raw_user_prompt if brief else blackboard.user_prompt) or ""
-        all_text_lower = (
-            prompt_text.lower()
-            + " "
-            + " ".join(s.spoken_text.lower() + " " + s.summary.lower() for s in active_selects)
-        )
-        is_halloween_park = any(
-            k in all_text_lower for k in ("halloween", "gilroy", "pumpkin", "trick", "万圣", "南瓜")
-        )
-        is_louvre_paris = any(
-            k in all_text_lower
-            for k in ("louvre", "paris", "pyramid", "museum", "卢浮宫", "巴黎")
-        ) or "louvre" in str(blackboard.media_dir).lower()
-
-        if is_louvre_paris:
-            chapter_headers = [
-                (
-                    "chap_01",
-                    "Act I - Arrival at the Louvre Pyramid",
-                    "卢浮宫金字塔 · 晨光初见",
-                    "Cour Napoleon & Glass Pyramid",
-                    "morning",
-                    "Iconic arrival at I. M. Pei's glass pyramid and sunlit palace courtyard.",
-                ),
-                (
-                    "chap_02",
-                    "Act II - Grand Galleries & Masterpieces",
-                    "艺术长廊 · 经典名作",
-                    "Denon & Sully Galleries",
-                    "afternoon",
-                    "Exploring gilded ceilings, Renaissance masterpieces, and family awe.",
-                ),
-                (
-                    "chap_03",
-                    "Act III - Sculptures & Palace Courtyards",
-                    "雕塑庭院 · 光影漫步",
-                    "Richelieu Wing & Marly Courtyard",
-                    "afternoon",
-                    "Marble sculptures under vaulted glass roofs and candid family portraits.",
-                ),
-                (
-                    "chap_04",
-                    "Act IV - Parisian Memories & Finale",
-                    "巴黎印记 · 难忘一日",
-                    "Louvre Palace Finale",
-                    "twilight",
-                    "Golden-hour reflections, keepsake portraits, and warm closing moments in Paris.",
-                ),
-            ]
-        elif is_halloween_park:
-            chapter_headers = [
-                (
-                    "chap_01",
-                    "Act I - Entering the Enchanted Night",
-                    "步入奇幻万圣夜 · 欢声启程",
-                    "Park Entrance",
-                    "twilight",
-                    "Opening hook at the glowing park entrance with family excitement.",
-                ),
-                (
-                    "chap_02",
-                    "Act II - Whirling Rides & Joyful Thrills",
-                    "欢笑与旋转的奇遇 · 游乐时光",
-                    "Adventure Rides",
-                    "twilight",
-                    "Dynamic action rides, spinning tubs, and candid kid reactions.",
-                ),
-                (
-                    "chap_03",
-                    "Act III - The Great Pumpkin Pyramid",
-                    "南瓜金字塔的温暖记忆 · 经典打卡",
-                    "Pumpkin Pyramid Plaza",
-                    "night",
-                    "Iconic Halloween landmarks, glowing displays, and keepsake family portraits.",
-                ),
-                (
-                    "chap_04",
-                    "Act IV - Under the Neon Stage Lights",
-                    "霓虹舞台下的终章 · 完美谢幕",
-                    "Main Neon Stage",
-                    "night",
-                    "High-energy stage finale, music celebration, and warm closing reflection.",
-                ),
-            ]
-        else:
-            chapter_headers = [
-                (
-                    "chap_01",
-                    "Act I - The Journey Begins",
-                    "启程 · 第一印象",
-                    "Arrival",
-                    "morning",
-                    "Establishing the destination and opening family excitement.",
-                ),
-                (
-                    "chap_02",
-                    "Act II - Exploring Together",
-                    "探索 · 欢乐奇遇",
-                    "Adventure Zone",
-                    "afternoon",
-                    "Candid adventures, motion, and playful family moments.",
-                ),
-                (
-                    "chap_03",
-                    "Act III - Golden Memories",
-                    "定格 · 温暖时光",
-                    "Iconic Landmarks",
-                    "twilight",
-                    "Heartwarming portraits and iconic highlights from the trip.",
-                ),
-                (
-                    "chap_04",
-                    "Act IV - Grand Finale",
-                    "终章 · 难忘回忆",
-                    "Evening Finale",
-                    "night",
-                    "Climax celebration and closing family reflection.",
-                ),
-            ]
+        chapter_headers = [
+            (
+                "chap_01",
+                "Act I - Opening & Arrival",
+                "启程 · 第一印象",
+                "Opening Chapter",
+                "morning",
+                "Establishing the setting, atmosphere, and opening anticipation.",
+            ),
+            (
+                "chap_02",
+                "Act II - Exploration & Discovery",
+                "探索 · 光影漫步",
+                "Exploration",
+                "afternoon",
+                "Dynamic scenes, architectural scale, and candid exploration.",
+            ),
+            (
+                "chap_03",
+                "Act III - Signature Highlights & Details",
+                "定格 · 核心瞬间",
+                "Signature Highlights",
+                "twilight",
+                "Curated focal points, artistic details, and emotional keepsakes.",
+            ),
+            (
+                "chap_04",
+                "Act IV - Golden Hour & Closing Finale",
+                "终章 · 难忘回忆",
+                "Evening Finale",
+                "night",
+                "Warm closing reflections, culinary or evening atmosphere, and final cadence.",
+            ),
+        ]
 
         num_chapters = min(4, max(1, len(videos) + (1 if photos else 0)))
         chapter_headers = chapter_headers[:num_chapters]

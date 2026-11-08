@@ -904,4 +904,75 @@ def test_ai_creative_intelligence_and_interactive_multi_choice_intake(
     assert screening_jpg.exists() and screening_jpg.stat().st_size > 5000
 
 
+def test_zero_project_specific_hardcodings_and_pure_ai_delegation(tmp_path: Path, sample_media_dir: Path) -> None:
+    """
+    Verify that no project-specific lookup tables (e.g. LOUVRE_CURATED_MASTERPIECES), location branches
+    (is_louvre, is_halloween, louvre_paris, halloween_park), or hardcoded clip filenames exist in src/,
+    and that PhotoCuratorAgent delegates creative subject annotation to AI decisions (ai_decisions/photo_curator.json).
+    """
+    import json
+    import re
+    from video_editing_ai.agents import photo_curator_agent, run_multi_agent_pipeline
+    from video_editing_ai.models.schema import PhotoCurationReport
+
+    assert not hasattr(photo_curator_agent, "LOUVRE_CURATED_MASTERPIECES")
+
+    repo_root = Path(__file__).resolve().parent.parent
+    py_files = list((repo_root / "src").rglob("*.py")) + list((repo_root / ".agent").rglob("*.py"))
+    forbidden_pattern = re.compile(
+        r"(LOUVRE_CURATED_MASTERPIECES|\bis_louvre\b|\bis_halloween\b|\blouvre_paris\b|\bhalloween_park\b|_DSC4025|PXL_20260419)",
+        re.IGNORECASE,
+    )
+    violations: list[str] = []
+    for p in py_files:
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        for m in forbidden_pattern.finditer(text):
+            violations.append(f"{p.relative_to(repo_root)}: {m.group(0)}")
+    assert violations == [], f"Found project-specific hardcodings: {violations}"
+
+    # Verify AI delegation via ai_decisions/photo_curator.json
+    proj_dir = tmp_path / "pure_ai_proj"
+    ai_dir = proj_dir / "ai_decisions"
+    ai_dir.mkdir(parents=True, exist_ok=True)
+    (ai_dir / "photo_curator.json").write_text(
+        json.dumps(
+            {
+                "curatorial_statement": "AI Vision analyzed contact sheets and identified botanical & architectural subjects.",
+                "items": [
+                    {
+                        "tile_id": "#01",
+                        "is_selected": True,
+                        "annotation_title": "AI-Analyzed Botanical Conservatory Dome",
+                        "annotation_subtitle": "AI 视觉识别 · 植物园玻璃穹顶与光影",
+                        "subject_category": "landmark_architecture",
+                        "recommended_photo_mode": "curator_loupe",
+                        "overlay_fx": "museum_spotlight",
+                        "curation_rationale": "AI identified intricate iron lattice work suited for 1.65x optical loupe.",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    bb = run_multi_agent_pipeline(
+        media_dir=sample_media_dir,
+        project_dir=proj_dir,
+        user_prompt="Botanical conservatory documentary",
+        width=640,
+        height=360,
+        fps=24,
+        hdr=False,
+        use_antigravity=False,
+        whisper_model="base",
+        render_video=False,
+    )
+    pc = PhotoCurationReport.from_json_file(proj_dir / "photo_curation.json")
+    assert "AI Vision analyzed contact sheets" in pc.curatorial_statement
+    assert any(it.annotation_title == "AI-Analyzed Botanical Conservatory Dome" for it in pc.items)
+    assert any(it.recommended_photo_mode == "curator_loupe" for it in pc.items)
+
+
+
 

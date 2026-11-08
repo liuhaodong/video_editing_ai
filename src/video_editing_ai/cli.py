@@ -296,7 +296,7 @@ def cmd_run(
 
 @app.command("serve")
 def cmd_serve(
-    project_dir: Path = typer.Option(Path("louvre_day_trip_project"), "--project-dir", help="Default project folder"),
+    project_dir: Path = typer.Option(Path("active_video_project"), "--project-dir", help="Default project folder"),
     host: str = typer.Option("0.0.0.0", "--host"),
     port: int = typer.Option(8000, "--port"),
 ) -> None:

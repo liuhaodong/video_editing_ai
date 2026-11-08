@@ -10,7 +10,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from ..analyzer.media_probe import _get_cjk_font
+from ..analyzer.media_probe import _extract_exif_camera_info, _get_cjk_font
 from ..models.schema import (
     VALID_PHOTO_MODES,
     VALID_PHOTO_OVERLAY_FX,
@@ -22,131 +22,6 @@ from ..models.schema import (
     PhotoCurationReport,
 )
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
-
-
-# Curatorial knowledge base mapping iconic Louvre masterpieces/scenes and visual archetypes
-LOUVRE_CURATED_MASTERPIECES: dict[str, dict[str, str]] = {
-    "PXL_20260419_070643345.jpg": {
-        "category": "landmark_architecture",
-        "title": "Louvre Glass Pyramid & Cour Napoleon",
-        "subtitle": "卢浮宫玻璃金字塔 · 贝聿铭传世建筑杰作",
-        "rationale": "Iconic wide establishing shot of I. M. Pei's glass pyramid against the Renaissance palace.",
-    },
-    "_DSC4011.jpg": {
-        "category": "landmark_architecture",
-        "title": "Palais du Louvre Renaissance Facade",
-        "subtitle": "卢浮宫古典宫殿立面 · 巴黎晨光初照",
-        "rationale": "Crisp full-frame architectural composition of the Pavillon Richelieu and courtyard.",
-    },
-    "PXL_20260419_072628436.jpg": {
-        "category": "landmark_architecture",
-        "title": "Inside the Louvre Glass Pyramid",
-        "subtitle": "仰望金字塔几何穹顶 · 光影交织",
-        "rationale": "Striking upward geometric perspective through the steel-and-glass lattice.",
-    },
-    "PXL_20260419_073322562.jpg": {
-        "category": "sculpture",
-        "title": "Daru Staircase & Winged Victory of Samothrace",
-        "subtitle": "达鲁阶梯与《萨莫色雷斯的胜利女神》",
-        "rationale": "Grand ceremonial staircase leading up to the Hellenistic Winged Victory.",
-    },
-    "_DSC4025.jpg": {
-        "category": "masterpiece_painting",
-        "title": "Mona Lisa (La Joconde) — Leonardo da Vinci",
-        "subtitle": "《蒙娜丽莎》· 达芬奇文艺复兴传世名作 (c. 1503)",
-        "rationale": "Centerpiece Louvre masterpiece with balanced framing and rich sfumato detail.",
-    },
-    "PXL_20260419_073929241_exported_664_1776599489717~2.jpg": {
-        "category": "family_portrait",
-        "title": "Keepsake Portrait with the Mona Lisa",
-        "subtitle": "与《蒙娜丽莎》同框 · 卢浮宫珍贵纪念时刻",
-        "rationale": "Joyful personal portrait in the Salle des Etats with La Joconde in the background.",
-    },
-    "_DSC4030.jpg": {
-        "category": "masterpiece_painting",
-        "title": "La Belle Jardiniere — Raphael (1507)",
-        "subtitle": "《美丽的女园丁》· 拉斐尔圣母与圣子杰作",
-        "rationale": "Luminous High Renaissance pyramidal composition in an ornate arched Renaissance frame.",
-    },
-    "_DSC4040.jpg": {
-        "category": "landmark_architecture",
-        "title": "The Grande Galerie of the Louvre",
-        "subtitle": "卢浮宫大画廊 · 漫步世界艺术殿堂",
-        "rationale": "Deep vanishing-point perspective down the Italian paintings gallery.",
-    },
-    "_DSC4047.jpg": {
-        "category": "masterpiece_painting",
-        "title": "The Coronation of Napoleon — Jacques-Louis David",
-        "subtitle": "《拿破仑一世加冕大典》· 卢浮宫史诗巨幅油画",
-        "rationale": "Monumental Neoclassical canvas capturing rich crimson and gold imperial pageantry.",
-    },
-    "_DSC4061.jpg": {
-        "category": "masterpiece_painting",
-        "title": "Liberty Leading the People — Eugene Delacroix",
-        "subtitle": "《自由引导人民》· 法兰西浪漫主义巅峰杰作",
-        "rationale": "Iconic tricolor flag and dramatic chiaroscuro in a gilded museum frame.",
-    },
-    "_DSC4068.jpg": {
-        "category": "masterpiece_painting",
-        "title": "Bonaparte Crossing the Alps — Jacques-Louis David",
-        "subtitle": "《跨越阿尔卑斯山圣伯纳隘道的拿破仑》",
-        "rationale": "Dynamic vertical equestrian portrait framed in gold.",
-    },
-    "PXL_20260419_085148969.jpg": {
-        "category": "masterpiece_painting",
-        "title": "The Raft of the Medusa — Theodore Gericault",
-        "subtitle": "《梅杜萨之筏》· 法国浪漫主义里程碑巨作",
-        "rationale": "Powerful dramatic composition in the Denon Wing Red Rooms.",
-    },
-    "_DSC4090.jpg": {
-        "category": "sculpture",
-        "title": "Psyche Revived by Cupid's Kiss — Antonio Canova",
-        "subtitle": "《爱神吻醒普赛克》· 新古典主义大理石雕塑杰作",
-        "rationale": "Exquisite backlit marble wings and emotional sculptural silhouette.",
-    },
-    "_DSC4112.jpg": {
-        "category": "sculpture",
-        "title": "Venus de Milo (Aphrodite of Milos, c. 130 BC)",
-        "subtitle": "《米洛斯的维纳斯》· 古希腊雕塑镇馆瑰宝",
-        "rationale": "Timeless Hellenistic marble goddess isolated cleanly against warm marble walls.",
-    },
-    "_DSC4119.jpg": {
-        "category": "sculpture",
-        "title": "Pallas of Velletri (Athena) Under Gilded Dome",
-        "subtitle": "《维莱特里的雅典娜》· 古典神庙金饰穹顶",
-        "rationale": "Regal vertical symmetry pairing classical marble statue with coffered golden vault.",
-    },
-    "_DSC4148.jpg": {
-        "category": "sculpture",
-        "title": "Great Sphinx of Tanis (c. 2600 BC)",
-        "subtitle": "《塔尼斯大斯芬克斯像》· 古埃及馆镇馆之宝",
-        "rationale": "Monumental pink granite sphinx guarding the Egyptian Antiquities crypt.",
-    },
-    "PXL_20260419_121216262.jpg": {
-        "category": "sculpture",
-        "title": "The Code of Hammurabi Stele (c. 1750 BC)",
-        "subtitle": "《汉谟拉比法典》玄武岩石碑 · 人类最古老成文法典",
-        "rationale": "Iconic Babylonian basalt stele in the Richelieu Wing Near Eastern Antiquities.",
-    },
-    "_DSC4221.jpg": {
-        "category": "landmark_architecture",
-        "title": "Cour Puget & Vaulted Glass Sculpture Courtyard",
-        "subtitle": "卢浮宫玻璃天幕庭院 · 阳光与古典雕塑交响",
-        "rationale": "Soaring iron-and-glass skylight bathing French marble sculptures in golden light.",
-    },
-    "_DSC4228.jpg": {
-        "category": "landmark_architecture",
-        "title": "Palais du Louvre & Pyramid Grand Panorama",
-        "subtitle": "卢浮宫宫殿群与金字塔全景 · 壮丽巴黎印记",
-        "rationale": "Sweeping symmetrical panorama of the Louvre wings and central pyramid.",
-    },
-    "PXL_20260419_190811956.jpg": {
-        "category": "candid_moment",
-        "title": "Parisian Bistro Finale — Boeuf Bourguignon",
-        "subtitle": "巴黎风味晚餐 · 传统红酒炖牛肉与法棍面包",
-        "rationale": "Warm culinary closing moment celebrating the end of a full day at the Louvre.",
-    },
-}
 
 
 def _compute_dhash_hex(img_arr_gray: np.ndarray) -> str:
@@ -269,33 +144,6 @@ def _evaluate_photo_taste_metrics(img_path: str | Path, filename: str) -> dict[s
         2,
     )
 
-    # Boost known iconic curated masterpieces so the best museum highlights are guaranteed top taste rank
-    if filename in LOUVRE_CURATED_MASTERPIECES:
-        priority_bonus = 1.65 if filename in (
-            "PXL_20260419_070643345.jpg",
-            "PXL_20260419_072628436.jpg",
-            "PXL_20260419_073322562.jpg",
-            "_DSC4025.jpg",
-            "PXL_20260419_073929241_exported_664_1776599489717~2.jpg",
-            "_DSC4030.jpg",
-            "_DSC4047.jpg",
-            "_DSC4061.jpg",
-            "_DSC4068.jpg",
-            "PXL_20260419_085148969.jpg",
-            "_DSC4090.jpg",
-            "_DSC4112.jpg",
-            "_DSC4119.jpg",
-            "_DSC4148.jpg",
-            "PXL_20260419_121216262.jpg",
-            "_DSC4221.jpg",
-            "PXL_20260419_190811956.jpg",
-        ) else 1.20
-        overall = round(max(9.65, min(9.95, overall + priority_bonus)), 2)
-        saliency_score = max(9.5, saliency_score)
-        composition_score = max(9.5, composition_score)
-        art_arch_score = max(9.6, art_arch_score)
-        inferred_cat = LOUVRE_CURATED_MASTERPIECES[filename]["category"]
-
     return {
         "dhash": dhash,
         "saliency_score": saliency_score,
@@ -307,10 +155,23 @@ def _evaluate_photo_taste_metrics(img_path: str | Path, filename: str) -> dict[s
     }
 
 
-def _build_camera_badge(filename: str, is_louvre: bool, is_halloween: bool) -> str:
-    cam = "SONY A7C II · 33MP" if filename.startswith(("_DSC", "A7C")) else "GOOGLE PIXEL · HDR"
-    loc = "LOUVRE PARIS" if is_louvre else ("GILROY GARDENS" if is_halloween else "FAMILY TRAVEL")
-    return f"{cam} · {loc}"
+def _build_camera_badge(
+    filename: str,
+    camera_make_model: Optional[str] = None,
+    project_badge_tag: str = "4K HDR ARCHIVE",
+) -> str:
+    if camera_make_model and camera_make_model.strip():
+        cam = camera_make_model.strip().upper()
+    elif filename.upper().startswith(("_DSC", "DSC", "A7C")):
+        cam = "SONY ALPHA · FULL FRAME"
+    elif filename.upper().startswith("PXL_"):
+        cam = "GOOGLE PIXEL · HDR"
+    elif filename.upper().startswith("IMG_"):
+        cam = "APPLE IPHONE · HDR"
+    else:
+        cam = "DIGITAL CAMERA · HDR"
+    tag = (project_badge_tag or "4K HDR ARCHIVE").strip().upper()[:24]
+    return f"{cam} · {tag}"
 
 
 def _generate_semantic_annotation(
@@ -318,80 +179,46 @@ def _generate_semantic_annotation(
     inferred_category: str,
     orientation: str,
     story_pct: int,
-    is_louvre: bool,
-    is_halloween: bool,
+    project_label: str = "Featured Story",
 ) -> tuple[str, str, str]:
-    """Return (annotation_title, annotation_subtitle, curation_rationale) for a photo."""
-    if filename in LOUVRE_CURATED_MASTERPIECES:
-        meta = LOUVRE_CURATED_MASTERPIECES[filename]
-        return meta["title"], meta["subtitle"], meta["rationale"]
+    """Return baseline mechanical (annotation_title, annotation_subtitle, curation_rationale) prior to AI Vision curation."""
+    act_num = 1 if story_pct < 25 else (2 if story_pct < 55 else (3 if story_pct < 80 else 4))
+    clean_label = (project_label or "Featured Story").replace("_", " ").strip()[:32]
 
-    if is_louvre:
-        if inferred_category == "masterpiece_painting":
-            return (
-                "Louvre Gallery Masterpiece",
-                "卢浮宫馆藏古典油画 · 传世艺术真迹",
-                "Selected for rich canvas color harmony and museum frame composition.",
-            )
-        if inferred_category == "sculpture":
-            return (
-                "Classical Marble Sculpture at the Louvre",
-                "卢浮宫古典大理石雕塑 · 光影与线条之美",
-                "Selected for strong central sculptural subject and museum lighting.",
-            )
-        if inferred_category == "family_portrait":
-            return (
-                "Family Keepsake at the Louvre Museum",
-                "卢浮宫温暖家庭合影 · 巴黎旅行珍藏记忆",
-                "Selected for warm portrait expression and travel keepsake value.",
-            )
-        if story_pct < 25:
-            return (
-                "Cour Napoleon & Palais du Louvre",
-                "拿破仑庭院与卢浮宫古典建筑群 · 晨光初见",
-                "Selected as an architectural establishing frame in Act I.",
-            )
-        if story_pct > 75:
-            return (
-                "Parisian Golden Hour & Louvre Finale",
-                "巴黎漫步与卢浮宫终章 · 难忘家庭时光",
-                "Selected for warm golden-hour palette in the closing act.",
-            )
+    if inferred_category == "masterpiece_painting":
         return (
-            "Grand Galleries of the Palais du Louvre",
-            "卢浮宫艺术长廊 · 探索法兰西文化瑰宝",
-            "Selected for balanced architectural symmetry and subject focus.",
+            f"{clean_label} — Fine Art & Cultural Detail (Act {act_num})",
+            "艺术细节与文化典藏 · 传世光影印记",
+            "Selected for high color richness, central framing, and detailed visual texture.",
         )
-
-    if is_halloween:
-        if story_pct < 25:
-            return (
-                "Enchanted Park Entrance at Twilight",
-                "夜幕降临 · 步入奇幻万圣游乐园",
-                "Opening twilight atmosphere and family arrival.",
-            )
-        if story_pct < 55:
-            return (
-                "Joyful Halloween Rides & Laughter",
-                "欢乐游乐设施 · 孩子们的灿烂笑容",
-                "High-energy family adventure moment.",
-            )
-        if story_pct < 80:
-            return (
-                "The Great Glowing Pumpkin Pyramid",
-                "璀璨南瓜金字塔 · 万圣夜经典打卡",
-                "Iconic glowing pumpkin display and warm portrait lighting.",
-            )
+    if inferred_category == "sculpture":
         return (
-            "Neon Stage Celebration & Finale",
-            "霓虹舞台谢幕 · 珍藏欢乐家庭之夜",
-            "Vibrant night finale under stage lights.",
+            f"{clean_label} — Sculptural & Structural Study (Act {act_num})",
+            "立体雕塑与空间结构 · 光影与线条之美",
+            "Selected for strong central subject saliency and balanced lighting.",
         )
-
+    if inferred_category == "family_portrait":
+        return (
+            f"{clean_label} — Keepsake Portrait (Act {act_num})",
+            "温暖人物肖像 · 珍贵记忆时刻",
+            "Selected for warm skin-tone balance and personal storytelling value.",
+        )
+    if story_pct < 25:
+        return (
+            f"{clean_label} — Opening Establishing Vista",
+            "开篇全景观览 · 开启旅程篇章",
+            "Selected as a wide establishing composition in Act I.",
+        )
+    if story_pct > 75:
+        return (
+            f"{clean_label} — Golden Hour & Closing Finale",
+            "暮色余晖与终章印记 · 难忘时光珍藏",
+            "Selected for warm tonal balance in the closing act.",
+        )
     return (
-        f"Curated Travel Highlight ({orientation.capitalize()})",
-        "旅途精彩瞬间 · 温暖家庭记忆",
-        "Selected for strong subject saliency and balanced composition.",
+        f"{clean_label} — Architectural & Scenic Highlight ({orientation.capitalize()})",
+        "建筑与风景精选 · 空间对称与构图之美",
+        "Selected for balanced structural symmetry and subject focus.",
     )
 
 
@@ -405,7 +232,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
     description = (
         "Evaluates all photos using 5-factor aesthetic taste scoring (subject saliency, rule-of-thirds "
         "composition, portrait warmth, artwork/landmark recognition, and 64-bit dHash burst deduplication), "
-        "selects the most compelling shots, and attaches bilingual museum/subject annotations into photo_curation.json."
+        "selects the most compelling shots, and delegates visual subject annotation & semantic photo effect pairing to the AI Agent."
     )
     enabled_by_default = True
     requires_artifacts = ["creative_brief.json", "media_index.json"]
@@ -419,24 +246,25 @@ class PhotoCuratorAgent(BaseEditingAgent):
         if media_index is None:
             raise RuntimeError("PhotoCuratorAgent requires blackboard.media_index from CullerAgent.")
 
-        prompt_blob = (
-            f"{brief.project_title if brief else ''} "
-            f"{brief.raw_user_prompt if brief else blackboard.user_prompt} "
-            f"{blackboard.media_dir}"
-        ).lower()
-        is_louvre = any(k in prompt_blob for k in ("louvre", "paris", "pyramid", "museum", "卢浮宫", "巴黎"))
-        is_halloween = any(k in prompt_blob for k in ("halloween", "gilroy", "pumpkin", "万圣"))
+        project_label = (
+            (brief.project_title if brief and brief.project_title else blackboard.media_dir.name)
+            .replace("_", " ")
+            .strip()
+        )
+        project_badge_tag = project_label.upper()[:22] if project_label else "4K HDR ARCHIVE"
 
-        # Map filename -> preview_path for fast image analysis
+        # Map filename -> preview_path and EXIF camera_make_model for fast image analysis
         preview_by_name: dict[str, str] = {}
+        camera_by_name: dict[str, Optional[str]] = {}
         if catalog is not None:
             for p in catalog.photos:
                 preview_by_name[p.filename] = p.preview_path or p.path
+                camera_by_name[p.filename] = getattr(p, "camera_make_model", None)
 
         photo_subclips = [s for s in media_index.subclips if s.media_type == "photo"]
         total_photos = len(photo_subclips)
 
-        # Scale number of curated photos dynamically from brief.target_duration_sec (no artificial 2-min / 16-photo cap)
+        # Scale number of curated photos dynamically from brief.target_duration_sec
         video_dur_sum = sum(s.duration for s in media_index.subclips if s.media_type == "video" and not s.is_discarded)
         target_dur = brief.target_duration_sec if brief else 110.0
         rem_photo_sec = max(24.0, target_dur - video_dur_sum)
@@ -457,7 +285,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
         curated_items: list[CuratedPhotoItem] = []
         subclip_by_id: dict[str, CulledSubClip] = {s.subclip_id: s for s in photo_subclips}
 
-        # Step 1: Score every photo and assign perceptual dHash burst clusters
+        # Step 1: Score every photo mechanically and assign perceptual dHash burst clusters
         cluster_id = 0
         prev_hash: Optional[str] = None
 
@@ -466,11 +294,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
             metrics = _evaluate_photo_taste_metrics(img_path, sc.filename)
             cur_hash = str(metrics["dhash"])
 
-            if (
-                prev_hash is None
-                or sc.filename in LOUVRE_CURATED_MASTERPIECES
-                or _hamming_distance_hex(prev_hash, cur_hash) > 10
-            ):
+            if prev_hash is None or _hamming_distance_hex(prev_hash, cur_hash) > 10:
                 cluster_id += 1
             prev_hash = cur_hash
 
@@ -481,10 +305,16 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 inferred_cat,
                 sc.orientation,
                 story_pct,
-                is_louvre,
-                is_halloween,
+                project_label,
             )
-            badge = _build_camera_badge(sc.filename, is_louvre, is_halloween)
+            cam_model = camera_by_name.get(sc.filename)
+            if not cam_model and Path(sc.source_path).exists():
+                try:
+                    with Image.open(sc.source_path) as raw_im:
+                        cam_model, _ = _extract_exif_camera_info(raw_im, Path(sc.source_path))
+                except Exception:
+                    cam_model = None
+            badge = _build_camera_badge(sc.filename, cam_model, project_badge_tag)
 
             curated_items.append(
                 CuratedPhotoItem(
@@ -523,18 +353,9 @@ class PhotoCuratorAgent(BaseEditingAgent):
 
         deduped_pool = list(best_in_cluster.values())
 
-        # Step 3: Select top photos with both high aesthetic taste AND narrative chapter distribution
+        # Step 3: Select top photos across chronological story buckets by highest overall_taste_score
         chosen_ids: set[str] = set()
-        # First lock in any known curated masterpieces present in the pool (up to target_select_count)
-        masterpiece_hits = [
-            it for it in deduped_pool if it.filename in LOUVRE_CURATED_MASTERPIECES
-        ]
-        masterpiece_hits.sort(key=lambda x: x.overall_taste_score, reverse=True)
-        for mh in masterpiece_hits[:target_select_count]:
-            chosen_ids.add(mh.subclip_id)
-
-        # Fill any remaining slots across 4 chronological story quartiles by highest overall_taste_score
-        remaining_needed = target_select_count - len(chosen_ids)
+        remaining_needed = target_select_count
         if remaining_needed > 0 and deduped_pool:
             num_buckets = min(remaining_needed, 8)
             bucket_len = max(1, len(deduped_pool) / num_buckets)
@@ -557,15 +378,20 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     if len(chosen_ids) < target_select_count:
                         chosen_ids.add(pick.subclip_id)
 
+        # If bucket rounding left any unfilled slots, top up with the highest-scoring remaining deduped photos
+        if len(chosen_ids) < target_select_count:
+            leftover = sorted(
+                [it for it in deduped_pool if it.subclip_id not in chosen_ids],
+                key=lambda x: x.overall_taste_score,
+                reverse=True,
+            )
+            for pick in leftover[: target_select_count - len(chosen_ids)]:
+                chosen_ids.add(pick.subclip_id)
+
         # Step 4: Pair complementary vertical ('portrait') selects for Diptych / Polaroid Split-Screen
         # and assign diverse cinema-grade photo modes & atmospheric finishers across selected plates
         selected_items = [it for it in curated_items if it.subclip_id in chosen_ids]
-        portrait_selects = [
-            it
-            for it in selected_items
-            if it.orientation == "portrait"
-            and it.filename not in ("_DSC4025.jpg", "PXL_20260419_073322562.jpg", "_DSC4112.jpg")
-        ]
+        portrait_selects = [it for it in selected_items if it.orientation == "portrait"]
         absorbed_partner_ids: set[str] = set()
         if len(portrait_selects) >= 2:
             p1, p2 = portrait_selects[0], portrait_selects[1]
@@ -575,7 +401,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
             t1_short = p1.annotation_title.split("—")[0].strip()
             t2_short = p2.annotation_title.split("—")[0].strip()
             if t1_short != t2_short:
-                p1.annotation_title = f"Louvre Diptych: {t1_short} & {t2_short}"
+                p1.annotation_title = f"Curated Diptych: {t1_short} & {t2_short}"
                 s1_short = p1.annotation_subtitle.split("·")[0].strip()
                 s2_short = p2.annotation_subtitle.split("·")[0].strip()
                 p1.annotation_subtitle = f"{s1_short} · {s2_short} (双联画展陈)"
@@ -753,14 +579,23 @@ class PhotoCuratorAgent(BaseEditingAgent):
             timeout_sec=40.0,
         )
         if isinstance(ai_photo_resp, dict) and (
-            ai_photo_resp.get("items") or ai_photo_resp.get("select_ids") or ai_photo_resp.get("annotations")
+            ai_photo_resp.get("items")
+            or ai_photo_resp.get("overrides")
+            or ai_photo_resp.get("select_ids")
+            or ai_photo_resp.get("annotations")
         ):
             try:
-                apply_vision_curation_overrides(blackboard.project_dir, ai_photo_resp)
+                apply_vision_curation_overrides(
+                    blackboard.project_dir,
+                    ai_photo_resp,
+                    curatorial_statement=ai_photo_resp.get("curatorial_statement"),
+                )
                 blackboard.photo_curation = PhotoCurationReport.from_json_file(out_path)
                 blackboard.media_index = MediaIndex.from_json_file(blackboard.project_dir / "media_index.json")
                 report = blackboard.photo_curation
                 selected_items = [it for it in report.items if it.is_selected]
+                avg_taste = report.average_taste_score_selected
+                cs_info = render_curation_contact_sheets(blackboard.project_dir)
             except Exception:
                 pass
 
@@ -1007,7 +842,7 @@ def render_curation_contact_sheets(
 
 def apply_vision_curation_overrides(
     project_dir: str | Path,
-    overrides: list[dict[str, Any]],
+    overrides: list[dict[str, Any]] | dict[str, Any],
     curatorial_statement: Optional[str] = None,
 ) -> dict[str, Any]:
     """Mechanically persist the AI Agent's visual curation & annotation decisions into photo_curation.json, media_index.json, and timeline.yaml."""
@@ -1019,6 +854,18 @@ def apply_vision_curation_overrides(
 
     if not pc_path.exists():
         raise FileNotFoundError(f"photo_curation.json not found in {proj}")
+
+    if isinstance(overrides, dict):
+        if not curatorial_statement and overrides.get("curatorial_statement"):
+            curatorial_statement = str(overrides["curatorial_statement"])
+        override_list = list(
+            overrides.get("overrides")
+            or overrides.get("items")
+            or overrides.get("annotations")
+            or []
+        )
+    else:
+        override_list = list(overrides)
 
     report = PhotoCurationReport.from_json_file(pc_path)
     tile_to_subclip: dict[str, str] = {}
@@ -1036,7 +883,7 @@ def apply_vision_curation_overrides(
     item_by_filename = {it.filename.lower(): it for it in report.items}
 
     applied_count = 0
-    for ov in overrides:
+    for ov in override_list:
         key_raw = str(
             ov.get("subclip_id")
             or ov.get("tile_id")

@@ -95,38 +95,18 @@ def inspect_media_library(
             elif ext in AUDIO_EXTENSIONS:
                 a_count += 1
 
-    path_low = str(m_dir).lower() + " " + " ".join(sample_files).lower()
     ws_root = Path(workspace_root).resolve() if workspace_root else Path.cwd().resolve()
-
-    if "louvre" in path_low or "paris" in path_low:
-        theme = "louvre_paris"
-        display_title = "Louvre Museum Paris Family Day Trip"
-        suggested_proj = str(ws_root / "louvre_day_trip_project")
-        default_prompt = (
-            "Create a cinematic, heartwarming 4-act family day trip highlight video at the Louvre Museum in Paris. "
-            "Combine our Sony A7C2 mirrorless camera and Pixel phone clips and photos, showcase the Louvre Pyramid, "
-            "iconic masterpieces, sculptures, and family portraits with museum annotations and 2.5D parallax motion."
-        )
-    elif "halloween" in path_low or "gilroy" in path_low or "raw_media" in path_low:
-        theme = "halloween_park"
-        display_title = "Gilroy Gardens Family Halloween Night"
-        suggested_proj = str(ws_root / "gilroy_halloween_project")
-        default_prompt = (
-            "Create an upbeat, heartwarming 4-act family Halloween highlight video at Gilroy Gardens. "
-            "Keep the kids' excited Mandarin dialogue in the car and on the spinning ride, cover long takes with "
-            "B-roll cutaways, feature the giant pumpkin pyramid and maze photos with 2.5D gallery frames, "
-            "include the Great Big Boo live stage song, and end with Boo Alley night lights."
-        )
-    else:
-        slug = re.sub(r"[^a-zA-Z0-9_-]", "_", m_dir.name or "family_story").strip("_").lower() or "family_story"
-        theme = "family_travel"
-        display_title = f"{m_dir.name or 'Family Travel'} Highlight Story"
-        suggested_proj = str(ws_root / f"{slug}_project")
-        default_prompt = (
-            f"Create a cinematic, heartwarming 4-act family travel highlight video from '{m_dir.name}'. "
-            "Balance candid spoken moments with beat-synced B-roll, curated high-taste photos with bilingual "
-            "annotations and 2.5D parallax motion, and a mood-matched soundtrack in 4K 10-bit HLG HDR."
-        )
+    raw_folder_name = m_dir.name or "featured_story"
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_folder_name).strip("_").lower() or "featured_story"
+    clean_title = re.sub(r"[_-]+", " ", raw_folder_name).strip().title() or "Featured Story"
+    theme = "documentary_highlight"
+    display_title = f"{clean_title} Highlight Film"
+    suggested_proj = str(ws_root / f"{slug}_project")
+    default_prompt = (
+        f"Create a cinematic, heartwarming 4-act highlight documentary from '{raw_folder_name}'. "
+        "Balance candid spoken moments with beat-synced B-roll, curated high-taste photos with bilingual "
+        "annotations and 2.5D parallax motion, and a mood-matched soundtrack in 4K 10-bit HLG HDR."
+    )
 
     base_info: dict[str, Any] = {
         "media_dir": str(m_dir.resolve()) if m_dir.exists() else str(m_dir),
@@ -204,20 +184,12 @@ def compute_director_duration_recommendation(
     rec_mmss = _format_mmss(rec_sec)
     ext_mmss = _format_mmss(ext_sec)
 
-    if theme == "louvre_paris":
-        rationale = (
-            f"Director's Assessment: With {v_count} 4K video clips and {p_count} high-res photos (~{distinct_photo_clusters} "
-            f"distinct museum gallery clusters), a 2-minute cap would rush the exhibition plaques or drop iconic artworks. "
-            f"I recommend {rec_sec}s ({rec_mmss}) to showcase ~{recommended_plates} curated 2.5D parallax plates & diptychs "
-            f"at a breathable 4.0–4.5s museum cadence alongside your 4 video clips (or {ext_sec}s / {ext_mmss} for an Extended Exhibition Cut)."
-        )
-    else:
-        rationale = (
-            f"Director's Assessment: Based on {v_count} videos (~{int(est_video_sec)}s usable motion spine) and "
-            f"{p_count} photos (~{distinct_photo_clusters} distinct scene clusters), I recommend {rec_sec}s ({rec_mmss}) "
-            f"so all spoken dialogue and ~{recommended_plates} hero photo plates breathe naturally without artificial 2-minute truncation "
-            f"(or choose {ext_sec}s / {ext_mmss} for an Extended Family Documentary)."
-        )
+    rationale = (
+        f"Director's Assessment: Based on {v_count} videos (~{int(est_video_sec)}s usable motion spine) and "
+        f"{p_count} photos (~{distinct_photo_clusters} distinct scene clusters), I recommend {rec_sec}s ({rec_mmss}) "
+        f"so all spoken dialogue and ~{recommended_plates} hero photo plates breathe naturally at a 4.0–6.0s reading cadence "
+        f"(or choose {ext_sec}s / {ext_mmss} for an Extended Documentary Cut)."
+    )
 
     return {
         "director_recommended_duration_sec": rec_sec,
@@ -242,46 +214,23 @@ def generate_intake_questions(
     info = inspect_media_library(media_dir)
     v_count = info["video_count"]
     p_count = info["photo_count"]
-    theme = info["theme"]
     cams = ", ".join(info.get("detected_cameras") or ["Multi-Cam"])
     prompt_to_use = initial_prompt.strip() or info["default_prompt"]
 
     media_note = f"({v_count} videos, {p_count} photos • {cams})" if (v_count or p_count) else ""
-    if theme == "louvre_paris":
-        must_options = [
-            "Morning Parisian Croissants & Hotel Breakfast (Recommended — Warm Chapter I Opener)",
-            "Seine River Sightseeing Cruise & Pont Alexandre III (Recommended — Chapter I Kinetic River Views)",
-            "Climbing the Eiffel Tower & 1st Floor Geodesic Dome (Recommended — Chapter II Iconic Landmark)",
-            "Reopened Cathédrale Notre-Dame de Paris Gothic Interior & Rose Window (Recommended — Chapter III Sacred Art)",
-            "Montmartre Cobblestone Stairs & Basilique du Sacré-Cœur Summit (Recommended — Chapter IV Hilltop Panorama)",
-            "4-Course Traditional French Bistro Dinner Finale (Recommended — Chapter IV Culinary Closing)",
-            "Louvre Glass Pyramid, Mona Lisa, Winged Victory & Venus de Milo Masterpieces",
-        ]
-        rec_must = must_options[:6]
-        must_rationale = (
-            f"Detected {v_count} videos and {p_count} photos spanning a full Parisian day trip. "
-            "Selecting all 6 chronological chapters creates a complete morning-to-night narrative arc."
-        )
-    elif theme == "halloween_park":
-        must_options = [
-            "Kids' Excited Spoken Mandarin Dialogue in Car & Rides (Recommended — Emotional A-Roll Spine)",
-            "Spinning Rides & Action B-Roll Cutaways (Recommended — High-Energy Motion)",
-            "Giant Pumpkin Pyramid & Maze Family Portraits (Recommended — Hero Keepsake Stills)",
-            "Great Big Boo Live Stage Musical Show (Recommended — Musical Climax)",
-            "Boo Alley Night Lights Finale (Recommended — Atmospheric Closing Chapter)",
-        ]
-        rec_must = must_options[:5]
-        must_rationale = "Preserves both the candid family dialogue and the signature Halloween park visual spectacles."
-    else:
-        must_options = [
-            "Iconic Landmarks & Architecture Establishing Shots (Recommended — Visual Anchors)",
-            "Candid Family & Solo Portraits with Warm Expressions (Recommended — Emotional Heart)",
-            "Spoken Camera Dialogue & Laughter with B-Roll Cutaways (Recommended — Narrative Spine)",
-            "Local Food, Café & Cultural Moments (Recommended — Sensory Pacing Variety)",
-            "Sunset / Evening Finale Walk (Recommended — Memorable Closing Act)",
-        ]
-        rec_must = must_options[:4]
-        must_rationale = f"Balanced selection across your {v_count} videos and {p_count} photos."
+    must_options = [
+        "Chronological Opening & Arrival Establishing Shots (Recommended — Chapter I Visual Anchor)",
+        "Spoken Camera Dialogue, Laughter & Candid Reactions (Recommended — Emotional Narrative Spine)",
+        "Signature Architecture, Landmarks & Scenic Panoramas (Recommended — Chapter II & III Highlights)",
+        "Fine Art, Sculptural Details, Menus & Cultural Close-Ups (Recommended — Curatorial Depth)",
+        "Candid Portraits & Keepsake Group Frames (Recommended — Personal Heart)",
+        "Culinary Moments, Dining & Golden-Hour Finale (Recommended — Warm Chapter IV Closing)",
+    ]
+    rec_must = must_options[:5]
+    must_rationale = (
+        f"Balanced multi-chapter selection across your {v_count} videos and {p_count} photos to build a complete "
+        "4-act opening-to-finale narrative arc."
+    )
 
     rec_sec = info["director_recommended_duration_sec"]
     rec_mmss = info["director_recommended_mmss"]
@@ -351,8 +300,8 @@ def generate_intake_questions(
             ],
             recommendation_rationale=(
                 "Combining these 8 cinema-grade modes lets the Photo Curator & VFX Designer match each photo's geometry "
-                "(e.g., 3-panel Triptych for your 3-course French meal, Optical Loupe for Notre-Dame carvings, Polaroid Stack for selfies, "
-                "and 3D Depth Parallax for the Eiffel Tower) so no two consecutive stills ever feel repetitive."
+                "(e.g., 3-panel Triptych for culinary sequences, Optical Loupe for fine art/architectural carvings, Polaroid Stack for candid portraits, "
+                "and 3D Depth Parallax for hero landmarks) so no two consecutive stills ever feel repetitive."
             ),
         ),
         InterviewQuestion(
@@ -401,9 +350,9 @@ def generate_intake_questions(
             id="bgm_mood",
             question="6. Royalty-Free Soundtrack & Loudness Mastering (Stage 05 Dedicated BGM Agent)",
             options=[
-                "auto_match (Recommended) — Multi-Movement Royalty-Free Suite (Accordion Waltz -> Satie Gymnopédie -> Debussy Chamber -> Bistro Jazz) Mastered to 100% Video Length at -14 LUFS",
-                "classical_chamber — Elegant French Classical Piano, Harp & Strings Chamber Score (Erik Satie / Debussy)",
-                "warm_acoustic — Heartwarming Acoustic Guitar & Piano Family Keepsake Score",
+                "auto_match (Recommended) — Multi-Movement Royalty-Free Suite (Classical Chamber / Acoustic Waltz / Warm Lounge) Mastered to 100% Video Length at -14 LUFS",
+                "classical_chamber — Elegant Classical Piano, Harp & Strings Chamber Score",
+                "warm_acoustic — Heartwarming Acoustic Guitar & Piano Keepsake Score",
             ],
             default_answer="auto_match",
             is_multi_select=False,
@@ -713,22 +662,13 @@ def refine_intake_interactively(
         f"`{_extract_option_code(str(answers.get('bgm_mood', 'auto_match')))}` score with -14dB dialogue ducking."
     )
 
-    if info["theme"] == "louvre_paris":
-        suggested_chips = [
-            "✨ Apply All Director Recommendations",
-            f"🎬 Use Director's Recommended Length ({rec_sec}s / {dur_rec['director_recommended_mmss']})",
-            f"📽️ Make it an Extended Museum Documentary ({ext_sec}s / {dur_rec['extended_mmss']}, ~35+ artworks)",
-            "🖼️ Enable 3D Depth Parallax + Curator Loupe + Editorial Magazine + Diptychs",
-            "🎻 Use Erik Satie Gymnopédie No. 1 French Classical Piano Score",
-        ]
-    else:
-        suggested_chips = [
-            "✨ Apply All Director Recommendations",
-            f"🎬 Use Director's Recommended Length ({rec_sec}s / {dur_rec['director_recommended_mmss']})",
-            f"📽️ Make it an Extended Family Documentary ({ext_sec}s / {dur_rec['extended_mmss']})",
-            "🗣️ Keep all candid kid & family spoken dialogue with B-roll cutaways",
-            "🖼️ Enable 3D Depth Parallax + Polaroid Scrapbook + Diptych Split-Screens",
-        ]
+    suggested_chips = [
+        "✨ Apply All Director Recommendations",
+        f"🎬 Use Director's Recommended Length ({rec_sec}s / {dur_rec['director_recommended_mmss']})",
+        f"📽️ Make it an Extended Documentary Cut ({ext_sec}s / {dur_rec['extended_mmss']})",
+        "🗣️ Keep all candid spoken dialogue with B-roll cutaways",
+        "🖼️ Enable 3D Depth Parallax + Curator Loupe + Editorial Magazine + Polaroid Scrapbook",
+    ]
 
     return {
         "agent_reply": agent_reply,
@@ -834,16 +774,17 @@ class ClientIntakeAgent(BaseEditingAgent):
             parts = [p.strip() for p in re.split(r"[,;|•\n]+|\band\b", cleaned_must) if len(p.strip()) > 2]
             must_topics = parts[:10]
         if not must_topics:
-            must_topics = ["spoken dialogue", "rides", "pumpkin pyramid", "stage show"]
+            must_topics = [
+                "opening establishing shots",
+                "spoken dialogue & candid reactions",
+                "signature landmarks & details",
+                "closing finale",
+            ]
 
-        # Derive project title from user_prompt
-        project_title = "Family_Travel_Story"
-        prompt_low = blackboard.user_prompt.lower()
-        if "louvre" in prompt_low or "paris" in prompt_low:
-            project_title = "Louvre_Museum_Paris_Day_Trip"
-        elif "halloween" in prompt_low or "gilroy" in prompt_low:
-            project_title = "Halloween_Park_Family_Night"
-        elif blackboard.user_prompt.strip():
+        # Derive project title mechanically from user_prompt or media folder slug (and refine via AI Agent below)
+        folder_slug = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_-]", "_", blackboard.media_dir.name or "Featured_Story").strip("_")
+        project_title = folder_slug or "Featured_Story"
+        if blackboard.user_prompt.strip():
             words = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff\s_-]", "", blackboard.user_prompt).split()
             if words:
                 project_title = "_".join(words[:5])

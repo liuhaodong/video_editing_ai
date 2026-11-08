@@ -885,9 +885,12 @@ def _build_editorial_magazine_assets(
     draw.rectangle([0, 0, seam_w, height], fill=(214, 176, 84))
     draw.rectangle([seam_w + int(round(8 * scale_factor)), int(height * 0.08), seam_w + int(round(9 * scale_factor)), int(height * 0.92)], fill=(52, 48, 42))
 
-    # Giant subtle background watermark
+    # Giant subtle background watermark derived dynamically from badge/title
+    wm_raw = (kb.camera_badge or kb.caption_title or "GALLERY").upper()
+    wm_tokens = [w for w in re.findall(r"[A-Z]{4,10}", wm_raw) if w not in ("SONY", "GOOGLE", "APPLE", "PIXEL", "IPHONE", "FULL", "FRAME", "ARCHIVE", "DIGITAL", "CAMERA")]
+    wm_word = wm_tokens[-1] if wm_tokens else "GALLERY"
     f_wm = _load_editorial_font(int(round(130 * scale_factor)), bold=True, serif=True)
-    draw.text((int(right_w * 0.08), int(height * 0.06)), "PARIS", font=f_wm, fill=(22, 27, 39))
+    draw.text((int(right_w * 0.08), int(height * 0.06)), wm_word[:8], font=f_wm, fill=(22, 27, 39))
 
     pad_x = int(round(48 * scale_factor))
     max_text_w = right_w - pad_x * 2
@@ -1183,7 +1186,7 @@ def _prepare_photo_scene_context(
         )
 
     elif mode == "polaroid_scrapbook":
-        stamp_1 = kb.caption_title or kb.camera_badge or "PARIS ARCHIVE"
+        stamp_1 = kb.caption_title or kb.camera_badge or "MEMORY ARCHIVE"
         max_w = int(width * (0.42 if kb.secondary_source else 0.56))
         max_h = int(height * card_max_h_ratio)
         ctx["polaroid_1"] = _build_polaroid_card(
@@ -1696,9 +1699,9 @@ def render_photo_effects_showcase_sheet(
     output_jpg: str | Path,
     secondary_path: Optional[str | Path] = None,
     tertiary_path: Optional[str | Path] = None,
-    caption_title: str = "Cathédrale Notre-Dame & Parisian Masterpieces",
-    caption_subtitle: str = "860 Years of French Gothic Architecture · Île de la Cité, Paris",
-    camera_badge: str = "APPLE IPHONE 16 PRO · PARIS 4K HDR",
+    caption_title: str = "Curated Architectural & Fine Art Showcase",
+    caption_subtitle: str = "Cinema-Grade 2.5D Parallax, Loupe, Triptych & Monograph Suite · 4K HDR",
+    camera_badge: str = "FULL FRAME · 4K 10-BIT HLG HDR",
     tile_width: int = 960,
     tile_height: int = 540,
 ) -> Path:

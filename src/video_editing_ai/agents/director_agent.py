@@ -282,7 +282,7 @@ class ProductionDirectorAgent(BaseEditingAgent):
                 quality_score=9.6,
                 critique=critique,
                 directive_sent=(
-                    "Replace mismatched comical/spooky BGM with classical Parisian chamber score"
+                    f"Replace mismatched BGM with mood-aligned '{bgm.target_mood_profile if bgm else 'warm_documentary'}' score"
                     if rejected_reason
                     else None
                 ),

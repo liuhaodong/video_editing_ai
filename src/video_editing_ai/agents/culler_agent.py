@@ -35,53 +35,28 @@ def _synthesize_video_scene_caption_and_transition(
     total_videos: int,
     user_prompt: str = "",
 ) -> tuple[str, str, Literal["none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"], str]:
-    """Synthesize a documentary-grade bilingual scene caption and semantic transition for a video subclip."""
-    blob = f"{vid.filename} {vid.overall_summary} {spoken_text} {user_prompt}".lower()
-    fname_low = vid.filename.lower()
+    """Synthesize a baseline mechanical scene caption and transition prior to AI Vision Culler overrides."""
+    summary_clean = (vid.overall_summary or "").strip()
+    is_generic_summary = (
+        not summary_clean
+        or summary_clean.lower().startswith(("video segment", "video clip", "clip "))
+        or vid.filename.lower() in summary_clean.lower()
+    )
 
-    # Detect iconic Paris / Louvre / travel video scenes or general story beats
-    if "102124" in fname_low or ("alexandre" in blob and not has_speech):
-        title = "Pont Alexandre III & Seine River Panorama"
-        sub = "亚历山大三世桥与塞纳河金色长卷 · 4K HDR 实景记录"
-        trans: Literal["none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"] = "dissolve"
-        rationale = "Sweeping Parisian bridge & river establishing shot; smooth dissolve preserves architectural grandeur."
-    elif "165359" in fname_low or "eiffel" in blob:
-        title = "Eiffel Tower & Parisian Skyline Vista"
-        sub = "埃菲尔铁塔与巴黎城市天际线 · 经典地标瞬间"
-        trans = "dissolve"
-        rationale = "Vertical/landmark architectural highlight paired with optical dissolve."
-    elif "153112" in fname_low or "sacre" in blob or "montmartre" in blob:
-        title = "Montmartre & Sacré-Cœur Steps in Motion"
-        sub = "蒙马特高地与圣心大教堂前广场 · 漫步光影"
-        trans = "crossfade"
-        rationale = "Dynamic hilltop atmosphere in Montmartre; gentle crossfade bridges into surrounding portraits."
-    elif "louvre" in blob or "pyramid" in blob:
-        if v_idx == 1:
-            title = "Cour Napoléon — Arrival at the Louvre Pyramid"
-            sub = "拿破仑庭院 · 卢浮宫玻璃金字塔初见"
-            trans = "fade_black"
-        else:
-            title = "Inside the Grand Galleries of the Louvre"
-            sub = "卢浮宫艺术长廊 · 漫步古典大师殿堂"
-            trans = "dissolve"
-        rationale = "Museum architectural movement establishing spatial scale and gallery atmosphere."
-    elif "halloween" in blob or "pumpkin" in blob or "gilroy" in blob:
-        if has_speech:
-            quote_short = spoken_text.strip()[:42]
-            title = f'Candid Family Moment — "{quote_short}"'
-            sub = "家庭原声对话 · 真实欢笑瞬间"
-            trans = "crossfade"
-        else:
-            title = f"Enchanted Park Highlights (Act {min(4, max(1, v_idx))})"
-            sub = "奇幻游园动态实景 · 欢乐律动瞬间"
-            trans = "cut" if cam_motion != "static" else "crossfade"
-        rationale = "High-energy family park footage trimmed to peak action window."
+    if not is_generic_summary and " (" in summary_clean and summary_clean.endswith(")"):
+        parts = summary_clean.split(" (", 1)
+        title = parts[0].strip()[:58]
+        sub = parts[1][:-1].strip()[:68]
+        trans: Literal["none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"] = (
+            "fade_black" if v_idx in (1, total_videos) else ("dissolve" if shot_scale == "wide" else "crossfade")
+        )
+        rationale = f"Derived from scene annotation and {shot_scale} {cam_motion} cinematography."
     elif has_speech and spoken_text.strip():
         quote_short = spoken_text.strip()[:44]
         title = f'Live Story Moment — "{quote_short}"'
-        sub = "现场原声记录 · 温暖家庭对话"
+        sub = "现场原声记录 · 真实对话与故事瞬间"
         trans = "crossfade"
-        rationale = "Preserved full spoken sentence with -0.35s J-cut audio pre-lap."
+        rationale = "Preserved spoken dialogue window with -0.35s J-cut audio pre-lap."
     else:
         motion_label = {
             "pan_left": "Cinematic Pan",
@@ -90,7 +65,11 @@ def _synthesize_video_scene_caption_and_transition(
             "walk_forward": "First-Person Tracking Shot",
             "static": "Living Tableau",
         }.get(cam_motion, "Cinematic Scene")
-        stage_label = "Opening Establishing Vista" if v_idx == 1 else ("Twilight Finale Vista" if v_idx == total_videos else f"{motion_label} ({shot_scale.capitalize()})")
+        stage_label = (
+            "Opening Establishing Vista"
+            if v_idx == 1
+            else ("Closing Finale Vista" if v_idx == total_videos else f"{motion_label} ({shot_scale.capitalize()})")
+        )
         title = f"{stage_label} — Scene {v_idx:02d}"
         sub = "4K HDR 动态实景镜头 · 光影与现场氛围记录"
         trans = "fade_black" if v_idx in (1, total_videos) else ("dissolve" if shot_scale == "wide" else "crossfade")

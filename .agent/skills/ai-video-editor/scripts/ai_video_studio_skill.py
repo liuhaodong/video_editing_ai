@@ -692,8 +692,8 @@ def cmd_scout_bgm(args: argparse.Namespace) -> int:
     keywords = [k.strip() for k in (args.keywords or "").split(",") if k.strip()]
     payload = scout_bgm_candidates_for_project(
         project_dir=proj,
-        query_keywords=keywords or ["paris", "accordion", "waltz", "cafe", "piano"],
-        mood_profile=args.mood_profile or "parisian_classical_museum",
+        query_keywords=keywords or ["cinematic", "acoustic", "waltz", "piano", "documentary"],
+        mood_profile=args.mood_profile or "classical_chamber_documentary",
         target_duration_sec=float(args.target_duration or 240.0),
         download_limit=int(args.download_limit or 5),
     )
@@ -813,9 +813,9 @@ def cmd_preview_photo_effects(args: argparse.Namespace) -> int:
         output_jpg=out_jpg,
         secondary_path=sec_path,
         tertiary_path=tert_path,
-        caption_title=args.caption_title or "Cathédrale Notre-Dame & Parisian Masterpieces",
-        caption_subtitle=args.caption_subtitle or "860 Years of French Gothic Architecture · Île de la Cité, Paris",
-        camera_badge=args.camera_badge or "APPLE IPHONE 16 PRO · PARIS 4K HDR",
+        caption_title=args.caption_title or "Curated Architectural & Fine Art Showcase",
+        caption_subtitle=args.caption_subtitle or "Cinema-Grade 2.5D Parallax, Loupe, Triptych & Monograph Suite · 4K HDR",
+        camera_badge=args.camera_badge or "FULL FRAME · 4K 10-BIT HLG HDR",
     )
     print(f"Success! Rendered 10-Mode Premium Photo Effects Showcase Sheet to: {res_jpg}")
     return 0
@@ -1074,8 +1074,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mechanically search & download royalty-free BGM tracks (Pixabay/Incompetech/CC0) and measure loudness & duration",
     )
     p_sb.add_argument("--project-dir", required=True, help="Project workspace directory")
-    p_sb.add_argument("--keywords", default="paris,accordion,waltz,cafe,piano", help="Comma-separated search keywords")
-    p_sb.add_argument("--mood-profile", default="parisian_classical_museum", help="Target mood profile")
+    p_sb.add_argument("--keywords", default="cinematic,acoustic,waltz,piano,documentary", help="Comma-separated search keywords")
+    p_sb.add_argument("--mood-profile", default="classical_chamber_documentary", help="Target mood profile")
     p_sb.add_argument("--target-duration", type=float, default=240.0, help="Target video duration in seconds")
     p_sb.add_argument("--download-limit", type=int, default=5, help="Max candidate tracks to download")
     p_sb.add_argument("--output", default=None, help="Optional output bgm_candidates.json path")

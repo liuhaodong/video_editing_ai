@@ -67,7 +67,7 @@ class PlanRequest(BaseModel):
 
 class MultiAgentRunRequest(BaseModel):
     media_dir: str
-    project_dir: str = "louvre_day_trip_project"
+    project_dir: str = "active_video_project"
     user_prompt: str = ""
     extra_audio_path: Optional[str] = None
     interview_answers: dict[str, str] = Field(default_factory=dict)
@@ -314,7 +314,7 @@ def _discover_local_media_libraries(workspace_root: Path) -> list[dict[str, Any]
     candidates: list[Path] = []
     projects_parent = workspace_root.parent
 
-    # 1. Check sibling clips/* folders (e.g. C:\Users\hihao\Documents\projects\clips\louvre)
+    # 1. Check sibling clips/* folders
     clips_root = projects_parent / "clips"
     if clips_root.exists() and clips_root.is_dir():
         for sub in sorted(clips_root.iterdir()):
@@ -351,7 +351,7 @@ def _discover_local_media_libraries(workspace_root: Path) -> list[dict[str, Any]
     return libraries
 
 
-def create_app(default_project_dir: str | Path = "louvre_day_trip_project") -> FastAPI:
+def create_app(default_project_dir: str | Path = "active_video_project") -> FastAPI:
     app = FastAPI(title="AI Photo & Video Editing Studio (Guided Multi-Agent Edition)", version="0.3.0")
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

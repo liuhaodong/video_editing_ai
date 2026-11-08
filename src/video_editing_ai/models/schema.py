@@ -113,6 +113,12 @@ class PhotoAsset(BaseModel):
     height: int = Field(default=1080)
     orientation: Literal["landscape", "portrait", "square"] = Field(default="landscape")
     creation_time: Optional[str] = Field(default=None, description="EXIF timestamp if available")
+    camera_make_model: Optional[str] = Field(
+        default=None, description="Mechanically extracted EXIF camera make and model (e.g. 'SONY A7C II')"
+    )
+    exif_summary: Optional[str] = Field(
+        default=None, description="Mechanically extracted EXIF exposure summary (focal length, aperture, ISO)"
+    )
     caption: str = Field(default="", description="Detailed description of what is in the photo")
     subjects: list[str] = Field(default_factory=list, description="Main people, objects, or landmarks")
     mood: str = Field(default="warm", description="Emotional tone of the photo")
@@ -694,7 +700,7 @@ class KenBurnsConfig(BaseModel):
         default=None, description="Bilingual curatorial subtitle displayed on the museum plaque"
     )
     camera_badge: Optional[str] = Field(
-        default=None, description="Camera & location EXIF badge (e.g. 'SONY A7C II · LOUVRE PARIS')"
+        default=None, description="Camera & project EXIF badge (e.g. 'SONY A7C II · 4K HDR')"
     )
 
 

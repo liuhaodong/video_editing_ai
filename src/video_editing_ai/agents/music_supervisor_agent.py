@@ -17,63 +17,63 @@ from ..models.schema import BGMCandidate, BGMSelectionReport
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
 
 
-# Curated catalog of verified Royalty-Free / CC-BY / Public Domain tracks by mood profile
+# Curated catalog of verified Royalty-Free / CC-BY / Public Domain tracks by universal musical mood profile
 CURATED_FREE_BGM_CATALOG: dict[str, list[dict[str, Any]]] = {
-    "parisian_classical_museum": [
+    "classical_chamber_documentary": [
         {
             "track_id": "valse_gymnopedie",
-            "title": "Valse Gymnopédie (Erik Satie Parisian Waltz Ensemble)",
+            "title": "Valse Gymnopédie (Erik Satie Chamber Waltz Ensemble)",
             "composer_or_artist": "Erik Satie / Kevin MacLeod (Incompetech CC BY 4.0)",
-            "genre_mood": "Parisian Café Waltz & Impressionist Piano · Warm & Memorable",
+            "genre_mood": "Impressionist Piano & Chamber Waltz · Warm & Memorable",
             "license_info": "CC BY 4.0 (Royalty-Free)",
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Valse%20Gymnopedie.mp3",
             "tempo_bpm_estimate": 77.0,
             "mood_match_score": 9.9,
-            "notes": "Erik Satie's iconic Parisian Gymnopédie No. 1 arranged as a warm, flowing French waltz with rhythmic pulse.",
+            "notes": "Erik Satie's Gymnopédie No. 1 arranged as a warm, flowing acoustic chamber waltz with rhythmic pulse.",
         },
         {
-            "track_id": "parisian_accordion",
-            "title": "Parisian (Montmartre & Seine Accordion Waltz)",
+            "track_id": "folk_accordion_waltz",
+            "title": "Continental Accordion Musette Waltz",
             "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
-            "genre_mood": "Authentic French Accordion Musette · Charming & Cinematic",
+            "genre_mood": "Acoustic Accordion Waltz · Charming & Cinematic",
             "license_info": "CC BY 4.0 (Royalty-Free)",
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Parisian.mp3",
             "tempo_bpm_estimate": 108.0,
             "mood_match_score": 9.8,
-            "notes": "Classic Parisian street accordion waltz evoking morning croissants, Pont Alexandre III, and Eiffel Tower strolls.",
+            "notes": "Classic European street accordion waltz evoking morning strolls, historic bridges, and architecture.",
         },
         {
             "track_id": "evening_debussy_chamber",
             "title": "Evening (Impressionist Guitar, Cello & Oboe Chamber Suite)",
             "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
-            "genre_mood": "Lyrical French Chamber Documentary · Serene & Reflective",
+            "genre_mood": "Lyrical Chamber Documentary · Serene & Reflective",
             "license_info": "CC BY 4.0 (Royalty-Free)",
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Evening.mp3",
             "tempo_bpm_estimate": 101.0,
             "mood_match_score": 9.7,
-            "notes": "Inspired by Debussy's Clair de Lune and Ravel; lyrical oboe, cello, and acoustic guitar for cathedrals and museums.",
+            "notes": "Inspired by Debussy and Ravel; lyrical oboe, cello, and acoustic guitar for cultural and architectural documentaries.",
         },
         {
             "track_id": "jazz_brunch_bistro",
-            "title": "Jazz Brunch (Parisian Sidewalk Bistro & Café Lounge)",
+            "title": "Jazz Brunch (Sidewalk Café & Acoustic Lounge)",
             "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
-            "genre_mood": "Warm French Bistro Acoustic Jazz · Relaxed & Sophisticated",
+            "genre_mood": "Warm Acoustic Café Jazz · Relaxed & Sophisticated",
             "license_info": "CC BY 4.0 (Royalty-Free)",
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Jazz%20Brunch.mp3",
             "tempo_bpm_estimate": 100.0,
             "mood_match_score": 9.6,
-            "notes": "Warm café jazz ensemble ideal for Parisian dining, artisanal cheese boards, and golden-hour strolls.",
+            "notes": "Warm café jazz ensemble ideal for culinary sequences, dining, and golden-hour strolls.",
         },
         {
             "track_id": "satie_gymnopedie_no1",
             "title": "Gymnopédie No. 1 (Classical Solo Piano Recording)",
             "composer_or_artist": "Erik Satie / Kevin MacLeod (Public Domain / CC BY 4.0)",
-            "genre_mood": "Elegant Parisian Classical · Serene Museum & Art Documentary",
+            "genre_mood": "Elegant Classical Solo Piano · Serene Art Documentary",
             "license_info": "CC BY 4.0 / Public Domain",
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Gymnopedie%20No%201.mp3",
             "tempo_bpm_estimate": 77.0,
             "mood_match_score": 9.5,
-            "notes": "Timeless French Impressionist piece written in Paris in 1888.",
+            "notes": "Timeless Impressionist solo piano piece written in 1888.",
         },
     ],
     "warm_family_acoustic": [
@@ -81,12 +81,12 @@ CURATED_FREE_BGM_CATALOG: dict[str, list[dict[str, Any]]] = {
             "track_id": "carefree_acoustic",
             "title": "Carefree (Uplifting Acoustic Ukulele, Guitar & Bells)",
             "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
-            "genre_mood": "Warm Joyful Family Keepsake · Uplifting & Heartwarming",
+            "genre_mood": "Warm Joyful Keepsake · Uplifting & Heartwarming",
             "license_info": "CC BY 4.0 (Royalty-Free)",
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Carefree.mp3",
             "tempo_bpm_estimate": 104.0,
             "mood_match_score": 9.6,
-            "notes": "Warm acoustic harmonic progression designed for family travel highlights and candid smiles.",
+            "notes": "Warm acoustic harmonic progression designed for travel highlights and candid smiles.",
         },
         {
             "track_id": "wholesome_family",
@@ -97,20 +97,20 @@ CURATED_FREE_BGM_CATALOG: dict[str, list[dict[str, Any]]] = {
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Wholesome.mp3",
             "tempo_bpm_estimate": 98.0,
             "mood_match_score": 9.5,
-            "notes": "Rich, heartwarming instrumental score for travel vlogs and family keepsakes.",
+            "notes": "Rich, heartwarming instrumental score for travel vlogs and keepsakes.",
         },
     ],
-    "halloween_whimsical": [
+    "playful_whimsical_adventure": [
         {
             "track_id": "enchanted_twilight_waltz",
             "title": "One-Eyed Maestro / Whimsical Festival Waltz",
             "composer_or_artist": "Kevin MacLeod / Incompetech (CC BY 4.0)",
-            "genre_mood": "Playful Whimsical Halloween Adventure",
+            "genre_mood": "Playful Whimsical Theme Park & Festival Adventure",
             "license_info": "CC BY 4.0",
             "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/One-eyed%20Maestro.mp3",
             "tempo_bpm_estimate": 102.0,
             "mood_match_score": 9.4,
-            "notes": "Playful strings and brass suited for Halloween theme park rides and glowing pumpkin displays.",
+            "notes": "Playful strings and brass suited for theme park rides, festivals, and evening light displays.",
         }
     ],
 }
@@ -217,7 +217,7 @@ def search_online_royalty_free_catalog(
     results: list[dict[str, Any]] = []
     kw_lower = [k.strip().lower() for k in query_keywords if k.strip()]
     if not kw_lower:
-        kw_lower = ["paris", "accordion", "waltz", "piano", "cafe"]
+        kw_lower = ["cinematic", "acoustic", "waltz", "piano", "documentary"]
 
     # 1. Optional Pixabay Music Search if PIXABAY_API_KEY or direct page access is available
     pixabay_key = os.environ.get("PIXABAY_API_KEY", "").strip()
@@ -277,7 +277,7 @@ def search_online_royalty_free_catalog(
                 elif kw in blob_all:
                     score += 1.5
             # Penalize overly comedic/horror tracks unless requested
-            if not any(k in kw_lower for k in ("halloween", "spooky", "horror", "comedy")):
+            if not any(k in kw_lower for k in ("whimsical", "spooky", "horror", "comedy")):
                 if any(bad in feel.lower() for bad in ("eerie", "humorous", "intense", "dark")):
                     score -= 1.5
                 if any(good in feel.lower() for good in ("calming", "relaxed", "uplifting", "bright", "grooving")):
@@ -317,9 +317,9 @@ def search_online_royalty_free_catalog(
 def _synthesize_classical_chamber_bgm(
     output_mp3: Path,
     duration_sec: float = 180.0,
-    style: str = "parisian_classical_museum",
+    style: str = "classical_chamber_documentary",
 ) -> Path:
-    """Synthesize a rich 48kHz stereo polyphonic Parisian accordion, piano, harp & warm string score."""
+    """Synthesize a rich 48kHz stereo polyphonic acoustic accordion, piano, harp & warm string score."""
     if output_mp3.exists() and output_mp3.stat().st_size > 64_000:
         diag = probe_audio_diagnostics(output_mp3)
         if diag["duration_sec"] >= duration_sec - 5.0:
@@ -333,7 +333,7 @@ def _synthesize_classical_chamber_bgm(
     left = np.zeros(n_samples, dtype=np.float32)
     right = np.zeros(n_samples, dtype=np.float32)
 
-    if style == "parisian_classical_museum":
+    if style == "classical_chamber_documentary":
         bpm = 96.0
         chords = [
             [196.00, 246.94, 293.66, 369.99],  # Gmaj7
@@ -617,7 +617,7 @@ def master_bgm_soundtrack(
 def scout_bgm_candidates_for_project(
     project_dir: Path,
     query_keywords: Optional[list[str]] = None,
-    mood_profile: str = "parisian_classical_museum",
+    mood_profile: str = "classical_chamber_documentary",
     target_duration_sec: float = 240.0,
     download_limit: int = 5,
 ) -> dict[str, Any]:
@@ -631,8 +631,12 @@ def scout_bgm_candidates_for_project(
     bgm_dir = project_dir / "bgm_library"
     bgm_dir.mkdir(parents=True, exist_ok=True)
 
-    curated = list(CURATED_FREE_BGM_CATALOG.get(mood_profile, CURATED_FREE_BGM_CATALOG["parisian_classical_museum"]))
-    online = search_online_royalty_free_catalog(query_keywords or ["paris", "accordion", "waltz", "cafe"], max_results=6)
+    curated = list(
+        CURATED_FREE_BGM_CATALOG.get(mood_profile, CURATED_FREE_BGM_CATALOG["classical_chamber_documentary"])
+    )
+    online = search_online_royalty_free_catalog(
+        query_keywords or ["cinematic", "acoustic", "waltz", "piano", "documentary"], max_results=6
+    )
 
     seen_urls: set[str] = set()
     merged_meta: list[dict[str, Any]] = []
@@ -700,18 +704,18 @@ class MusicSupervisorAgent(BaseEditingAgent):
             f"{blackboard.media_dir}"
         ).lower()
 
-        is_louvre_or_museum = any(
+        is_cultural_or_documentary = any(
             k in prompt_blob
-            for k in ("louvre", "paris", "eiffel", "seine", "notre", "museum", "gallery", "sculpture", "卢浮宫", "巴黎")
+            for k in ("museum", "gallery", "sculpture", "architecture", "cathedral", "palace", "art", "history", "documentary", "classical")
         )
-        is_halloween = any(
-            k in prompt_blob for k in ("halloween", "gilroy", "pumpkin", "trick", "spooky", "万圣")
+        is_whimsical_festival = any(
+            k in prompt_blob for k in ("festival", "theme park", "carnival", "whimsical", "amusement")
         )
 
-        if is_louvre_or_museum:
-            target_profile = "parisian_classical_museum"
-        elif is_halloween:
-            target_profile = "halloween_whimsical"
+        if is_cultural_or_documentary:
+            target_profile = "classical_chamber_documentary"
+        elif is_whimsical_festival:
+            target_profile = "playful_whimsical_adventure"
         else:
             target_profile = "warm_family_acoustic"
 
@@ -734,12 +738,12 @@ class MusicSupervisorAgent(BaseEditingAgent):
         if user_bgm is not None and user_bgm.exists():
             name_low = user_bgm.name.lower()
             is_comical_or_spooky_bgm = any(
-                k in name_low for k in ("sneaky", "snitch", "spooky", "halloween", "clown", "quirky")
+                k in name_low for k in ("sneaky", "snitch", "spooky", "clown", "quirky")
             )
-            if (is_louvre_or_museum and is_comical_or_spooky_bgm) or force_swap:
+            if (is_cultural_or_documentary and is_comical_or_spooky_bgm) or force_swap:
                 rejected_reason = (
-                    f"Rejected '{user_bgm.name}' because a mischievous/Halloween pizzicato track clashes with "
-                    f"the '{target_profile}' tone of a Parisian documentary."
+                    f"Rejected '{user_bgm.name}' because a mischievous pizzicato track clashes with "
+                    f"the '{target_profile}' tone of the documentary."
                 )
                 user_bgm = None
 
@@ -832,7 +836,7 @@ class MusicSupervisorAgent(BaseEditingAgent):
         if selected_cand is None:
             selected_cand = BGMCandidate(
                 track_id="curated_chamber_score",
-                title="Parisian Chamber Ensemble Suite",
+                title="Chamber Ensemble Documentary Suite",
                 composer_or_artist="AI Studio Chamber Ensemble",
                 genre_mood=target_profile,
                 license_info="CC0 / Public Domain",

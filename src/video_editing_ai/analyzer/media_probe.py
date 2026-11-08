@@ -308,11 +308,74 @@ def _extract_exif_datetime(img: Image.Image, photo_path: Optional[Path] = None) 
     return None
 
 
+def _extract_exif_camera_info(img: Image.Image, photo_path: Optional[Path] = None) -> tuple[str, str]:
+    """Mechanically extract (camera_make_model, exif_summary) from photo EXIF headers."""
+    make_str = ""
+    model_str = ""
+    exposure_parts: list[str] = []
+    try:
+        exif = img.getexif()
+        if exif:
+            make_str = str(exif.get(271) or "").strip()
+            model_str = str(exif.get(272) or "").strip()
+            try:
+                exif_ifd = exif.get_ifd(0x8769)
+            except Exception:
+                exif_ifd = None
+            if exif_ifd:
+                fl = exif_ifd.get(37386)
+                fn = exif_ifd.get(33434)
+                iso = exif_ifd.get(34855)
+                if fl:
+                    try:
+                        exposure_parts.append(f"{float(fl):.0f}mm")
+                    except Exception:
+                        pass
+                if fn:
+                    try:
+                        exposure_parts.append(f"f/{float(fn):.1f}")
+                    except Exception:
+                        pass
+                if iso:
+                    exposure_parts.append(f"ISO {iso}")
+    except Exception:
+        pass
+
+    combined = f"{make_str} {model_str}".strip()
+    up = combined.upper()
+    if "ILCE-7CM2" in up or "A7C2" in up or "A7C II" in up:
+        cam_badge = "SONY A7C II · 33MP"
+    elif "ILCE-" in up or "SONY" in up:
+        cam_badge = combined.upper()
+    elif "PIXEL" in up:
+        cam_badge = combined.upper() if "GOOGLE" in up else f"GOOGLE {combined.upper()}"
+    elif "IPHONE" in up:
+        cam_badge = combined.upper() if "APPLE" in up else f"APPLE {combined.upper()}"
+    elif combined:
+        cam_badge = combined.upper()
+    elif photo_path is not None:
+        fname_up = photo_path.name.upper()
+        if fname_up.startswith(("_DSC", "DSC", "A7C")):
+            cam_badge = "SONY ALPHA · FULL FRAME"
+        elif fname_up.startswith("PXL_"):
+            cam_badge = "GOOGLE PIXEL · HDR"
+        elif fname_up.startswith("IMG_"):
+            cam_badge = "APPLE IPHONE · HDR"
+        else:
+            cam_badge = "DIGITAL CAMERA · HDR"
+    else:
+        cam_badge = "DIGITAL CAMERA · HDR"
+
+    exif_summary = " · ".join(exposure_parts) if exposure_parts else None
+    return cam_badge, exif_summary or ""
+
+
 def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
     """Open a photo (.HEIC, .JPG, .PNG), extract EXIF/dimensions, save RGB preview JPEG, and compute focal point."""
     previews_dir.mkdir(parents=True, exist_ok=True)
     img = Image.open(photo_path)
     creation_time = _extract_exif_datetime(img, photo_path)
+    camera_make_model, exif_summary = _extract_exif_camera_info(img, photo_path)
     orig_w, orig_h = img.size
     try:
         exif_orient = img.getexif().get(274, 1)
@@ -356,6 +419,8 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
         height=h,
         orientation=orientation,
         creation_time=creation_time,
+        camera_make_model=camera_make_model,
+        exif_summary=exif_summary or None,
         caption=f"Photo {photo_path.name} ({orientation}, {w}x{h})",
         subjects=[],
         mood="warm",
