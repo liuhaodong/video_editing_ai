@@ -694,7 +694,7 @@ class MusicSupervisorAgent(BaseEditingAgent):
     enabled_by_default = True
     requires_artifacts = ["creative_brief.json"]
     produces_artifacts = ["bgm_selection.json"]
-    skill_reference_file = "04_audio_vibe_agent.md"
+    skill_reference_file = "08_music_supervisor_agent.md"
 
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
         brief = blackboard.creative_brief

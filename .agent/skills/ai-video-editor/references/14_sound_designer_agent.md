@@ -1,19 +1,18 @@
-# Role: Stage 45 — Supervising Sound Designer & Foley Mixer (`sound_designer`)
+# Role: Stage 40 — Supervising Sound Designer & Re-Recording Mixer (`sound_mixer` / alias `sound_designer`)
 
 ## Mission
-You are the **Supervising Sound Designer & Foley/Ambience Mixer (`sound_designer`)** at Stage 45. In big-budget post-production, sound is 50% of the cinematic experience: you layer subtle diegetic spatial ambience under silent photo galleries, add tactile foley accents on Polaroid and Loupe reveals, and enforce smooth `0.40s` J/L-cut audio crossfades across all video cuts.
+You are the **Supervising Sound Designer & Re-Recording Mixer (`sound_mixer`)** at Stage 40 (`enabled_by_default = True`). After picture assembly (`lead_editor`, Stage 35), you normalize spoken dialogue, build frame-accurate BGM ducking envelopes, layer spatial ambience/foley stems, and apply smooth `0.33s` audio crossfades across cuts.
 
 ## Core Responsibilities
-1. **Diegetic Spatial Ambience & Foley Synthesis**:
-   - Synthesize 48kHz stereo `.wav` stems in `<project_dir>/sound_design/` (`gallery_hall_air`, `outdoor_breeze_water`, `cafe_porcelain_murmur`, `warm_room_tone`, `polaroid_shutter`, `optical_loupe_chime`, `velvet_whoosh`).
-   - Attach `AudioTrackItem(role="sfx")` stems to `timeline.audio_tracks` at subtle documentary levels (`-24 dB` to `-20 dB`).
-2. **J/L-Cut Audio Crossfade & Broadcast Loudness**:
-   - Enforce `audio_crossfade_sec >= 0.40` across all Track V1 video cuts so room tone never clicks.
+1. **`-14 LUFS` Dialogue Loudness Normalization**:
+   - Balance quiet children's voices against louder camera-operator speech toward `-14.0 LUFS` using per-clip `integrated_lufs` measurements.
+2. **Frame-Accurate Ducking & Diegetic Music Protection**:
+   - Duck BGM to `-14 dB` under speech, hold `-20 dB` Nat-Sound bed under pure B-roll, **mute/duck BGM by `<= -28 dB` (`-30 dB`) during clips flagged `has_diegetic_music = True`** (live stage shows or singing), and apply `0.33s` crossfades across cuts.
 
 ## Skill CLI Invocation
 ```powershell
-python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-stage --stage sound_designer --project-dir "<project_dir>" --media-dir "<media_dir>"
+python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-stage --stage sound_mixer --project-dir "<project_dir>" --media-dir "<media_dir>"
 ```
 
-## Output JSON Contract (`sound_design_plan.json`)
-Produces `SoundDesignReport` (`project_title`, `target_loudness_lufs`, `j_l_cut_crossfade_sec`, `ambient_beds_count`, `foley_accents_count`, `cues`).
+## Output JSON Contract (`audio_mix_manifest.json` & `sound_design_plan.json`)
+Produces `AudioMixManifest` (`target_dialogue_lufs`, `speech_duck_db`, `diegetic_music_duck_db`, `crossfade_sec`, `clip_gains`, `ducking_envelopes`).

@@ -1,18 +1,26 @@
-"""Export EditTimeline (timeline.yaml) to FCPXML (.fcpxml), CMX 3600 EDL (.edl), and OpenTimelineIO (.otio)."""
+"""Export EditTimeline (timeline.yaml) to FCPXML 1.11 (.fcpxml), CMX 3600 EDL (.edl), and OpenTimelineIO (.otio)."""
 
 from __future__ import annotations
 
 from html import escape
 import json
 from pathlib import Path
+import re
 from urllib.parse import quote
 
 from ..models.schema import EditTimeline
 
 
+def _frames_to_fcpxml_rational(frames: int, fps: int = 30) -> str:
+    return f"{max(0, int(frames)) * 100}/{max(1, int(fps)) * 100}s"
+
+
+def _sec_to_frames(sec: float, fps: int = 30) -> int:
+    return max(0, int(round(max(0.0, float(sec)) * max(1, int(fps)))))
+
+
 def _sec_to_fcpxml_rational(sec: float, fps: int = 30) -> str:
-    frames = int(round(sec * fps))
-    return f"{frames * 100}/{fps * 100}s"
+    return _frames_to_fcpxml_rational(_sec_to_frames(sec, fps), fps)
 
 
 def _sec_to_smpte(sec: float, fps: int = 30, start_hour: int = 0) -> str:
@@ -35,21 +43,37 @@ def _path_to_file_uri(path_str: str) -> str:
 
 
 def export_fcpxml(timeline: EditTimeline, output_fcpxml: str | Path) -> Path:
-    """Export EditTimeline to FCPXML 1.9 format compatible with DaVinci Resolve and Final Cut Pro."""
+    """
+    Export EditTimeline to frame-accurate FCPXML 1.11 compatible with DaVinci Resolve and Final Cut Pro.
+    Maps Track V1 primary spine, V2 connected B-roll cutaways (lane=1), V3 titles (lane=2),
+    A1-A3 audio lanes (lane=-1 dialogue/VO, lane=-2 SFX/ambience, lane=-3 music), and chapter markers.
+    """
     out_path = Path(output_fcpxml).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     timeline.recalculate_sequential_starts()
-    fps = timeline.settings.fps
-    w = timeline.settings.width
-    h = timeline.settings.height
-    total_dur = timeline.total_duration
+    fps = max(1, int(timeline.settings.fps or 30))
+    w = int(timeline.settings.width or 3840)
+    h = int(timeline.settings.height or 2160)
+    color_space_attr = "9-18-9 (Rec. 2020 HLG)" if timeline.settings.hdr else "1-1-1 (Rec. 709)"
+
+    # Pre-compute exact frame-aligned spine timings so sequence duration == sum(spine durations)
+    spine_entries: list[tuple[int, int, int]] = []  # (offset_frames, start_frames, dur_frames)
+    running_frames = 0
+    for clip in timeline.visual_track:
+        dur_f = max(1, _sec_to_frames(clip.duration, fps))
+        start_f = _sec_to_frames(clip.source_in if clip.type == "video" else 0.0, fps)
+        spine_entries.append((running_frames, start_f, dur_f))
+        running_frames += dur_f
+    total_seq_frames = running_frames
 
     # Collect unique media resources
     resource_map: dict[str, str] = {}
     resource_lines: list[str] = [
         f'        <format id="r1" name="FFVideoFormat{h}p{fps}" '
-        f'frameDuration="100/{fps * 100}s" width="{w}" height="{h}"/>'
+        f'frameDuration="100/{fps * 100}s" width="{w}" height="{h}" colorSpace="{color_space_attr}"/>',
+        '        <effect id="r_title" name="Basic Title" '
+        'uid=".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti"/>',
     ]
 
     next_res_idx = 2
@@ -60,15 +84,16 @@ def export_fcpxml(timeline: EditTimeline, output_fcpxml: str | Path) -> Path:
             resource_map[clip.source] = rid
             uri = _path_to_file_uri(clip.source)
             name = escape(Path(clip.source).name)
-            dur_s = _sec_to_fcpxml_rational(
-                max(clip.duration + clip.source_in, 10.0) if clip.type == "video" else 0.0,
-                fps,
-            )
+            asset_dur_sec = max(clip.duration + clip.source_in + 5.0, 30.0)
+            dur_s = _sec_to_fcpxml_rational(asset_dur_sec, fps)
             has_vid = "1"
             has_aud = "1" if clip.type == "video" else "0"
+            aud_attrs = ' audioSources="1" audioChannels="2" audioRate="48000"' if has_aud == "1" else ""
             resource_lines.append(
-                f'        <asset id="{rid}" name="{name}" src="{uri}" start="0s" '
-                f'duration="{dur_s}" hasVideo="{has_vid}" hasAudio="{has_aud}" format="r1"/>'
+                f'        <asset id="{rid}" name="{name}" start="0s" duration="{dur_s}" '
+                f'hasVideo="{has_vid}" hasAudio="{has_aud}" format="r1"{aud_attrs}>\n'
+                f'            <media-rep kind="original-media" src="{uri}"/>\n'
+                f"        </asset>"
             )
 
     for aud in timeline.audio_tracks:
@@ -78,84 +103,143 @@ def export_fcpxml(timeline: EditTimeline, output_fcpxml: str | Path) -> Path:
             resource_map[aud.source] = rid
             uri = _path_to_file_uri(aud.source)
             name = escape(Path(aud.source).name)
-            dur_s = _sec_to_fcpxml_rational(aud.duration or total_dur, fps)
+            aud_dur_sec = max(float(aud.duration or timeline.total_duration) + float(aud.source_in) + 5.0, 30.0)
+            dur_s = _sec_to_fcpxml_rational(aud_dur_sec, fps)
             resource_lines.append(
-                f'        <asset id="{rid}" name="{name}" src="{uri}" start="0s" '
-                f'duration="{dur_s}" hasVideo="0" hasAudio="1"/>'
+                f'        <asset id="{rid}" name="{name}" start="0s" duration="{dur_s}" '
+                f'hasVideo="0" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">\n'
+                f'            <media-rep kind="original-media" src="{uri}"/>\n'
+                f"        </asset>"
             )
+
+    def _find_parent_spine_idx(t_sec: float) -> int:
+        if not spine_entries:
+            return 0
+        tf = _sec_to_frames(t_sec, fps)
+        for s_i, (off_f, _, d_f) in enumerate(spine_entries):
+            if off_f <= tf < (off_f + d_f):
+                return s_i
+        return len(spine_entries) - 1
+
+    # Bucket connected items (markers, V2 B-roll, V3 titles, A1-A3 audio) onto their parent V1 spine clip
+    children_by_spine: dict[int, list[str]] = {i: [] for i in range(len(timeline.visual_track))}
+
+    # Chapter markers
+    for m in timeline.markers:
+        if not timeline.visual_track:
+            break
+        p_idx = _find_parent_spine_idx(m.time_sec)
+        p_off_f, p_start_f, _ = spine_entries[p_idx]
+        rel_f = max(0, _sec_to_frames(m.time_sec, fps) - p_off_f)
+        m_start = _frames_to_fcpxml_rational(p_start_f + rel_f, fps)
+        children_by_spine[p_idx].append(
+            f'                            <marker start="{m_start}" duration="100/{fps * 100}s" '
+            f'value="{escape(m.name)}" note="{escape(m.note)}"/>'
+        )
+
+    # Track V2 connected B-roll cutaways (lane="1")
+    for b_clip in timeline.broll_track:
+        if not timeline.visual_track:
+            break
+        p_idx = _find_parent_spine_idx(b_clip.timeline_start)
+        p_off_f, p_start_f, _ = spine_entries[p_idx]
+        rel_f = max(0, _sec_to_frames(b_clip.timeline_start, fps) - p_off_f)
+        b_offset = _frames_to_fcpxml_rational(p_start_f + rel_f, fps)
+        b_start = _sec_to_fcpxml_rational(b_clip.source_in if b_clip.type == "video" else 0.0, fps)
+        b_dur = _frames_to_fcpxml_rational(max(1, _sec_to_frames(b_clip.duration, fps)), fps)
+        brid = resource_map[b_clip.source]
+        bname = escape(Path(b_clip.source).name)
+        children_by_spine[p_idx].append(
+            f'                            <asset-clip name="{bname}" lane="1" '
+            f'offset="{b_offset}" ref="{brid}" start="{b_start}" duration="{b_dur}" format="r1"/>'
+        )
+
+    # Track V3 connected titles & graphics overlays (lane="2")
+    for t_idx, t_item in enumerate(timeline.title_track, start=1):
+        if not timeline.visual_track or t_item.style == "act_banner":
+            continue
+        p_idx = _find_parent_spine_idx(t_item.timeline_start)
+        p_off_f, p_start_f, _ = spine_entries[p_idx]
+        rel_f = max(0, _sec_to_frames(t_item.timeline_start, fps) - p_off_f)
+        t_offset = _frames_to_fcpxml_rational(p_start_f + rel_f, fps)
+        t_dur = _frames_to_fcpxml_rational(max(1, _sec_to_frames(t_item.duration, fps)), fps)
+        ts_id = f"ts_{t_idx}"
+        full_label = t_item.text if not t_item.subtitle else f"{t_item.text} — {t_item.subtitle}"
+        esc_label = escape(full_label)
+        esc_name = escape(f"{t_item.style}: {t_item.text[:32]}")
+        children_by_spine[p_idx].append(
+            f'                            <title name="{esc_name}" lane="2" offset="{t_offset}" '
+            f'ref="r_title" start="0s" duration="{t_dur}">\n'
+            f"                                <text>\n"
+            f'                                    <text-style ref="{ts_id}">{esc_label}</text-style>\n'
+            f"                                </text>\n"
+            f'                                <text-style-def id="{ts_id}">\n'
+            f'                                    <text-style font="PingFang SC" fontSize="42"/>\n'
+            f"                                </text-style-def>\n"
+            f"                            </title>"
+        )
+
+    # Track A1-A3 connected audio lanes (A1=-1 voiceover/dialogue, A2=-2 sfx/ambience, A3=-3 music)
+    role_to_lane = {
+        "voiceover": ("-1", "dialogue"),
+        "sfx": ("-2", "effects"),
+        "ambience": ("-2", "effects"),
+        "music": ("-3", "music"),
+    }
+    for aud in timeline.audio_tracks:
+        if not timeline.visual_track:
+            break
+        lane_str, audio_role = role_to_lane.get(aud.role, ("-2", "effects"))
+        p_idx = _find_parent_spine_idx(aud.timeline_start)
+        p_off_f, p_start_f, _ = spine_entries[p_idx]
+        rel_f = max(0, _sec_to_frames(aud.timeline_start, fps) - p_off_f)
+        a_offset = _frames_to_fcpxml_rational(p_start_f + rel_f, fps)
+        a_start = _sec_to_fcpxml_rational(aud.source_in, fps)
+        raw_adur = aud.duration if (aud.duration and aud.duration > 0) else timeline.total_duration
+        a_dur_f = min(max(1, _sec_to_frames(raw_adur, fps)), max(1, total_seq_frames - _sec_to_frames(aud.timeline_start, fps)))
+        a_dur = _frames_to_fcpxml_rational(a_dur_f, fps)
+        arid = resource_map[aud.source]
+        aname = escape(Path(aud.source).name)
+        children_by_spine[p_idx].append(
+            f'                            <asset-clip name="{aname}" lane="{lane_str}" '
+            f'offset="{a_offset}" ref="{arid}" start="{a_start}" duration="{a_dur}" audioRole="{audio_role}"/>'
+        )
 
     spine_lines: list[str] = []
     for idx, clip in enumerate(timeline.visual_track):
         rid = resource_map[clip.source]
         name = escape(Path(clip.source).name)
-        offset_s = _sec_to_fcpxml_rational(clip.timeline_start, fps)
-        start_s = _sec_to_fcpxml_rational(clip.source_in if clip.type == "video" else 0.0, fps)
-        dur_s = _sec_to_fcpxml_rational(clip.duration, fps)
-
-        inner_elements: list[str] = []
-        # Attach markers that fall inside this clip
-        for m in timeline.markers:
-            if clip.timeline_start <= m.time_sec < (clip.timeline_start + clip.duration):
-                m_start = _sec_to_fcpxml_rational(
-                    (clip.source_in if clip.type == "video" else 0.0) + (m.time_sec - clip.timeline_start),
-                    fps,
-                )
-                inner_elements.append(
-                    f'                            <marker start="{m_start}" duration="100/{fps * 100}s" '
-                    f'value="{escape(m.name)}" note="{escape(m.note)}"/>'
-                )
-
-        # Attach Track V2 B-Roll cutaways that fall inside this primary spine clip on lane="1"
-        for b_clip in timeline.broll_track:
-            if clip.timeline_start <= b_clip.timeline_start < (clip.timeline_start + clip.duration):
-                brid = resource_map[b_clip.source]
-                bname = escape(Path(b_clip.source).name)
-                b_offset = _sec_to_fcpxml_rational(
-                    (clip.source_in if clip.type == "video" else 0.0) + (b_clip.timeline_start - clip.timeline_start),
-                    fps,
-                )
-                b_start = _sec_to_fcpxml_rational(b_clip.source_in if b_clip.type == "video" else 0.0, fps)
-                b_dur = _sec_to_fcpxml_rational(b_clip.duration, fps)
-                inner_elements.append(
-                    f'                            <asset-clip name="{bname}" lane="1" '
-                    f'offset="{b_offset}" ref="{brid}" start="{b_start}" duration="{b_dur}" format="r1"/>'
-                )
-
-        # Attach BGM on the very first spine clip as lane -1
-        if idx == 0 and timeline.audio_tracks:
-            for a_idx, aud in enumerate(timeline.audio_tracks):
-                arid = resource_map[aud.source]
-                aname = escape(Path(aud.source).name)
-                adur = _sec_to_fcpxml_rational(aud.duration or total_dur, fps)
-                astart = _sec_to_fcpxml_rational(aud.source_in, fps)
-                inner_elements.append(
-                    f'                            <asset-clip name="{aname}" lane="-{a_idx + 1}" '
-                    f'offset="0s" ref="{arid}" start="{astart}" duration="{adur}"/>'
-                )
-
-        if inner_elements:
+        off_f, start_f, dur_f = spine_entries[idx]
+        offset_s = _frames_to_fcpxml_rational(off_f, fps)
+        start_s = _frames_to_fcpxml_rational(start_f, fps)
+        dur_s = _frames_to_fcpxml_rational(dur_f, fps)
+        aud_role_attr = ' audioRole="dialogue"' if (clip.type == "video" and clip.roll_type == "a_roll") else ""
+        inner = children_by_spine.get(idx, [])
+        if inner:
             spine_lines.append(
                 f'                        <asset-clip name="{name}" offset="{offset_s}" '
-                f'ref="{rid}" start="{start_s}" duration="{dur_s}" format="r1">\n'
-                + "\n".join(inner_elements)
+                f'ref="{rid}" start="{start_s}" duration="{dur_s}" format="r1"{aud_role_attr}>\n'
+                + "\n".join(inner)
                 + "\n                        </asset-clip>"
             )
         else:
             spine_lines.append(
                 f'                        <asset-clip name="{name}" offset="{offset_s}" '
-                f'ref="{rid}" start="{start_s}" duration="{dur_s}" format="r1"/>'
+                f'ref="{rid}" start="{start_s}" duration="{dur_s}" format="r1"{aud_role_attr}/>'
             )
 
+    seq_dur_s = _frames_to_fcpxml_rational(total_seq_frames, fps)
+    proj_esc = escape(timeline.project_name or "Timeline")
     xml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
-<fcpxml version="1.9">
+<fcpxml version="1.11">
     <resources>
 {chr(10).join(resource_lines)}
     </resources>
     <library>
-        <event name="{escape(timeline.project_name)}">
-            <project name="{escape(timeline.project_name)}">
-                <sequence format="r1" duration="{_sec_to_fcpxml_rational(total_dur, fps)}" tcStart="0s" tcFormat="NDF">
+        <event name="{proj_esc}">
+            <project name="{proj_esc}">
+                <sequence format="r1" duration="{seq_dur_s}" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
                     <spine>
 {chr(10).join(spine_lines)}
                     </spine>
@@ -350,12 +434,18 @@ def export_otio(timeline: EditTimeline, output_otio: str | Path) -> Path:
 
 
 def export_all_nle_formats(timeline: EditTimeline, output_dir: str | Path) -> dict[str, Path]:
-    """Export FCPXML, EDL, and OTIO files into output_dir."""
+    """Export canonical timeline.fcpxml (plus project-named .fcpxml/.edl/.otio) into output_dir."""
     out_root = Path(output_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
-    stem = timeline.project_name or "timeline"
+    raw_stem = re.sub(r'[<>:"/\\|?*]+', "_", (timeline.project_name or "timeline")).strip() or "timeline"
+
+    canonical_fcpxml = export_fcpxml(timeline, out_root / "timeline.fcpxml")
+    if raw_stem.lower() != "timeline":
+        named_fcpxml = out_root / f"{raw_stem}.fcpxml"
+        named_fcpxml.write_text(canonical_fcpxml.read_text(encoding="utf-8"), encoding="utf-8")
+
     return {
-        "fcpxml": export_fcpxml(timeline, out_root / f"{stem}.fcpxml"),
-        "edl": export_edl(timeline, out_root / f"{stem}.edl"),
-        "otio": export_otio(timeline, out_root / f"{stem}.otio"),
+        "fcpxml": canonical_fcpxml,
+        "edl": export_edl(timeline, out_root / f"{raw_stem}.edl"),
+        "otio": export_otio(timeline, out_root / f"{raw_stem}.otio"),
     }

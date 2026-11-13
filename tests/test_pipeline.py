@@ -708,9 +708,13 @@ def test_cross_platform_macbook_pro_2019_hardware_encoding_and_filters(monkeypat
 
 
 def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
-    """Verify all 6 new Premium Photo Presentation Modes + 4 Atmospheric Finishers and showcase sheet generator."""
+    """Verify all 16 Premium Photo Presentation Modes + 8 Atmospheric Finishers and 4x4 showcase sheet generator."""
     from PIL import Image, ImageDraw
-    from video_editing_ai.models.schema import KenBurnsConfig
+    from video_editing_ai.models.schema import (
+        VALID_PHOTO_MODES,
+        VALID_PHOTO_OVERLAY_FX,
+        KenBurnsConfig,
+    )
     from video_editing_ai.renderer.ken_burns import (
         _prepare_photo_scene_context,
         _render_photo_frame_from_context,
@@ -721,23 +725,42 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
     p1 = tmp_path / "photo_1.jpg"
     p2 = tmp_path / "photo_2.jpg"
     p3 = tmp_path / "photo_3.jpg"
+    p_vert = tmp_path / "photo_vert.jpg"
     for idx, p in enumerate((p1, p2, p3), start=1):
         img = Image.new("RGB", (640, 480), (40 * idx, 80, 140))
         d = ImageDraw.Draw(img)
         d.rectangle([120, 90, 520, 390], fill=(235, 195, 95), outline=(255, 255, 255), width=6)
         img.save(p, quality=90)
+    # Also test tall vertical portrait source to verify zero edge black bars across aspect ratios
+    v_img = Image.new("RGB", (300, 480), (70, 110, 145))
+    ImageDraw.Draw(v_img).rectangle([55, 80, 245, 400], fill=(225, 185, 110), outline=(255, 255, 255), width=5)
+    v_img.save(p_vert, quality=90)
 
-    new_modes_and_finishers = [
+    # All 16 modes paired evenly across all 8 finishers (+ 'none')
+    modes_and_finishers = [
         ("cinematic_depth_3d", "golden_light_leak"),
-        ("triptych_cinematic", "none"),
+        ("contact_sheet_zoom", "nostalgic_film_grain"),
+        ("split_diopter_focus", "anamorphic_streak"),
+        ("glassmorphic_pedestal", "prism_chromatic_edge"),
+        ("medium_format_slide", "golden_light_leak"),
+        ("floating_tilt_plate", "velvet_vignette_rembrandt"),
+        ("criterion_atelier_split", "fine_art_rag_texture"),
+        ("triptych_cinematic", "fine_art_rag_texture"),
         ("polaroid_scrapbook", "nostalgic_film_grain"),
-        ("curator_loupe", "museum_spotlight"),
-        ("editorial_magazine", "none"),
+        ("curator_loupe", "velvet_vignette_rembrandt"),
+        ("editorial_magazine", "museum_spotlight"),
         ("cinema_anamorphic", "champagne_bokeh"),
         ("diptych_frame", "none"),
-        ("parallax_gallery", "none"),
+        ("parallax_gallery", "museum_spotlight"),
+        ("gallery_frame", "prism_chromatic_edge"),
+        ("full_bleed", "anamorphic_streak"),
     ]
-    for mode_name, fx_name in new_modes_and_finishers:
+    assert {m for m, _ in modes_and_finishers} == set(VALID_PHOTO_MODES)
+    covered_fx = {fx for _, fx in modes_and_finishers}
+    assert covered_fx == set(VALID_PHOTO_OVERLAY_FX)
+
+    for idx_case, (mode_name, fx_name) in enumerate(modes_and_finishers):
+        primary = p_vert if idx_case % 2 == 1 else p1
         kb = KenBurnsConfig(
             mode=mode_name,  # type: ignore[arg-type]
             overlay_fx=fx_name,  # type: ignore[arg-type]
@@ -747,18 +770,18 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
             caption_subtitle=f"Subtitle with {fx_name} finisher",
             camera_badge="GALLERY 4K HDR",
         )
-        ctx = _prepare_photo_scene_context(p1, width=480, height=270, kb=kb)
+        ctx = _prepare_photo_scene_context(primary, width=480, height=270, kb=kb)
         for t_check in (0.0, 0.5, 1.0):
             frame = _render_photo_frame_from_context(ctx, t_norm=t_check, f_idx=15, duration=2.0, fps=24)
             assert frame.size == (480, 270)
-            # Ensure no out-of-bounds black bar on left or right edges at any point in the animation
+            # Ensure no out-of-bounds pure black bar on left or right edges at any point in the animation
             assert frame.getpixel((0, 135)) != (0, 0, 0), f"Left edge black bar in {mode_name} at t={t_check}"
             assert frame.getpixel((479, 135)) != (0, 0, 0), f"Right edge black bar in {mode_name} at t={t_check}"
 
-    # Render an actual MP4 clip with cinematic_depth_3d + golden_light_leak
-    out_mp4 = tmp_path / "depth_3d_clip.mp4"
+    # Render an actual MP4 clip with a new 3D projective mode + new optical finisher
+    out_mp4 = tmp_path / "tilt_anamorphic_clip.mp4"
     render_photo_clip(
-        photo_path=p1,
+        photo_path=p_vert,
         output_mp4=out_mp4,
         duration=1.0,
         width=480,
@@ -766,16 +789,16 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
         fps=12,
         hdr=False,
         ken_burns=KenBurnsConfig(
-            mode="cinematic_depth_3d",
-            overlay_fx="golden_light_leak",
-            caption_title="Eiffel Tower 3D Depth",
-            caption_subtitle="Champ de Mars · Paris",
+            mode="floating_tilt_plate",
+            overlay_fx="anamorphic_streak",
+            caption_title="Architectural Relief Plate",
+            caption_subtitle="Projective 3D Orbit · Specular Streak",
         ),
     )
     assert out_mp4.exists() and out_mp4.stat().st_size > 1000
 
-    # Render the 10-mode showcase sheet
-    showcase_jpg = tmp_path / "showcase.jpg"
+    # Render the 4x4 (16-mode) showcase sheet
+    showcase_jpg = tmp_path / "showcase_16modes.jpg"
     render_photo_effects_showcase_sheet(
         photo_path=p1,
         output_jpg=showcase_jpg,
@@ -784,7 +807,7 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
         tile_width=320,
         tile_height=180,
     )
-    assert showcase_jpg.exists() and showcase_jpg.stat().st_size > 5000
+    assert showcase_jpg.exists() and showcase_jpg.stat().st_size > 8000
 
 
 def test_ai_creative_intelligence_and_interactive_multi_choice_intake(
@@ -1009,13 +1032,23 @@ def test_zero_project_specific_hardcodings_and_pure_ai_delegation(tmp_path: Path
 
     executed_roles = {a["role_id"] for a in bb.executed_agents}
     for required_role in (
+        "dit_ingest",
+        "cast_tracker",
         "narrator_voiceover",
         "camera_operator",
-        "motion_graphics",
-        "colorist",
-        "sound_designer",
+        "lead_editor",
+        "title_designer",
+        "hdr_colorist",
+        "sound_mixer",
+        "visual_qc",
+        "nle_exporter",
     ):
-        assert required_role in executed_roles, f"Missing big-budget agent {required_role}"
+        assert required_role in executed_roles, f"Missing post-production agent {required_role}"
+
+    # Verify backward-compatible legacy role_id aliases still resolve cleanly
+    assert AgentRegistry.get("motion_graphics") is AgentRegistry.get("title_designer")
+    assert AgentRegistry.get("colorist") is AgentRegistry.get("hdr_colorist")
+    assert AgentRegistry.get("sound_designer") is AgentRegistry.get("sound_mixer")
 
     nar_report = NarrationScriptReport.from_json_file(proj_dir / "narration_script.json")
     assert nar_report.total_cues >= 1
@@ -1038,7 +1071,7 @@ def test_zero_project_specific_hardcodings_and_pure_ai_delegation(tmp_path: Path
     )
 
     sd_report = SoundDesignReport.from_json_file(proj_dir / "sound_design_plan.json")
-    assert sd_report.j_l_cut_crossfade_sec >= 0.40
+    assert sd_report.j_l_cut_crossfade_sec >= 0.33
 
     # Verify route_map_card rendering via render_title_png
     route_png = tmp_path / "route_map_test.png"

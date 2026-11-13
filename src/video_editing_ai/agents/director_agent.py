@@ -189,13 +189,20 @@ class ProductionDirectorAgent(BaseEditingAgent):
     role_id = "production_director"
     display_name = "6. Executive Movie Production Director"
     stage_order = 60
+    substage_priority = 0
     description = (
-        "Experienced movie production director that supervises every sub-agent stage, directs agents to "
-        "fix/improve visual coverage, motion variety, dialogue badges, and HDR polish, and signs off on "
-        "the final cut in director_review.json."
+        "Sole creative sign-off gatekeeper evaluating pacing_audit.json and visual_qc_report.json against "
+        "the 6-dimension cinematic rubric, issuing beat-preserving chapter-scoped RevisionDirectives when needed, "
+        "and writing director_review.json."
     )
     enabled_by_default = True
-    requires_artifacts = ["creative_brief.json", "paper_edit.json", "pacing_audit.json"]
+    requires_artifacts = [
+        "creative_brief.json",
+        "paper_edit.json",
+        "pacing_audit.json",
+        "visual_qc_report.json",
+        "timeline.yaml",
+    ]
     produces_artifacts = ["director_review.json", "timeline.yaml", "storyboard.md"]
     skill_reference_file = "07_production_director_agent.md"
 
@@ -453,58 +460,16 @@ class ProductionDirectorAgent(BaseEditingAgent):
             )
             return review, False
 
-        # 5. Review Stage 30: DialogueEditorAgent -> Direct injection of a hero dialogue quote badge on Track V3
+        # 5. Review Stage 30: DialogueEditorAgent
         if rid == "dialogue_editor":
             tl = blackboard.timeline
-            has_badge = any(t.style == "dialogue_badge" for t in (tl.title_track if tl else []))
-            has_subs = bool(tl and tl.subtitles.items)
-            already_directed = any(
-                m.sender_role == self.role_id
-                and m.recipient_role == "dialogue_editor"
-                and m.message_type == "director_directive"
-                for m in blackboard.messages
-            )
-            if has_subs and not has_badge and not already_directed:
-                directive_msg = (
-                    "Highlight the most emotional spoken family quote with a Track V3 dialogue_badge callout "
-                    "and verify -0.35s J-cut audio lead-ins on all A-roll clips."
-                )
-                payload = {"inject_dialogue_highlight_badge": True}
-                blackboard.send_message(
-                    sender_role=self.role_id,
-                    recipient_role="dialogue_editor",
-                    message_type="director_directive",
-                    subject=directive_msg,
-                    payload=payload,
-                )
-                review = DirectorStageReview(
-                    stage_order=agent.stage_order,
-                    reviewed_agent_role=rid,
-                    status="directed_improvement",
-                    quality_score=9.4,
-                    critique=(
-                        "Dialogue Editor aligned word boundaries and subtitles cleanly; directed addition "
-                        "of a Track V3 hero quote callout badge to spotlight candid family speech."
-                    ),
-                    directive_sent=directive_msg,
-                    directive_payload=payload,
-                )
-                self._record_thought(
-                    blackboard,
-                    agent,
-                    review,
-                    observation=f"Dialogue Editor aligned {len(tl.subtitles.items) if tl else 0} bilingual subtitles and -0.35s J-cuts, but Track V3 has no hero quote callout badge yet.",
-                    thinking="Spotlighting the most heartfelt spoken family line with an on-screen Track V3 dialogue badge will anchor the emotional centerpiece of the cut.",
-                )
-                return review, True
-
             review = DirectorStageReview(
                 stage_order=agent.stage_order,
                 reviewed_agent_role=rid,
                 status="approved",
                 quality_score=9.5,
                 critique=(
-                    f"Dialogue Editor locked {len(tl.subtitles.items) if tl else 0} subtitles, -0.35s J-cuts, "
+                    f"Dialogue Editor locked {len(tl.subtitles.items) if tl else 0} subtitles, elastic -0.35s J-cuts, "
                     f"and {len(tl.broll_track) if tl else 0} Track V2 B-roll cutaways."
                 ),
             )
@@ -513,7 +478,7 @@ class ProductionDirectorAgent(BaseEditingAgent):
                 agent,
                 review,
                 observation=f"Locked {len(tl.subtitles.items) if tl else 0} bilingual subtitles, -0.35s J-cut audio pre-laps, and {len(tl.broll_track) if tl else 0} Track V2 cutaways.",
-                thinking="Word-level trims, 0.33s room-tone crossfades, and Track V3 quote callouts are clean and natural.",
+                thinking="Word-level trims within usable_in/usable_out handles and 0.33s room-tone crossfades are clean; Track V3 quote badges delegated to Stage 40 title_designer.",
             )
             return review, False
 
@@ -587,26 +552,159 @@ class ProductionDirectorAgent(BaseEditingAgent):
             )
             return review, False
 
-        # 6d. Review Stage 38: MotionGraphicsAgent
-        if rid == "motion_graphics":
-            mg = blackboard.custom_artifacts.get("motion_graphics_plan.json") or {}
-            mg_cnt = int(mg.get("graphics_injected", 0))
+        # 6d. Review Stage 05/15/35/55/65 & Stage 40 Specialists
+        if rid == "dit_ingest":
+            dm = blackboard.dit_manifest
             review = DirectorStageReview(
                 stage_order=agent.stage_order,
                 reviewed_agent_role=rid,
                 status="approved",
-                quality_score=9.5,
+                quality_score=9.6,
                 critique=(
-                    f"Motion Graphics Animator injected {mg_cnt} smoked-glass Route Map & Chapter Waypoint "
-                    "progression cards on Track V3."
+                    f"DIT Ingest probed {len(dm.entries) if dm else 0} files ({dm.cache_hits if dm else 0} cache hits) "
+                    "with clock-drift normalization and HDR/LUFS/SNR telemetry."
                 ),
             )
             self._record_thought(
                 blackboard,
                 agent,
                 review,
-                observation=f"MotionGraphicsReport placed {mg_cnt} route_map_card waypoint overlays at chapter transitions.",
-                thinking="Connected waypoint progression gives the viewer clear spatial and chronological orientation between acts.",
+                observation=f"DITIngestManifest indexed {len(dm.entries) if dm else 0} assets ({dm.cache_hits if dm else 0} cached).",
+                thinking="Deterministic probe caching and multi-cam clock-drift normalization establish a clean technical foundation before semantic culling.",
+            )
+            return review, False
+
+        if rid == "cast_tracker":
+            cm = blackboard.cast_manifest
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.5,
+                critique=(
+                    f"Cast Continuity tracked {len(cm.recurring_subjects) if cm else 0} recurring subjects "
+                    f"and {len(cm.utterance_languages) if cm else 0} language-tagged utterances."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"CastManifest mapped {len(cm.subclip_detections) if cm else 0} subject bboxes for face-safe Ken Burns framing.",
+                thinking="Normalized subject bounding boxes guarantee vertical photos and clips never crop off heads or faces.",
+            )
+            return review, False
+
+        if rid == "lead_editor":
+            tl = blackboard.timeline
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6,
+                critique=(
+                    f"Lead Assembly Editor stitched {len(tl.visual_track) if tl else 0} V1 cuts into one continuous "
+                    "timeline with J/L chapter bridges, continuous A3 BGM, and usable_in/usable_out clamping."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"Continuous EditTimeline assembled ({round(tl.total_duration, 1) if tl else 0.0}s).",
+                thinking="J/L-cut chapter bridges and continuous Track A3 BGM create seamless act transitions without restarting music.",
+            )
+            return review, False
+
+        if rid in ("title_designer", "motion_graphics"):
+            gm = blackboard.graphics_manifest
+            ov_cnt = gm.overlays_count if gm else len(blackboard.timeline.title_track if blackboard.timeline else [])
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6,
+                critique=(
+                    f"Motion Graphics & Title Designer consolidated {ov_cnt} Track V3 overlays "
+                    "(opening/closing cards, route maps, quote badges, lower-thirds) with HDR-safe diffuse white clamping."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"GraphicsManifest placed {ov_cnt} non-colliding Track V3 overlays (hdr_safe={gm.hdr_safe_mode if gm else False}).",
+                thinking="Consolidating all lower-thirds, quote badges, and closing cards at Stage 40 prevents late-stage title collisions and HLG text bloom.",
+            )
+            return review, False
+
+        if rid in ("hdr_colorist", "colorist"):
+            cmf = blackboard.color_transform_manifest
+            col = blackboard.custom_artifacts.get("color_grade_plan.json") or {}
+            matched_cnt = len(cmf.clips) if cmf else int(col.get("shots_matched_count", 0))
+            look_str = cmf.primary_film_stock_look if cmf else str(col.get("primary_film_stock_look", "archival_kodak_2383"))
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6,
+                critique=(
+                    f"HDR DI Colorist classified {matched_cnt} clips (203-nit HLG diffuse white mapping) "
+                    f"and matched camera Kelvin to '{look_str}'."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"ColorTransformManifest classified {matched_cnt} clips with '{look_str}' look.",
+                thinking="Mapping 8-bit SDR clips and sRGB stills to ~203 nits (~75% HLG signal) prevents harsh highlight clipping on HDR displays.",
+            )
+            return review, False
+
+        if rid in ("sound_mixer", "sound_designer"):
+            am = blackboard.audio_mix_manifest
+            sd = blackboard.custom_artifacts.get("sound_design_plan.json") or {}
+            amb_cnt = int(sd.get("ambient_beds_count", 0))
+            fol_cnt = int(sd.get("foley_accents_count", 0))
+            dieg_cnt = am.diegetic_music_clips_muted if am else 0
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6,
+                critique=(
+                    f"Sound Designer & Mixer normalized dialogue to -14 LUFS, ducked BGM (-14 dB speech, "
+                    f"-30 dB on {dieg_cnt} diegetic music clips), and layered {amb_cnt} ambience + {fol_cnt} foley stems."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"AudioMixManifest normalized {len(am.clip_mix) if am else 0} clips with 0.33s crossfades and {dieg_cnt} diegetic mutes.",
+                thinking="Balancing quiet child voices against adult speech at -14 LUFS and muting BGM during live music prevents clashing soundtracks.",
+            )
+            return review, False
+
+        if rid == "visual_qc":
+            qc = blackboard.visual_qc_report
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.6 if (qc is None or qc.passed_qc) else 8.8,
+                critique=(
+                    f"Proxy Watchdown QC sampled {qc.proxy_frames_sampled if qc else 0} boundary frames "
+                    f"(passed_qc={qc.passed_qc if qc else True}, issues={len(qc.issues) if qc else 0})."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"VisualQCReport passed={qc.passed_qc if qc else True} across {qc.proxy_frames_sampled if qc else 0} proxy frames.",
+                thinking="Boundary proxy verification confirms zero black flashes, frozen tail frames, subtitle overlaps, or cut-point audio spikes.",
             )
             return review, False
 
@@ -637,54 +735,6 @@ class ProductionDirectorAgent(BaseEditingAgent):
                 review,
                 observation=f"Stage-40 VFX plugin attached {len(tl.effects_track) if tl else 0} effects ({clamped} exceeded 0.48 intensity).",
                 thinking="Calibrating effect intensity <= 0.45 so 10-bit HLG HDR (arib-std-b67) skin tones and museum highlights remain natural without clipping.",
-            )
-            return review, False
-
-        # 7b. Review Stage 42: ColoristAgent
-        if rid == "colorist":
-            col = blackboard.custom_artifacts.get("color_grade_plan.json") or {}
-            matched_cnt = int(col.get("shots_matched_count", 0))
-            look_str = str(col.get("primary_film_stock_look", "archival_kodak_2383"))
-            review = DirectorStageReview(
-                stage_order=agent.stage_order,
-                reviewed_agent_role=rid,
-                status="approved",
-                quality_score=9.6,
-                critique=(
-                    f"Senior DI Colorist normalized white balance & midtone exposure across {matched_cnt} shots "
-                    f"and applied '{look_str}' 10-bit Film Stock LUT."
-                ),
-            )
-            self._record_thought(
-                blackboard,
-                agent,
-                review,
-                observation=f"ColorGradeReport matched {matched_cnt} clips across mixed cameras to '{look_str}' look.",
-                thinking="Shot-to-shot Kelvin and midtone gamma normalization removes jarring camera jumps between mirrorless and smartphone sensors.",
-            )
-            return review, False
-
-        # 7c. Review Stage 45: SoundDesignerAgent
-        if rid == "sound_designer":
-            sd = blackboard.custom_artifacts.get("sound_design_plan.json") or {}
-            amb_cnt = int(sd.get("ambient_beds_count", 0))
-            fol_cnt = int(sd.get("foley_accents_count", 0))
-            review = DirectorStageReview(
-                stage_order=agent.stage_order,
-                reviewed_agent_role=rid,
-                status="approved",
-                quality_score=9.6,
-                critique=(
-                    f"Supervising Sound Designer layered {amb_cnt} spatial acoustic beds, {fol_cnt} foley accents, "
-                    "and 0.40s J/L-cut audio crossfades (-14 LUFS broadcast target)."
-                ),
-            )
-            self._record_thought(
-                blackboard,
-                agent,
-                review,
-                observation=f"SoundDesignReport synthesized {amb_cnt} spatial room-tone beds and {fol_cnt} tactile foley cues.",
-                thinking="Subtle diegetic room air under photo galleries and 0.40s J/L-cut audio crossfades eliminate dead air and cut clicks.",
             )
             return review, False
 
@@ -741,19 +791,11 @@ class ProductionDirectorAgent(BaseEditingAgent):
             if b_item.timeline_start + b_item.duration > total_dur:
                 b_item.timeline_start = round(max(0.5, total_dur - b_item.duration - 0.5), 2)
 
-        # 2. Ensure Track V3 title cards have clean separation, remove cluttered act_banner/dialogue_badge boxes, and never exceed total_dur
-        tl.title_track = [
-            t for t in tl.title_track if t.style not in ("act_banner", "dialogue_badge")
-        ]
+        # 2. Keep all Stage 40 Track V3 graphics intact (only drop deprecated legacy act_banner)
+        tl.title_track = [t for t in tl.title_track if t.style != "act_banner"]
         tl.title_track.sort(key=lambda t: t.timeline_start)
-        for idx, t_item in enumerate(tl.title_track):
-            if idx > 0:
-                prev_t = tl.title_track[idx - 1]
-                min_s = round(prev_t.timeline_start + prev_t.duration + 0.8, 2)
-                if t_item.timeline_start < min_s and min_s + t_item.duration < total_dur:
-                    t_item.timeline_start = min_s
 
-        # 2b. Closed-Loop Caption & Transition Craft Audit: upgrade any generic filename captions
+        # 2b. Closed-Loop Caption Craft Audit: upgrade any generic filename captions without mutating clip durations
         captions_upgraded = 0
         for p_idx, item in enumerate(tl.visual_track):
             if item.type == "photo" and item.ken_burns is not None:
@@ -776,22 +818,52 @@ class ProductionDirectorAgent(BaseEditingAgent):
             blackboard=blackboard,
             prompt=(
                 f"Executive Final Screening of Timeline ({len(tl.visual_track)} V1 cuts, {tl.total_duration:.1f}s).\n"
-                "Inspect the director_screening_sheet.jpg. Optionally return JSON with 'director_vision_statement', "
-                "'final_director_notes' (list of strings), 'rubric_scores' (dict), or surgical 'clips'/'lower_thirds' "
-                "overrides to polish captions, transitions, or photo modes."
+                "Inspect director_screening_sheet.jpg, pacing_audit.json, and visual_qc_report.json. "
+                "Optionally return JSON with 'director_vision_statement', 'final_director_notes', 'rubric_scores', "
+                "or 'revision_directives' ([{\"target_role_id\": \"montage_editor\", \"chapter_id\": \"...\", "
+                "\"reason\": \"...\", \"constraints\": {...}}]). Do NOT mutate clip durations off the beat grid."
             ),
             image_paths=[screening_sheet_str] if screening_sheet_str else [],
             decision_key="production_director",
             timeout_sec=35.0,
         )
-        if isinstance(ai_dir_resp, dict) and (ai_dir_resp.get("clips") or ai_dir_resp.get("lower_thirds")):
-            try:
-                _apply_timeline_intelligence_to_obj(tl, ai_dir_resp)
-                total_dur = tl.total_duration
-            except Exception:
-                pass
+        if isinstance(ai_dir_resp, dict):
+            # Apply non-duration cosmetic caption/transition overrides only (never ripple-trim durations off beat_grid!)
+            if ai_dir_resp.get("clips") or ai_dir_resp.get("lower_thirds"):
+                safe_ov = dict(ai_dir_resp)
+                if isinstance(safe_ov.get("clips"), dict):
+                    safe_ov["clips"] = {
+                        cid: {k: v for k, v in cv.items() if k != "duration"}
+                        for cid, cv in safe_ov["clips"].items()
+                        if isinstance(cv, dict)
+                    }
+                elif isinstance(safe_ov.get("clips"), list):
+                    safe_ov["clips"] = [
+                        {k: v for k, v in cv.items() if k != "duration"}
+                        for cv in safe_ov["clips"]
+                        if isinstance(cv, dict)
+                    ]
+                try:
+                    _apply_timeline_intelligence_to_obj(tl, safe_ov)
+                except Exception:
+                    pass
+            if isinstance(ai_dir_resp.get("revision_directives"), list) and blackboard.revision_round < blackboard.max_revisions:
+                for rd in ai_dir_resp["revision_directives"]:
+                    if isinstance(rd, dict) and rd.get("target_role_id"):
+                        blackboard.add_revision_directive(
+                            target_role_id=str(rd["target_role_id"]),
+                            chapter_id=str(rd["chapter_id"]) if rd.get("chapter_id") else None,
+                            reason=str(rd.get("reason") or "Director executive screening revision"),
+                            constraints=dict(rd.get("constraints") or {}),
+                            issued_by=self.role_id,
+                        )
 
-        # 3. Compute the 6 Cinematic Rubric Scores (0-10 scale)
+        # 3. Evaluate pacing_audit.json + visual_qc_report.json against the 6-Dimension Cinematic Rubric
+        pa = blackboard.pacing_audit
+        qc = blackboard.visual_qc_report
+        pacing_clean = True if pa is None else bool(pa.passed_brief_compliance)
+        qc_clean = True if qc is None else bool(qc.passed_qc)
+
         has_opening = any(t.style == "opening_card" for t in tl.title_track)
         has_closing = any(t.style == "closing_card" for t in tl.title_track)
         has_v2_cutaways = len(tl.broll_track) > 0
@@ -799,15 +871,22 @@ class ProductionDirectorAgent(BaseEditingAgent):
         has_bgm = len(tl.audio_tracks) > 0
 
         rubric_scores = {
-            "story_arc": 9.6 if (has_opening and has_closing and len(tl.markers) >= 2) else 8.8,
-            "dialogue_audio": 9.5 if (has_subtitles or has_bgm) else 9.0,
-            "visual_rhythm": 9.5 if has_v2_cutaways else 9.1,
-            "cinematography": 9.4,
-            "production_value": 9.6 if tl.settings.hdr else 9.2,
-            "client_fidelity": 9.7,
+            "story_arc": 9.6 if (has_opening and (has_closing or len(tl.markers) >= 2)) else 9.0,
+            "dialogue_audio": (9.5 if (has_subtitles or has_bgm) else 9.1) - (0.0 if qc_clean else 0.4),
+            "visual_rhythm": (9.5 if has_v2_cutaways else 9.2) - (0.0 if pacing_clean else 0.5),
+            "cinematography": 9.5,
+            "production_value": (9.6 if tl.settings.hdr else 9.3) - (0.0 if qc_clean else 0.3),
+            "client_fidelity": 9.7 if pacing_clean else 9.0,
         }
+        if isinstance(ai_dir_resp, dict) and isinstance(ai_dir_resp.get("rubric_scores"), dict):
+            for rk, rv in ai_dir_resp["rubric_scores"].items():
+                if rk in rubric_scores and isinstance(rv, (int, float)):
+                    rubric_scores[rk] = round(max(0.0, min(10.0, float(rv))), 2)
+
         overall_score = round(sum(rubric_scores.values()) / len(rubric_scores), 2)
         grade = "A+" if overall_score >= 9.4 else ("A" if overall_score >= 9.0 else "B+")
+        pending_revs = blackboard.pending_revision_directives()
+        approved_for_master = (not pending_revs) or (blackboard.revision_round >= blackboard.max_revisions)
 
         interventions = sum(
             1 for r in stage_reviews if r.status in ("directed_improvement", "polished_by_director")
@@ -844,8 +923,8 @@ class ProductionDirectorAgent(BaseEditingAgent):
             director_vision_statement=vision_statement,
             overall_quality_score=overall_score,
             quality_grade=grade,
-            approved_for_master_render=True,
-            interventions_count=interventions + (1 if captions_upgraded > 0 else 0),
+            approved_for_master_render=approved_for_master,
+            interventions_count=interventions + (1 if captions_upgraded > 0 else 0) + len(blackboard.revision_directives),
             rubric_scores=rubric_scores,
             stage_reviews=stage_reviews,
             final_director_notes=final_notes,

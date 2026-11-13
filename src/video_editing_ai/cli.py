@@ -13,7 +13,8 @@ import uvicorn
 
 from .agents import AgentRegistry, generate_intake_questions, run_multi_agent_pipeline
 from .analyzer.ag_annotator import analyze_media_directory
-from .exporters.nle_export import export_all_nle_formats
+from .docs_sync import sync_agent_documentation
+from .exporters.nle_export import export_all_nle_formats, export_fcpxml
 from .models.schema import EditTimeline, MediaCatalog
 from .planner.story_director import generate_edit_plan
 from .renderer.ffmpeg_composer import render_timeline
@@ -58,6 +59,11 @@ def cmd_agents_run(
         "--disable-agent",
         help="Disable specific agent role_id",
     ),
+    story_arc_mode: Optional[str] = typer.Option(
+        None,
+        "--story-arc-mode",
+        help="Storyline mode: chronological_cinema (default), hero_journey, thematic_essay, or high_energy_reel",
+    ),
     interactive_intake: bool = typer.Option(
         False,
         "--interactive-intake",
@@ -67,10 +73,15 @@ def cmd_agents_run(
     height: int = typer.Option(2160, "--height", help="Output video height (default 2160 for 2160p 4K UHD)"),
     fps: int = typer.Option(30, "--fps", help="Output frame rate"),
     hdr: bool = typer.Option(True, "--hdr/--sdr", help="Render in 10-bit HLG HDR (Rec.2020 / arib-std-b67)"),
-    render: bool = typer.Option(False, "--render/--no-render", help="Also render final_story.mp4 after Showrunner lock"),
+    export_fcpxml_flag: bool = typer.Option(
+        True,
+        "--export-fcpxml/--no-export-fcpxml",
+        help="Emit frame-accurate timeline.fcpxml (FCPXML 1.11 for DaVinci Resolve & Final Cut Pro)",
+    ),
+    render: bool = typer.Option(False, "--render/--no-render", help="Also render final_story.mp4 after Director sign-off"),
     use_antigravity: bool = typer.Option(True, "--antigravity/--no-antigravity", help="Use Google Antigravity SDK"),
 ) -> None:
-    """Run the Coordinated Multi-Agent Vlog & Family Travel Editing Pipeline (Stage 0 -> Stage 50)."""
+    """Run the Coordinated Multi-Agent Post-Production Pipeline (Stage 00 -> Stage 65)."""
     console.print(
         Panel(
             f"[bold cyan]Running Modular Multi-Agent Video Editing Pipeline[/bold cyan]\n"
@@ -81,6 +92,8 @@ def cmd_agents_run(
     )
 
     answers: dict[str, str] = {}
+    if story_arc_mode:
+        answers["story_arc_mode"] = story_arc_mode
     if interactive_intake:
         questions = generate_intake_questions(media_dir, prompt)
         console.print("[bold yellow]Stage 0 Client Intake Interview:[/bold yellow]")
@@ -110,6 +123,7 @@ def cmd_agents_run(
         hdr=hdr,
         use_antigravity=use_antigravity,
         render_video=render,
+        export_fcpxml=export_fcpxml_flag,
         progress_callback=_on_progress,
     )
 
@@ -124,17 +138,21 @@ def cmd_agents_run(
         f"[bold green][OK] Multi-Agent Pipeline Complete![/bold green]\n"
         f"  - Executed Roles:   {', '.join(a['role_id'] for a in blackboard.executed_agents)}\n"
         f"  - Creative Brief:   [underline]{project_dir / 'creative_brief.json'}[/underline]\n"
-        f"  - BGM Selection:    [underline]{project_dir / 'bgm_selection.json'}[/underline]\n"
+        f"  - DIT Manifest:     [underline]{project_dir / 'dit_manifest.json'}[/underline]\n"
         f"  - Media Index:      [underline]{project_dir / 'media_index.json'}[/underline]\n"
-        f"  - Photo Curation:   [underline]{project_dir / 'photo_curation.json'}[/underline]\n"
+        f"  - Cast Manifest:    [underline]{project_dir / 'cast_manifest.json'}[/underline]\n"
         f"  - Beat Grid:        [underline]{project_dir / 'beat_grid.json'}[/underline]\n"
         f"  - Paper Edit:       [underline]{project_dir / 'paper_edit.json'}[/underline]\n"
+        f"  - Color Manifest:   [underline]{project_dir / 'color_transform_manifest.json'}[/underline]\n"
+        f"  - Audio Mix:        [underline]{project_dir / 'audio_mix_manifest.json'}[/underline]\n"
+        f"  - Graphics Plan:    [underline]{project_dir / 'graphics_manifest.json'}[/underline]\n"
         f"  - Pacing Audit:     [underline]{project_dir / 'pacing_audit.json'}[/underline]\n"
+        f"  - Visual QC:        [underline]{project_dir / 'visual_qc_report.json'}[/underline]\n"
         f"  - Director Review:  [underline]{project_dir / 'director_review.json'}[/underline] [{dr_note}]\n"
-        f"  - Blackboard Bus:   [underline]{project_dir / 'blackboard.json'}[/underline]\n"
         f"  - Final Timeline:   [underline]{project_dir / 'timeline.yaml'}[/underline] "
         f"({len(tl.visual_track) if tl else 0} V1 cuts, {len(tl.broll_track) if tl else 0} V2 cutaways, "
-        f"{len(tl.effects_track) if tl else 0} VFX items)"
+        f"{len(tl.effects_track) if tl else 0} VFX items)\n"
+        f"  - FCPXML 1.11:      [underline]{project_dir / 'timeline.fcpxml'}[/underline]"
     )
 
 
@@ -257,6 +275,55 @@ def cmd_export(
     paths = export_all_nle_formats(timeline, tl_path.resolve().parent)
     for fmt, p in paths.items():
         console.print(f"[green][OK][/green] Exported {fmt.upper()}: {p}")
+
+
+@app.command("export-fcpxml")
+def cmd_export_fcpxml(
+    project_dir: Path = typer.Argument(..., help="Project directory containing timeline.yaml (or path to timeline.yaml)"),
+    output_file: Optional[Path] = typer.Option(
+        None,
+        "-o",
+        "--output",
+        help="Optional output .fcpxml path (defaults to <project_dir>/timeline.fcpxml)",
+    ),
+) -> None:
+    """Export a frame-accurate FCPXML 1.11 timeline (timeline.fcpxml) for DaVinci Resolve and Final Cut Pro."""
+    tl_path = (project_dir / "timeline.yaml") if project_dir.is_dir() else project_dir
+    tl_path = tl_path.resolve()
+    if not tl_path.exists():
+        console.print(f"[bold red]Error:[/bold red] {tl_path} not found.")
+        raise typer.Exit(code=1)
+
+    timeline = EditTimeline.from_yaml(tl_path)
+    target_out = (output_file or (tl_path.parent / "timeline.fcpxml")).resolve()
+    written = export_fcpxml(timeline, target_out)
+    console.print(f"[bold green][OK] Exported FCPXML 1.11:[/bold green] [underline]{written}[/underline]")
+
+
+@app.command("docs-sync")
+def cmd_docs_sync(
+    sync_global: bool = typer.Option(
+        True,
+        "--sync-global/--no-sync-global",
+        help="Also synchronize updated skill files to ~/.gemini/config/skills/ai-video-editor",
+    ),
+) -> None:
+    """Introspect AgentRegistry and auto-update README.md and .agent/skills/ai-video-editor/ documentation."""
+    result = sync_agent_documentation()
+    installed_note = ""
+    if sync_global:
+        try:
+            installed_dir = sync_skill_to_global()
+            installed_note = f"\n  - Global Skill:    [underline]{installed_dir}[/underline]"
+        except Exception:
+            installed_note = ""
+    console.print(
+        f"[bold green][OK] Documentation synchronized with AgentRegistry ({result['agent_count']} agents)![/bold green]\n"
+        f"  - README.md:       [underline]{result['readme_path']}[/underline] (updated={result['readme_updated']})\n"
+        f"  - SKILL.md:        [underline]{result['skill_md_path']}[/underline] (updated={result['skill_updated']})\n"
+        f"  - Playbooks:       {len(result['verified_reference_files'])} verified, "
+        f"{len(result['created_reference_files'])} created{installed_note}"
+    )
 
 
 @app.command("run")

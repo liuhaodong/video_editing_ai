@@ -16,8 +16,8 @@ You are the **Client Intake & Creative Brief Producer (`client_intake`)** for an
    - Present the discovery questions to the client using Antigravity's native `ask_question` tool (which supports both single-choice and `is_multi_select: true` checkbox questions with `(Recommended)` prefixed on the Director's recommended options and rationale):
      - **Single-Choice**: `target_duration_sec`, `narrative_style`, `photo_mode`, `bgm_mood`, `dialogue_preference`
      - **Multi-Select (`is_multi_select: true`)**:
-       - `photo_effects_suite`: Choose multiple modes from the 10-Mode Premium Photo Effects Suite (`cinematic_depth_3d`, `triptych_cinematic`, `polaroid_scrapbook`, `curator_loupe`, `editorial_magazine`, `cinema_anamorphic`, `parallax_gallery`, `diptych_frame`, `gallery_frame`, `full_bleed`).
-       - `photo_overlay_finishers`: Choose composable atmospheric finishers (`golden_light_leak`, `champagne_bokeh`, `museum_spotlight`, `nostalgic_film_grain`, `none`).
+       - `photo_effects_suite`: Choose multiple modes from the 16-Mode Premium Photo Effects Suite (`cinematic_depth_3d`, `split_diopter_focus`, `contact_sheet_zoom`, `glassmorphic_pedestal`, `medium_format_slide`, `floating_tilt_plate`, `criterion_atelier_split`, `triptych_cinematic`, `polaroid_scrapbook`, `curator_loupe`, `editorial_magazine`, `cinema_anamorphic`, `parallax_gallery`, `diptych_frame`, `gallery_frame`, `full_bleed`).
+       - `photo_overlay_finishers`: Choose composable atmospheric finishers (`golden_light_leak`, `champagne_bokeh`, `museum_spotlight`, `nostalgic_film_grain`, `anamorphic_streak`, `prism_chromatic_edge`, `velvet_vignette_rembrandt`, `fine_art_rag_texture`, `none`).
        - `must_include_topics`: Choose multiple story chapters, landmarks, and candid moments to feature.
    - Pass the client's selections into `intake-refine` via `--duration`, `--narrative-style`, `--photo-mode`, `--photo-modes`, `--overlay-fxs`, `--bgm-mood`, or `--answers-json`.
 3. **Inter-Agent Handoffs**:
@@ -25,7 +25,7 @@ You are the **Client Intake & Creative Brief Producer (`client_intake`)** for an
 
 ## Skill CLI Invocation
 ```powershell
-python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_vision>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain"
+python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_vision>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,medium_format_slide,floating_tilt_plate,criterion_atelier_split,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain,anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture"
 ```
 
 ## Output JSON Contract (`creative_brief.json`)

@@ -137,16 +137,16 @@ def apply_surgical_edit(
             old_dur = target.duration
             old_end = target.timeline_start + old_dur
             if op.get("new_source_in") is not None:
-                target.source_in = max(0.0, round(float(op["new_source_in"]), 2))
+                target.source_in = max(0.0, round(float(op["new_source_in"]), 3))
             if op.get("new_duration") is not None:
-                new_dur = max(0.8, round(float(op["new_duration"]), 2))
+                new_dur = max(0.8, round(float(op["new_duration"]), 3))
             elif op.get("delta_sec") is not None:
-                new_dur = max(0.8, round(old_dur + float(op["delta_sec"]), 2))
+                new_dur = max(0.8, round(old_dur + float(op["delta_sec"]), 3))
             else:
                 new_dur = old_dur
 
             target.duration = new_dur
-            target.source_out = round(target.source_in + new_dur, 2)
+            target.source_out = round(target.source_in + new_dur, 3)
             for fx in timeline.effects_track:
                 if fx.target_clip_id == target.id:
                     fx.duration = new_dur
@@ -291,9 +291,10 @@ def apply_surgical_edit(
             applied_logs.append("Updated timeline audio mix parameters")
 
     # Sync BGM duration with updated total timeline duration
-    total_dur = round(timeline.total_duration, 2)
+    total_dur = round(timeline.total_duration, 3)
     for a in timeline.audio_tracks:
-        a.duration = total_dur
+        if a.role == "music":
+            a.duration = total_dur
 
     timeline.to_yaml(tl_path)
     sb_md = generate_storyboard_markdown(timeline)

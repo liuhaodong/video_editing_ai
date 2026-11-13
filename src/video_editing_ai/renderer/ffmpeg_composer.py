@@ -71,7 +71,23 @@ def _render_video_segment(
     """Trim, scale/composite (with ambient blurred backdrop for portrait 9:16 videos), overlay documentary card, and encode."""
     info = probe_video_file(Path(item.source))
     has_audio = bool(info.get("has_audio", False))
-    src_trc = str(info.get("color_transfer", "bt709"))
+    src_trc = str(info.get("color_transfer") or info.get("color_trc") or "bt709")
+    src_prim = str(info.get("color_primaries") or "bt709")
+    src_space = str(info.get("color_space") or "bt709")
+    is_log_clip = "log" in src_trc.lower()
+    diffuse_nits = 203.0
+    for fx in attached_effects or []:
+        if fx.effect_type == "color_grade" and fx.parameters:
+            if fx.parameters.get("src_trc"):
+                src_trc = str(fx.parameters["src_trc"])
+            if fx.parameters.get("src_primaries"):
+                src_prim = str(fx.parameters["src_primaries"])
+            if fx.parameters.get("src_space"):
+                src_space = str(fx.parameters["src_space"])
+            if "is_log" in fx.parameters:
+                is_log_clip = bool(fx.parameters["is_log"])
+            if fx.parameters.get("diffuse_white_nits"):
+                diffuse_nits = float(fx.parameters["diffuse_white_nits"])
     src_w = int(info.get("width", 1920) or 1920)
     src_h = int(info.get("height", 1080) or 1080)
     is_portrait = src_w < src_h
@@ -153,7 +169,15 @@ def _render_video_segment(
             post_filters.append(f"fade=t=out:st={st:.3f}:d={fd:.3f}")
 
     if hdr:
-        post_filters.extend(build_hdr_color_filters(src_trc if src_trc != "bt709" else "709"))
+        post_filters.extend(
+            build_hdr_color_filters(
+                src_trc=src_trc if src_trc != "bt709" else "709",
+                src_primaries=src_prim,
+                src_space=src_space,
+                is_log=is_log_clip,
+                diffuse_white_nits=diffuse_nits,
+            )
+        )
     else:
         post_filters.append("format=yuv420p")
 
@@ -284,10 +308,13 @@ def _build_ducking_volume_expr(
     timeline: EditTimeline,
     base_vol: float,
     duck_vol: float,
+    diegetic_windows: Optional[list[tuple[float, float]]] = None,
 ) -> str:
     """
-    Build an FFmpeg volume expression that ducks BGM ONLY during spoken dialogue or loud A-roll camera audio.
-    Never ducks BGM for silent documentary/educational text captions (`speaker` in {'', 'narrator', 'caption', 'plaque'}).
+    Build an FFmpeg volume expression that:
+    1. Deep-mutes/ducks BGM by -30 dB+ during clips flagged with has_diegetic_music (live stage shows / singing).
+    2. Ducks BGM by -14 dB during spoken dialogue or voiceover narration.
+    3. Never ducks BGM for silent documentary/educational text captions (`speaker` in {'', 'narrator', 'caption', 'plaque'}).
     """
     windows: list[tuple[float, float]] = []
     for sub in timeline.subtitles.items:
@@ -304,21 +331,37 @@ def _build_ducking_volume_expr(
             vo_dur = a_trk.duration or 3.2
             windows.append((max(0.0, a_trk.timeline_start - 0.25), a_trk.timeline_start + vo_dur + 0.35))
 
-    if not windows:
-        return f"{base_vol:.3f}"
+    def _merge_wins(raw: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not raw:
+            return []
+        srt = sorted(raw, key=lambda w: w[0])
+        out: list[tuple[float, float]] = [srt[0]]
+        for s, e in srt[1:]:
+            ps, pe = out[-1]
+            if s <= pe + 0.4:
+                out[-1] = (ps, max(pe, e))
+            else:
+                out.append((s, e))
+        return out
 
-    windows.sort(key=lambda w: w[0])
-    merged: list[tuple[float, float]] = [windows[0]]
-    for s, e in windows[1:]:
-        prev_s, prev_e = merged[-1]
-        if s <= prev_e + 0.4:
-            merged[-1] = (prev_s, max(prev_e, e))
-        else:
-            merged.append((s, e))
+    merged_speech = _merge_wins(windows)
+    merged_diegetic = _merge_wins(diegetic_windows or [])
 
-    cond_terms = [f"between(t,{s:.2f},{e:.2f})" for s, e in merged[:25]]
-    cond_str = "+".join(cond_terms)
-    return f"if(gt({cond_str},0),{duck_vol:.3f},{base_vol:.3f})"
+    if not merged_speech and not merged_diegetic:
+        return f"{base_vol:.4f}"
+
+    base_expr = f"{base_vol:.4f}"
+    if merged_speech:
+        cond_speech = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_speech[:25])
+        base_expr = f"if(gt({cond_speech},0),{duck_vol:.4f},{base_expr})"
+
+    if merged_diegetic:
+        # -30 dB attenuation (~0.0316x of base_vol, exceeding -28 dB minimum diegetic ducking requirement)
+        diegetic_vol = round(base_vol * (10.0 ** (-30.0 / 20.0)), 5)
+        cond_dieg = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_diegetic[:20])
+        base_expr = f"if(gt({cond_dieg},0),{diegetic_vol:.5f},{base_expr})"
+
+    return base_expr
 
 
 def render_timeline(
@@ -351,7 +394,7 @@ def render_timeline(
     srt_path = out_path.with_suffix(".srt")
     ass_path = out_path.with_suffix(".ass")
     export_srt_subtitles(timeline, srt_path)
-    export_ass_subtitles(timeline, ass_path)
+    export_ass_subtitles(timeline, ass_path, hdr=hdr)
 
     effects_by_clip: dict[str, list[EffectTrackItem]] = {}
     for fx in timeline.effects_track:
@@ -508,13 +551,24 @@ def render_timeline(
     active_titles = [
         t
         for t in timeline.title_track
-        if t.timeline_start < total_dur and t.style not in ("act_banner", "dialogue_badge")
+        if t.timeline_start < total_dur and t.style != "act_banner"
     ]
     title_pngs: list[Path] = []
     for t_idx, t_item in enumerate(active_titles):
-        png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}.png"
-        render_title_png(t_item, png_path, width=width, height=height)
+        png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.png"
+        render_title_png(t_item, png_path, width=width, height=height, hdr_safe=hdr)
         title_pngs.append(png_path)
+
+    diegetic_windows: list[tuple[float, float]] = []
+    mix_manifest_path = out_path.parent / "audio_mix_manifest.json"
+    if mix_manifest_path.exists():
+        try:
+            mix_raw = json.loads(mix_manifest_path.read_text(encoding="utf-8"))
+            for seg in mix_raw.get("ducking_envelope", []) or []:
+                if isinstance(seg, dict) and seg.get("mode") == "diegetic_music_mute":
+                    diegetic_windows.append((float(seg.get("start_sec", 0.0)), float(seg.get("end_sec", 0.0))))
+        except Exception:
+            pass
 
     active_bgm = [a for a in timeline.audio_tracks if Path(a.source).exists()]
 
@@ -607,7 +661,12 @@ def render_timeline(
                 else:
                     a_dur = min(max(0.2, total_dur - a_item.timeline_start), a_item.duration or total_dur)
                 vol_expr = (
-                    _build_ducking_volume_expr(timeline, a_item.volume, a_item.duck_volume)
+                    _build_ducking_volume_expr(
+                        timeline,
+                        a_item.volume,
+                        a_item.duck_volume,
+                        diegetic_windows=diegetic_windows,
+                    )
                     if a_item.duck_under_dialogue
                     else f"{a_item.volume:.3f}"
                 )

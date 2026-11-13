@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Antigravity Skill Helper CLI for the 11-Agent AI Photo & Video Editing Studio.
+"""Antigravity Skill Helper CLI for the 21-Agent AI Photo & Video Editing Studio.
 
 Provides token-efficient, file-backed subcommands for every stage of the editing
 workflow:
   - inspect-library       : Scan raw media folder, detect cameras, and compute Director's recommended length
   - intake-refine         : Co-refine Story Vision & CreativeBrief with Client Intake Agent + Director
   - run-stage             : Run any individual sub-agent stage(s) with Executive Director stage-gate review
-  - run-pipeline          : Run the complete 11-agent pipeline (Stage 00 -> Stage 60) + 4K HLG HDR render
+  - run-pipeline          : Run the complete multi-agent pipeline (Stage 00 -> Stage 65) + 4K HLG HDR render
   - render-contact-sheets : Mechanically render numbered photo & video contact sheet JPEGs for AI Agent inspection
   - apply-vision-curation : Persist AI Agent's creative select/reject, diptych & plaque decisions into contracts
   - apply-story-plan      : Persist AI Agent's Cold-Open Teaser Hook & chapter plan overrides into paper_edit.json
@@ -311,12 +311,13 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
         "v1_cuts": len(tl.visual_track) if tl else 0,
         "v2_cutaways": len(tl.broll_track) if tl else 0,
         "vfx_items": len(tl.effects_track) if tl else 0,
+        "timeline_fcpxml": str(project_dir / "timeline.fcpxml") if (project_dir / "timeline.fcpxml").exists() else None,
         "rendered_mp4": str(project_dir / "final_story.mp4") if (project_dir / "final_story.mp4").exists() else None,
     }
     out_path = Path(args.output).resolve() if args.output else (project_dir / "pipeline_summary.json")
     _write_json(out_path, summary_doc)
     print(
-        f"Success! 11-Agent Pipeline Complete (Grade: {summary_doc['director_grade']} "
+        f"Success! Multi-Agent Pipeline Complete (Grade: {summary_doc['director_grade']} "
         f"{summary_doc['director_score']}/10, Duration: {summary_doc['timeline_duration_sec']}s).\n"
         f"Summary written to: {out_path}"
     )
@@ -903,7 +904,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_int.add_argument("--project-dir", required=True, help="Target project workspace directory")
     p_int.add_argument("--prompt", default="", help="User story vision and feedback")
     p_int.add_argument("--narrative-style", default=None, help="family_keepsake_4act | day_in_the_life_vlog | upbeat_montage | dialogue_story")
-    p_int.add_argument("--photo-mode", default=None, help="Primary photo mode (cinematic_depth_3d | parallax_gallery | editorial_magazine | curator_loupe | polaroid_scrapbook | triptych_cinematic | cinema_anamorphic | diptych_frame | gallery_frame | full_bleed)")
+    p_int.add_argument(
+        "--photo-mode",
+        default=None,
+        help=(
+            "Primary photo mode (cinematic_depth_3d | split_diopter_focus | contact_sheet_zoom | "
+            "glassmorphic_pedestal | medium_format_slide | floating_tilt_plate | criterion_atelier_split | "
+            "parallax_gallery | editorial_magazine | curator_loupe | polaroid_scrapbook | "
+            "triptych_cinematic | cinema_anamorphic | diptych_frame | gallery_frame | full_bleed)"
+        ),
+    )
     p_int.add_argument("--photo-modes", default=None, help="Multi-select comma-separated photo modes for photo_effects_suite")
     p_int.add_argument("--overlay-fxs", default=None, help="Multi-select comma-separated atmospheric finishers for photo_overlay_finishers")
     p_int.add_argument("--bgm-mood", default=None, help="auto_match | classical_chamber | acoustic_warm | cinematic_orchestral")
@@ -928,7 +938,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--project-dir", required=True, help="Target project workspace directory")
     p_pipe.add_argument("--prompt", default="", help="Story vision prompt")
     p_pipe.add_argument("--duration", type=int, default=None, help="Target duration in seconds (30 to 600)")
-    p_pipe.add_argument("--photo-mode", default="parallax_gallery", help="parallax_gallery | gallery_frame | full_bleed")
+    p_pipe.add_argument("--photo-mode", default="parallax_gallery", help="Primary fallback photo mode (any of the 16 PhotoModeType modes)")
     p_pipe.add_argument("--narrative-style", default="family_keepsake_4act", help="Narrative style")
     p_pipe.add_argument("--bgm-mood", default="auto_match", help="BGM mood preference")
     p_pipe.add_argument("--bgm", default=None, help="Optional custom audio file path")
@@ -1034,15 +1044,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument(
         "--mode",
         default=None,
-        help="Updated photo mode (cinematic_depth_3d | triptych_cinematic | polaroid_scrapbook | curator_loupe | editorial_magazine | cinema_anamorphic | parallax_gallery | diptych_frame | gallery_frame | full_bleed)",
+        help=(
+            "Updated photo mode (cinematic_depth_3d | split_diopter_focus | contact_sheet_zoom | "
+            "glassmorphic_pedestal | medium_format_slide | floating_tilt_plate | criterion_atelier_split | "
+            "triptych_cinematic | polaroid_scrapbook | curator_loupe | editorial_magazine | cinema_anamorphic | "
+            "parallax_gallery | diptych_frame | gallery_frame | full_bleed)"
+        ),
     )
     p_ec.add_argument(
         "--overlay-fx",
         default=None,
-        help="Composable atmospheric finisher (none | golden_light_leak | champagne_bokeh | museum_spotlight | nostalgic_film_grain)",
+        help=(
+            "Composable atmospheric finisher (none | golden_light_leak | champagne_bokeh | museum_spotlight | "
+            "nostalgic_film_grain | anamorphic_streak | prism_chromatic_edge | velvet_vignette_rembrandt | fine_art_rag_texture)"
+        ),
     )
-    p_ec.add_argument("--secondary-source", default=None, help="Optional 2nd photo path for diptych_frame / polaroid_scrapbook / triptych_cinematic")
-    p_ec.add_argument("--tertiary-source", default=None, help="Optional 3rd photo path for triptych_cinematic")
+    p_ec.add_argument(
+        "--secondary-source",
+        default=None,
+        help="Optional 2nd photo path for diptych_frame / polaroid_scrapbook / triptych_cinematic / contact_sheet_zoom / criterion_atelier_split",
+    )
+    p_ec.add_argument(
+        "--tertiary-source",
+        default=None,
+        help="Optional 3rd photo path for triptych_cinematic / contact_sheet_zoom / criterion_atelier_split",
+    )
     p_ec.add_argument("--preset", default=None, help="Updated Ken Burns preset")
     p_ec.add_argument("--before-clip-id", default=None, help="Move clip before this clip_id (for --action move)")
     p_ec.add_argument("--after-clip-id", default=None, help="Move clip after this clip_id (for --action move)")
@@ -1110,7 +1136,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 15. preview-photo-effects
     p_pe = sub.add_parser(
         "preview-photo-effects",
-        help="Mechanically render a 5x2 visual comparison showcase sheet of all 10 Photo Modes & 4 Atmospheric Finishers",
+        help="Mechanically render a 4x4 visual comparison showcase sheet of all 16 Photo Modes & 8 Atmospheric Finishers",
     )
     p_pe.add_argument("--project-dir", required=True, help="Project workspace directory")
     p_pe.add_argument("--photo", default=None, help="Primary photo path (auto-picks top curated photo if omitted)")

@@ -985,22 +985,34 @@ def create_app(default_project_dir: str | Path = "active_video_project") -> Fast
 
         exports = {}
         for ext in (".mp4", ".fcpxml", ".edl", ".otio", ".srt", ".ass"):
-            matches = list(proj.glob(f"*{ext}"))
-            if matches:
-                exports[ext.lstrip(".")] = str(matches[0].resolve())
+            preferred = proj / f"timeline{ext}"
+            if ext == ".mp4":
+                preferred = proj / "final_story.mp4"
+            if preferred.exists():
+                exports[ext.lstrip(".")] = str(preferred.resolve())
+            else:
+                matches = list(proj.glob(f"*{ext}"))
+                if matches:
+                    exports[ext.lstrip(".")] = str(matches[0].resolve())
 
         agent_contracts = {
             "creative_brief": _read_json_if_exists(proj / "creative_brief.json"),
+            "dit_manifest": _read_json_if_exists(proj / "dit_manifest.json"),
             "bgm_selection": _read_json_if_exists(proj / "bgm_selection.json"),
             "media_index": _read_json_if_exists(proj / "media_index.json"),
             "photo_curation": _read_json_if_exists(proj / "photo_curation.json"),
+            "cast_manifest": _read_json_if_exists(proj / "cast_manifest.json"),
             "contact_sheets_manifest": _read_json_if_exists(
                 proj / "contact_sheets" / "contact_sheets_manifest.json"
             ),
             "beat_grid": _read_json_if_exists(proj / "beat_grid.json"),
             "paper_edit": _read_json_if_exists(proj / "paper_edit.json"),
             "candidate_story_digest": _read_json_if_exists(proj / "candidate_story_digest.json"),
+            "graphics_manifest": _read_json_if_exists(proj / "graphics_manifest.json"),
+            "color_transform_manifest": _read_json_if_exists(proj / "color_transform_manifest.json"),
+            "audio_mix_manifest": _read_json_if_exists(proj / "audio_mix_manifest.json"),
             "pacing_audit": _read_json_if_exists(proj / "pacing_audit.json"),
+            "visual_qc_report": _read_json_if_exists(proj / "visual_qc_report.json"),
             "director_review": _read_json_if_exists(proj / "director_review.json"),
             "vfx_manifest": _read_json_if_exists(proj / "vfx_manifest.json"),
             "blackboard": _read_json_if_exists(proj / "blackboard.json"),

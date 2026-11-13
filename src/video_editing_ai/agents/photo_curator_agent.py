@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import json
 import subprocess
@@ -11,6 +12,12 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from ..analyzer.media_probe import _extract_exif_camera_info, _get_cjk_font
+from ..analyzer.semantic_intelligence import (
+    analyze_human_and_aesthetic_perception,
+    cie_lab_harmony_score,
+    compute_zoom_tolerant_visual_similarity,
+    hamming_distance_hex as _hamming_distance_hex,
+)
 from ..models.schema import (
     VALID_PHOTO_MODES,
     VALID_PHOTO_OVERLAY_FX,
@@ -212,6 +219,18 @@ def _generate_semantic_annotation(
     )
 
 
+def _parse_ts_seconds(iso_str: str) -> Optional[float]:
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        if dt.year <= 1971:
+            return None
+        return float(dt.timestamp())
+    except Exception:
+        return None
+
+
 @register_agent
 class PhotoCuratorAgent(BaseEditingAgent):
     """Stage 15: Aesthetic Photo Curator & Subject Annotator (photo_curator)."""
@@ -220,14 +239,13 @@ class PhotoCuratorAgent(BaseEditingAgent):
     display_name = "1c. Aesthetic Photo Curator & Annotator"
     stage_order = 15
     description = (
-        "Evaluates all photos using 5-factor aesthetic taste scoring (subject saliency, rule-of-thirds "
-        "composition, portrait warmth, artwork/landmark recognition, and 64-bit dHash burst deduplication), "
-        "selects the most compelling shots, and delegates visual subject annotation & semantic photo effect pairing to the AI Agent."
+        "Evaluates photos with human portrait perception (open-eye blink rejection, smile boost, subject-vs-bokeh sharpness), "
+        "non-adjacent zoom-tolerant graph burst clustering, Submodular MMR diversity optimization, and CIE-Lab chromatic diptych pairing."
     )
     enabled_by_default = True
     requires_artifacts = ["creative_brief.json", "media_index.json"]
     produces_artifacts = ["photo_curation.json"]
-    skill_reference_file = "01_culler_agent.md"
+    skill_reference_file = "09_photo_curator_agent.md"
 
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
         media_index = blackboard.media_index
@@ -274,19 +292,16 @@ class PhotoCuratorAgent(BaseEditingAgent):
 
         curated_items: list[CuratedPhotoItem] = []
         subclip_by_id: dict[str, CulledSubClip] = {s.subclip_id: s for s in photo_subclips}
+        perception_by_id: dict[str, dict[str, Any]] = {}
+        ts_by_idx: list[Optional[float]] = []
 
-        # Step 1: Score every photo mechanically and assign perceptual dHash burst clusters
-        cluster_id = 0
-        prev_hash: Optional[str] = None
-
+        # Step 1: Perceptual human/portrait & multi-scale visual signature pass
         for idx, sc in enumerate(photo_subclips):
             img_path = preview_by_name.get(sc.filename, sc.source_path)
-            metrics = _evaluate_photo_taste_metrics(img_path, sc.filename)
+            metrics = analyze_human_and_aesthetic_perception(img_path, sc.filename)
+            perception_by_id[sc.subclip_id] = metrics
+            ts_by_idx.append(_parse_ts_seconds(sc.normalized_timestamp))
             cur_hash = str(metrics["dhash"])
-
-            if prev_hash is None or _hamming_distance_hex(prev_hash, cur_hash) > 10:
-                cluster_id += 1
-            prev_hash = cur_hash
 
             story_pct = int(round((idx / max(1, total_photos - 1)) * 100))
             inferred_cat = str(metrics["inferred_category"])
@@ -313,7 +328,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     source_path=sc.source_path,
                     orientation=sc.orientation,
                     perceptual_hash=cur_hash,
-                    cluster_id=cluster_id,
+                    cluster_id=idx + 1,
                     saliency_score=float(metrics["saliency_score"]),
                     composition_score=float(metrics["composition_score"]),
                     portrait_warmth_score=float(metrics["portrait_warmth_score"]),
@@ -325,77 +340,196 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     annotation_subtitle=subtitle,
                     camera_badge=badge,
                     recommended_photo_mode="parallax_gallery",
+                    eye_open_score=float(metrics["eye_open_score"]),
+                    smile_score=float(metrics["smile_score"]),
+                    blur_type=metrics["blur_type"],
                     curation_rationale=rationale,
                 )
             )
 
-        # Step 2: Deduplicate burst clusters (keep only the highest-taste frame per perceptual cluster)
-        best_in_cluster: dict[int, CuratedPhotoItem] = {}
+        # Step 1b: Non-adjacent Graph Burst & Zoom-Variant Near-Duplicate Clustering (Union-Find)
+        n_items = len(curated_items)
+        parent = list(range(n_items))
+
+        def _uf_find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def _uf_union(a: int, b: int) -> None:
+            ra, rb = _uf_find(a), _uf_find(b)
+            if ra != rb:
+                if ra < rb:
+                    parent[rb] = ra
+                else:
+                    parent[ra] = rb
+
+        for i in range(n_items):
+            it_i = curated_items[i]
+            p_i = perception_by_id[it_i.subclip_id]
+            t_i = ts_by_idx[i]
+            for j in range(i + 1, n_items):
+                it_j = curated_items[j]
+                p_j = perception_by_id[it_j.subclip_id]
+                t_j = ts_by_idx[j]
+                within_time_window = (t_i is None or t_j is None) or (abs(t_i - t_j) <= 900.0)
+                lab_h = cie_lab_harmony_score(p_i["lab_mean"], p_j["lab_mean"])
+
+                h_dist = _hamming_distance_hex(it_i.perceptual_hash, it_j.perceptual_hash)
+                if (h_dist <= 3 and lab_h >= 0.72) or (h_dist <= 10 and within_time_window and lab_h >= 0.45):
+                    _uf_union(i, j)
+                    continue
+
+                # Check zoom-tolerant visual duplicate within 15 minutes (or undated synthetic sequences)
+                if within_time_window:
+                    z_sim = compute_zoom_tolerant_visual_similarity(
+                        p_i["visual_signature"],
+                        p_i["center_signature"],
+                        p_i["inner_signature"],
+                        p_j["visual_signature"],
+                        p_j["center_signature"],
+                        p_j["inner_signature"],
+                    )
+                    if z_sim >= 0.945:
+                        _uf_union(i, j)
+
+        root_to_cid: dict[int, int] = {}
+        for i, item in enumerate(curated_items):
+            r = _uf_find(i)
+            if r not in root_to_cid:
+                root_to_cid[r] = len(root_to_cid) + 1
+            item.cluster_id = root_to_cid[r]
+        cluster_id = len(root_to_cid)
+
+        # Step 2: Deduplicate burst clusters (select human-aware Hero Frame per perceptual/zoom cluster)
+        members_by_cluster: dict[int, list[CuratedPhotoItem]] = {}
         for item in curated_items:
-            cid = item.cluster_id
-            existing = best_in_cluster.get(cid)
-            if existing is None or item.overall_taste_score > existing.overall_taste_score:
-                if existing is not None:
-                    existing.rejection_reason = f"burst_duplicate_of_{item.filename}"
-                best_in_cluster[cid] = item
-            else:
-                item.rejection_reason = f"burst_duplicate_of_{existing.filename}"
+            members_by_cluster.setdefault(item.cluster_id, []).append(item)
 
-        deduped_pool = list(best_in_cluster.values())
-
-        # Step 3: Select top photos across chronological story buckets by highest overall_taste_score
-        chosen_ids: set[str] = set()
-        remaining_needed = target_select_count
-        if remaining_needed > 0 and deduped_pool:
-            num_buckets = min(remaining_needed, 8)
-            bucket_len = max(1, len(deduped_pool) / num_buckets)
-            for b_i in range(num_buckets):
-                s_idx = int(round(b_i * bucket_len))
-                e_idx = int(round((b_i + 1) * bucket_len))
-                candidates_in_b = [
-                    it
-                    for it in deduped_pool[s_idx : max(s_idx + 1, e_idx)]
-                    if it.subclip_id not in chosen_ids and it.overall_taste_score >= min_taste_floor
-                ]
-                if not candidates_in_b:
-                    candidates_in_b = [
-                        it
-                        for it in deduped_pool[s_idx : max(s_idx + 1, e_idx)]
-                        if it.subclip_id not in chosen_ids
-                    ]
-                candidates_in_b.sort(key=lambda x: x.overall_taste_score, reverse=True)
-                for pick in candidates_in_b[: max(1, int(np.ceil(remaining_needed / num_buckets)))]:
-                    if len(chosen_ids) < target_select_count:
-                        chosen_ids.add(pick.subclip_id)
-
-        # If bucket rounding left any unfilled slots, top up with the highest-scoring remaining deduped photos
-        if len(chosen_ids) < target_select_count:
-            leftover = sorted(
-                [it for it in deduped_pool if it.subclip_id not in chosen_ids],
-                key=lambda x: x.overall_taste_score,
+        deduped_pool: list[CuratedPhotoItem] = []
+        for cid, members in members_by_cluster.items():
+            members_sorted = sorted(
+                members,
+                key=lambda it: (
+                    it.overall_taste_score + subclip_by_id[it.subclip_id].brief_match_boost * 0.45,
+                    it.eye_open_score,
+                    it.smile_score,
+                ),
                 reverse=True,
             )
-            for pick in leftover[: target_select_count - len(chosen_ids)]:
-                chosen_ids.add(pick.subclip_id)
+            hero = members_sorted[0]
+            deduped_pool.append(hero)
+            for dup in members_sorted[1:]:
+                if dup.eye_open_score < 0.48 and hero.eye_open_score >= 0.55:
+                    dup.rejection_reason = f"closed_eyes_in_burst_inferior_to_{hero.filename}"
+                elif dup.blur_type == "motion_or_defocus_blur" and hero.blur_type != "motion_or_defocus_blur":
+                    dup.rejection_reason = f"motion_blur_inferior_to_{hero.filename}"
+                elif _hamming_distance_hex(dup.perceptual_hash, hero.perceptual_hash) > 10:
+                    dup.rejection_reason = f"near_duplicate_zoom_variant_of_{hero.filename}"
+                else:
+                    dup.rejection_reason = f"burst_duplicate_of_{hero.filename}"
 
-        # Step 4: Pair complementary vertical ('portrait') selects for Diptych / Polaroid Split-Screen
-        # and assign diverse cinema-grade photo modes & atmospheric finishers across selected plates
+        # Step 3: Submodular Maximal Marginal Relevance (MMR) Portfolio Selection
+        # Balances intrinsic taste + brief relevance against visual redundancy, shot-scale balance,
+        # subject-category variety, and chronological chapter coverage.
+        chosen_ids: set[str] = set()
+        index_pos_by_id = {it.subclip_id: i for i, it in enumerate(curated_items)}
+        num_time_bins = max(1, min(8, target_select_count))
+
+        eligible_pool = [it for it in deduped_pool if it.overall_taste_score >= min_taste_floor]
+        if len(eligible_pool) < target_select_count:
+            eligible_pool = list(deduped_pool)
+
+        selected_sigs: list[np.ndarray] = []
+        cat_counts: dict[str, int] = {}
+        scale_counts: dict[str, int] = {}
+        tbin_counts: dict[int, int] = {}
+
+        while len(chosen_ids) < target_select_count and len(chosen_ids) < len(eligible_pool):
+            best_cand: Optional[CuratedPhotoItem] = None
+            best_gain = -1e9
+            for cand in eligible_pool:
+                if cand.subclip_id in chosen_ids:
+                    continue
+                sc_cand = subclip_by_id[cand.subclip_id]
+                sig_c = perception_by_id[cand.subclip_id]["visual_signature"]
+                q_norm = min(1.15, (cand.overall_taste_score + sc_cand.brief_match_boost * 0.45) / 10.0)
+
+                if selected_sigs:
+                    max_sim = max(float(np.dot(sig_c, s_sig)) for s_sig in selected_sigs)
+                else:
+                    max_sim = 0.0
+
+                cat_nov = 1.0 / (1.0 + cat_counts.get(cand.subject_category, 0))
+                scale_nov = 1.0 / (1.0 + scale_counts.get(sc_cand.shot_scale, 0))
+                pos_idx = index_pos_by_id.get(cand.subclip_id, 0)
+                t_bin = min(num_time_bins - 1, int(pos_idx * num_time_bins / max(1, total_photos)))
+                time_nov = 1.0 / (1.0 + tbin_counts.get(t_bin, 0))
+
+                gain = (
+                    0.50 * q_norm
+                    - 0.30 * max(0.0, max_sim)
+                    + 0.09 * cat_nov
+                    + 0.06 * scale_nov
+                    + 0.05 * time_nov
+                )
+                if gain > best_gain:
+                    best_gain = gain
+                    best_cand = cand
+
+            if best_cand is None:
+                break
+            chosen_ids.add(best_cand.subclip_id)
+            best_cand.mmr_diversity_score = round(float(best_gain), 4)
+            selected_sigs.append(perception_by_id[best_cand.subclip_id]["visual_signature"])
+            cat_counts[best_cand.subject_category] = cat_counts.get(best_cand.subject_category, 0) + 1
+            sc_b = subclip_by_id[best_cand.subclip_id]
+            scale_counts[sc_b.shot_scale] = scale_counts.get(sc_b.shot_scale, 0) + 1
+            b_pos = index_pos_by_id.get(best_cand.subclip_id, 0)
+            b_bin = min(num_time_bins - 1, int(b_pos * num_time_bins / max(1, total_photos)))
+            tbin_counts[b_bin] = tbin_counts.get(b_bin, 0) + 1
+
+        # Step 4: CIE-Lab Chromatic & Thematic Diptych Pairing for complementary vertical ('portrait') selects
         selected_items = [it for it in curated_items if it.subclip_id in chosen_ids]
         portrait_selects = [it for it in selected_items if it.orientation == "portrait"]
         absorbed_partner_ids: set[str] = set()
         if len(portrait_selects) >= 2:
-            p1, p2 = portrait_selects[0], portrait_selects[1]
-            p1.recommended_photo_mode = "diptych_frame"
-            p1.overlay_fx = "golden_light_leak"
-            p1.paired_with_subclip_id = p2.subclip_id
-            t1_short = p1.annotation_title.split("—")[0].strip()
-            t2_short = p2.annotation_title.split("—")[0].strip()
-            if t1_short != t2_short:
-                p1.annotation_title = f"Curated Diptych: {t1_short} & {t2_short}"
-                s1_short = p1.annotation_subtitle.split("·")[0].strip()
-                s2_short = p2.annotation_subtitle.split("·")[0].strip()
-                p1.annotation_subtitle = f"{s1_short} · {s2_short}"
-            absorbed_partner_ids.add(p2.subclip_id)
+            best_pair: Optional[tuple[CuratedPhotoItem, CuratedPhotoItem]] = None
+            best_pair_score = -1.0
+            best_lab_h = 0.0
+            for i_p in range(len(portrait_selects)):
+                for j_p in range(i_p + 1, len(portrait_selects)):
+                    cand_a, cand_b = portrait_selects[i_p], portrait_selects[j_p]
+                    perc_a = perception_by_id[cand_a.subclip_id]
+                    perc_b = perception_by_id[cand_b.subclip_id]
+                    lab_h = cie_lab_harmony_score(perc_a["lab_mean"], perc_b["lab_mean"])
+                    vis_sim = float(np.dot(perc_a["visual_signature"], perc_b["visual_signature"]))
+                    cat_match = 1.0 if cand_a.subject_category == cand_b.subject_category else 0.45
+                    pos_a = index_pos_by_id.get(cand_a.subclip_id, 0)
+                    pos_b = index_pos_by_id.get(cand_b.subclip_id, 0)
+                    prox = max(0.0, 1.0 - abs(pos_a - pos_b) / max(1, total_photos))
+                    q_avg = (cand_a.overall_taste_score + cand_b.overall_taste_score) / 20.0
+                    clone_pen = 0.35 if vis_sim > 0.90 else 0.0
+                    p_score = 0.52 * lab_h + 0.22 * cat_match + 0.14 * q_avg + 0.12 * prox - clone_pen
+                    if p_score > best_pair_score:
+                        best_pair_score = p_score
+                        best_lab_h = lab_h
+                        best_pair = (cand_a, cand_b)
+
+            if best_pair is not None and best_lab_h >= 0.45:
+                p1, p2 = best_pair
+                p1.recommended_photo_mode = "diptych_frame"
+                p1.overlay_fx = "golden_light_leak"
+                p1.paired_with_subclip_id = p2.subclip_id
+                t1_short = p1.annotation_title.split("-")[0].strip()
+                t2_short = p2.annotation_title.split("-")[0].strip()
+                if t1_short != t2_short:
+                    p1.annotation_title = f"Curated Diptych: {t1_short} & {t2_short}"
+                    s1_short = p1.annotation_subtitle.split("·")[0].strip()
+                    s2_short = p2.annotation_subtitle.split("·")[0].strip()
+                    p1.annotation_subtitle = f"{s1_short} · {s2_short}"
+                absorbed_partner_ids.add(p2.subclip_id)
 
         # Assign semantic AI-paired photo modes & atmospheric finishers to remaining primary selects,
         # honoring both the photo's visual content (portrait vs. fine art vs. culinary vs. skyline)
@@ -404,11 +538,17 @@ class PhotoCuratorAgent(BaseEditingAgent):
         default_fx_map: dict[str, str] = {
             "cinematic_depth_3d": "golden_light_leak",
             "parallax_gallery": "museum_spotlight",
-            "editorial_magazine": "none",
-            "curator_loupe": "museum_spotlight",
+            "editorial_magazine": "fine_art_rag_texture",
+            "curator_loupe": "velvet_vignette_rembrandt",
             "polaroid_scrapbook": "nostalgic_film_grain",
-            "triptych_cinematic": "none",
-            "cinema_anamorphic": "champagne_bokeh",
+            "triptych_cinematic": "fine_art_rag_texture",
+            "cinema_anamorphic": "anamorphic_streak",
+            "contact_sheet_zoom": "nostalgic_film_grain",
+            "split_diopter_focus": "anamorphic_streak",
+            "glassmorphic_pedestal": "prism_chromatic_edge",
+            "medium_format_slide": "golden_light_leak",
+            "floating_tilt_plate": "velvet_vignette_rembrandt",
+            "criterion_atelier_split": "fine_art_rag_texture",
             "gallery_frame": "museum_spotlight",
             "full_bleed": "golden_light_leak",
         }
@@ -425,6 +565,12 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 "polaroid_scrapbook",
                 "triptych_cinematic",
                 "cinema_anamorphic",
+                "contact_sheet_zoom",
+                "split_diopter_focus",
+                "glassmorphic_pedestal",
+                "medium_format_slide",
+                "floating_tilt_plate",
+                "criterion_atelier_split",
             ]
         client_overlays = set(brief.enabled_overlay_fx if brief and brief.enabled_overlay_fx else default_fx_map.values())
         allow_overlays = not ("none" in client_overlays and len(client_overlays) == 1)
@@ -441,41 +587,118 @@ class PhotoCuratorAgent(BaseEditingAgent):
             return "none"
 
         prev_assigned_mode = ""
+        mode_usage: dict[str, int] = {}
         for idx_sel, sel_it in enumerate(active_selects):
             if sel_it.recommended_photo_mode == "diptych_frame":
                 if not allow_overlays:
                     sel_it.overlay_fx = "none"
                 prev_assigned_mode = "diptych_frame"
+                mode_usage["diptych_frame"] = mode_usage.get("diptych_frame", 0) + 1
                 continue
 
             blob_low = f"{sel_it.annotation_title} {sel_it.annotation_subtitle} {sel_it.subject_category}".lower()
             if any(k in blob_low for k in ("mosaic", "sculpture", "relief", "painting", "stained glass", "dome", "carving", "fresco", "detail", "masterpiece")):
-                semantic_prefs = ["curator_loupe", "parallax_gallery", "editorial_magazine", "cinematic_depth_3d"]
+                semantic_prefs = [
+                    "split_diopter_focus",
+                    "curator_loupe",
+                    "glassmorphic_pedestal",
+                    "floating_tilt_plate",
+                    "parallax_gallery",
+                    "cinematic_depth_3d",
+                ]
             elif any(k in blob_low for k in ("culinary", "bakery", "cheese", "café", "cafe", "menu", "dining", "food", "pastry", "candid", "smile", "selfie")):
-                semantic_prefs = ["polaroid_scrapbook", "cinematic_depth_3d", "parallax_gallery", "editorial_magazine"]
+                semantic_prefs = [
+                    "polaroid_scrapbook",
+                    "medium_format_slide",
+                    "contact_sheet_zoom",
+                    "cinematic_depth_3d",
+                    "criterion_atelier_split",
+                    "parallax_gallery",
+                ]
             elif sel_it.subject_category == "family_portrait" or sel_it.portrait_warmth_score >= 8.9:
-                semantic_prefs = ["cinematic_depth_3d", "polaroid_scrapbook", "parallax_gallery", "editorial_magazine"]
+                semantic_prefs = [
+                    "cinematic_depth_3d",
+                    "medium_format_slide",
+                    "floating_tilt_plate",
+                    "polaroid_scrapbook",
+                    "glassmorphic_pedestal",
+                    "parallax_gallery",
+                ]
             elif any(k in blob_low for k in ("panorama", "skyline", "river", "waterfront", "twilight", "horizon", "illuminated", "night")):
-                semantic_prefs = ["cinema_anamorphic", "editorial_magazine", "parallax_gallery", "cinematic_depth_3d"]
+                semantic_prefs = [
+                    "cinema_anamorphic",
+                    "split_diopter_focus",
+                    "floating_tilt_plate",
+                    "editorial_magazine",
+                    "parallax_gallery",
+                    "cinematic_depth_3d",
+                ]
             else:
-                semantic_prefs = ["editorial_magazine", "parallax_gallery", "triptych_cinematic", "cinematic_depth_3d", "curator_loupe"]
+                semantic_prefs = [
+                    "criterion_atelier_split",
+                    "contact_sheet_zoom",
+                    "editorial_magazine",
+                    "glassmorphic_pedestal",
+                    "floating_tilt_plate",
+                    "triptych_cinematic",
+                    "parallax_gallery",
+                    "curator_loupe",
+                ]
 
-            # Filter by client-enabled modes and avoid consecutive identical modes
+            # Filter by client-enabled modes and balance choreographic variety across chapters
             valid_prefs = [m for m in semantic_prefs if m in client_modes]
             if not valid_prefs:
                 valid_prefs = list(client_modes)
 
-            chosen_mode = valid_prefs[0]
-            if chosen_mode == prev_assigned_mode and len(valid_prefs) > 1:
-                chosen_mode = valid_prefs[1]
-            elif chosen_mode == prev_assigned_mode and len(client_modes) > 1:
+            candidates = [m for m in valid_prefs if m != prev_assigned_mode]
+            if not candidates:
                 alt_modes = [m for m in client_modes if m != prev_assigned_mode]
-                chosen_mode = alt_modes[idx_sel % len(alt_modes)]
+                candidates = alt_modes if alt_modes else valid_prefs
+
+            rank_map = {m: r for r, m in enumerate(valid_prefs)}
+            chosen_mode = min(candidates, key=lambda m: (mode_usage.get(m, 0), rank_map.get(m, 999)))
+            mode_usage[chosen_mode] = mode_usage.get(chosen_mode, 0) + 1
 
             chosen_fx = _pick_overlay_for_mode(chosen_mode, idx_sel)
             sel_it.recommended_photo_mode = chosen_mode  # type: ignore[assignment]
             sel_it.overlay_fx = chosen_fx  # type: ignore[assignment]
             prev_assigned_mode = chosen_mode
+
+        multi_panel_modes = {"triptych_cinematic", "contact_sheet_zoom", "criterion_atelier_split", "polaroid_scrapbook"}
+
+        def _find_companion_sources(anchor_item: Any, primary_src: str) -> list[str]:
+            """Pick chromatically & thematically harmonious companion photo paths without cloning identical burst frames."""
+            anchor_perc = perception_by_id.get(anchor_item.subclip_id)
+            anchor_sc = subclip_by_id.get(anchor_item.subclip_id)
+
+            def _comp_score(cand: CuratedPhotoItem) -> float:
+                cand_perc = perception_by_id.get(cand.subclip_id)
+                cand_sc = subclip_by_id.get(cand.subclip_id)
+                if anchor_perc is None or cand_perc is None:
+                    return cand.overall_taste_score / 10.0
+                lab_h = cie_lab_harmony_score(anchor_perc["lab_mean"], cand_perc["lab_mean"])
+                vis_sim = float(np.dot(anchor_perc["visual_signature"], cand_perc["visual_signature"]))
+                cat_b = 0.22 if cand.subject_category == anchor_item.subject_category else 0.08
+                scale_comp = (
+                    0.18
+                    if (anchor_sc and cand_sc and anchor_sc.shot_scale != cand_sc.shot_scale)
+                    else 0.06
+                )
+                dup_pen = 0.45 if vis_sim > 0.92 else 0.0
+                return 0.48 * lab_h + cat_b + scale_comp + 0.12 * (cand.overall_taste_score / 10.0) - dup_pen
+
+            pool = sorted(curated_items, key=_comp_score, reverse=True)
+            found: list[str] = []
+            for cand in pool:
+                cand_sc = subclip_by_id.get(cand.subclip_id)
+                if cand_sc is None:
+                    continue
+                if cand_sc.source_path == primary_src or cand_sc.source_path in found:
+                    continue
+                found.append(cand_sc.source_path)
+                if len(found) >= 2:
+                    break
+            return found
 
         # Step 5: Sync curated selections, scores, modes, semantic transitions, and bilingual annotations back to media_index.subclips
         for item in curated_items:
@@ -490,7 +713,17 @@ class PhotoCuratorAgent(BaseEditingAgent):
             sc.overlay_fx = item.overlay_fx
             sc.recommended_transition = (
                 "dissolve"
-                if item.recommended_photo_mode in ("curator_loupe", "cinema_anamorphic", "triptych_cinematic", "diptych_frame")
+                if item.recommended_photo_mode
+                in (
+                    "curator_loupe",
+                    "cinema_anamorphic",
+                    "triptych_cinematic",
+                    "diptych_frame",
+                    "contact_sheet_zoom",
+                    "split_diopter_focus",
+                    "criterion_atelier_split",
+                    "floating_tilt_plate",
+                )
                 else "crossfade"
             )
             sc.ai_rationale = (
@@ -509,6 +742,14 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 if item.tertiary_subclip_id and item.tertiary_subclip_id in subclip_by_id:
                     tert_sc = subclip_by_id[item.tertiary_subclip_id]
                     sc.tertiary_source_path = tert_sc.source_path
+                if item.recommended_photo_mode in multi_panel_modes and (
+                    not sc.secondary_source_path or not sc.tertiary_source_path
+                ):
+                    companions = _find_companion_sources(item, sc.source_path)
+                    if not sc.secondary_source_path and len(companions) >= 1:
+                        sc.secondary_source_path = companions[0]
+                    if not sc.tertiary_source_path and len(companions) >= 2:
+                        sc.tertiary_source_path = companions[1]
             elif item.subclip_id in absorbed_partner_ids:
                 item.is_selected = True
                 item.rejection_reason = None

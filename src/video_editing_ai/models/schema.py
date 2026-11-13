@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal, Optional
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 PhotoModeType = Literal[
     "gallery_frame",
@@ -19,6 +19,12 @@ PhotoModeType = Literal[
     "curator_loupe",
     "editorial_magazine",
     "cinema_anamorphic",
+    "contact_sheet_zoom",
+    "split_diopter_focus",
+    "glassmorphic_pedestal",
+    "medium_format_slide",
+    "floating_tilt_plate",
+    "criterion_atelier_split",
 ]
 
 PhotoOverlayFxType = Literal[
@@ -27,6 +33,10 @@ PhotoOverlayFxType = Literal[
     "champagne_bokeh",
     "museum_spotlight",
     "nostalgic_film_grain",
+    "anamorphic_streak",
+    "prism_chromatic_edge",
+    "velvet_vignette_rembrandt",
+    "fine_art_rag_texture",
 ]
 
 VALID_PHOTO_MODES: tuple[str, ...] = (
@@ -40,6 +50,12 @@ VALID_PHOTO_MODES: tuple[str, ...] = (
     "curator_loupe",
     "editorial_magazine",
     "cinema_anamorphic",
+    "contact_sheet_zoom",
+    "split_diopter_focus",
+    "glassmorphic_pedestal",
+    "medium_format_slide",
+    "floating_tilt_plate",
+    "criterion_atelier_split",
 )
 
 VALID_PHOTO_OVERLAY_FX: tuple[str, ...] = (
@@ -48,6 +64,10 @@ VALID_PHOTO_OVERLAY_FX: tuple[str, ...] = (
     "champagne_bokeh",
     "museum_spotlight",
     "nostalgic_film_grain",
+    "anamorphic_streak",
+    "prism_chromatic_edge",
+    "velvet_vignette_rembrandt",
+    "fine_art_rag_texture",
 )
 
 
@@ -93,9 +113,15 @@ class VideoAsset(BaseModel):
     height: int = Field(default=1080)
     fps: float = Field(default=30.0)
     codec: str = Field(default="h264")
+    color_primaries: str = Field(default="bt709")
     color_transfer: str = Field(default="bt709", description="e.g., arib-std-b67 (HLG), smpte2084 (PQ), bt709")
     color_space: str = Field(default="bt709")
+    pix_fmt: str = Field(default="yuv420p")
     has_audio: bool = Field(default=True)
+    integrated_lufs: float = Field(default=-24.0)
+    snr_db: float = Field(default=22.0)
+    has_diegetic_music: bool = Field(default=False)
+    file_hash: str = Field(default="")
     creation_time: Optional[str] = Field(default=None)
     gps_lat: Optional[float] = Field(default=None, description="Decimal latitude extracted from metadata")
     gps_lon: Optional[float] = Field(default=None, description="Decimal longitude extracted from metadata")
@@ -222,6 +248,19 @@ class CreativeBrief(BaseModel):
         "upbeat_montage",
         "dialogue_story",
     ] = Field(default="family_keepsake_4act")
+    story_arc_mode: Literal[
+        "chronological_cinema",
+        "hero_journey",
+        "thematic_essay",
+        "high_energy_reel",
+    ] = Field(
+        default="chronological_cinema",
+        description=(
+            "Dramaturgical story structuring mode: 'chronological_cinema' (real-world macro order + Five-Shot intra-chapter grammar), "
+            "'hero_journey' (arrival -> discovery -> wonder climax -> warm return), "
+            "'thematic_essay' (semantic/visual motif chapters), or 'high_energy_reel' (prosody/chorus peak reel)"
+        ),
+    )
     tone: Literal["warm_joyful", "energetic_fun", "cinematic_nostalgic", "playful_comedy"] = Field(
         default="warm_joyful"
     )
@@ -246,6 +285,12 @@ class CreativeBrief(BaseModel):
             "editorial_magazine",
             "parallax_gallery",
             "diptych_frame",
+            "contact_sheet_zoom",
+            "split_diopter_focus",
+            "glassmorphic_pedestal",
+            "medium_format_slide",
+            "floating_tilt_plate",
+            "criterion_atelier_split",
         ],
         description="Multi-selected photo presentation modes choreographed across chapters",
     )
@@ -255,6 +300,10 @@ class CreativeBrief(BaseModel):
             "museum_spotlight",
             "champagne_bokeh",
             "nostalgic_film_grain",
+            "anamorphic_streak",
+            "prism_chromatic_edge",
+            "velvet_vignette_rembrandt",
+            "fine_art_rag_texture",
         ],
         description="Multi-selected atmospheric photo finishers",
     )
@@ -306,7 +355,28 @@ class CulledSubClip(BaseModel):
     normalized_timestamp: str = Field(..., description="ISO-8601 timestamp normalized across cameras")
     in_tc: float = Field(default=0.0, ge=0.0)
     out_tc: float = Field(default=3.0, gt=0.0)
+    golden_in: Optional[float] = Field(
+        default=None, description="Recommended 2.0-4.5s golden-window in-point (defaults to in_tc)"
+    )
+    golden_out: Optional[float] = Field(
+        default=None, description="Recommended 2.0-4.5s golden-window out-point (defaults to out_tc)"
+    )
+    usable_in: Optional[float] = Field(
+        default=None, description="Earliest uncorrupted stable trim handle (usable_in <= golden_in)"
+    )
+    usable_out: Optional[float] = Field(
+        default=None, description="Latest uncorrupted stable trim handle (golden_out <= usable_out)"
+    )
     duration: float = Field(default=3.0, gt=0.0)
+    color_primaries: str = Field(default="bt709")
+    color_trc: str = Field(default="bt709")
+    color_space: str = Field(default="bt709")
+    pix_fmt: str = Field(default="yuv420p")
+    integrated_lufs: float = Field(default=-24.0, description="Measured integrated loudness (LUFS)")
+    snr_db: float = Field(default=22.0, description="Estimated speech/signal-to-noise ratio in dB")
+    has_diegetic_music: bool = Field(
+        default=False, description="True if live music, singing, or stage performance is present in clip audio"
+    )
     roll_type: Literal["a_roll", "b_roll", "still"] = Field(default="b_roll")
     shot_scale: Literal["wide", "medium", "closeup"] = Field(default="medium")
     camera_movement: Literal["static", "pan_left", "pan_right", "tilt_up", "walk_forward"] = Field(default="static")
@@ -348,7 +418,43 @@ class CulledSubClip(BaseModel):
     )
     is_discarded: bool = Field(default=False)
     discard_reason: Optional[str] = Field(default=None)
+    stability_score: float = Field(
+        default=0.85, ge=0.0, le=1.0, description="Optical-flow camera stability & motion smoothness score (0..1)"
+    )
+    expression_score: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="Human portrait/smile/candid expression salience score (0..1)"
+    )
+    eye_open_score: float = Field(
+        default=1.0, ge=0.0, le=1.0, description="Open-eye vs. blink confidence for detected faces (0..1)"
+    )
+    prosody_excitement_score: float = Field(
+        default=0.3, ge=0.0, le=1.0, description="Acoustic laughter, cheer, or vocal excitement peak score (0..1)"
+    )
+    is_filler_utterance: bool = Field(
+        default=False, description="True if spoken audio is camera-operator logistical filler ('is it recording', etc.)"
+    )
+    gps_lat: Optional[float] = Field(default=None, description="Optional GPS latitude in decimal degrees")
+    gps_lon: Optional[float] = Field(default=None, description="Optional GPS longitude in decimal degrees")
     words: list[WordTimestamp] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_elastic_handles(self) -> "CulledSubClip":
+        if self.golden_in is None:
+            self.golden_in = round(max(0.0, float(self.in_tc)), 3)
+        if self.golden_out is None:
+            self.golden_out = round(max(self.golden_in + 0.1, float(self.out_tc)), 3)
+        if self.golden_out <= self.golden_in:
+            self.golden_out = round(self.golden_in + max(0.5, float(self.duration)), 3)
+        if self.usable_in is None:
+            self.usable_in = round(max(0.0, min(self.golden_in, float(self.in_tc))), 3)
+        else:
+            self.usable_in = round(max(0.0, min(float(self.usable_in), self.golden_in)), 3)
+        if self.usable_out is None:
+            default_tail = self.golden_out + (2.0 if self.media_type == "photo" else 0.0)
+            self.usable_out = round(max(self.golden_out, float(self.out_tc), default_tail), 3)
+        else:
+            self.usable_out = round(max(float(self.usable_out), self.golden_out), 3)
+        return self
 
 
 class BGMCandidate(BaseModel):
@@ -415,6 +521,10 @@ class CuratedPhotoItem(BaseModel):
     overlay_fx: PhotoOverlayFxType = "none"
     paired_with_subclip_id: Optional[str] = None
     tertiary_subclip_id: Optional[str] = None
+    eye_open_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    smile_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    blur_type: Literal["crisp_all", "intentional_bokeh", "motion_or_defocus_blur"] = "crisp_all"
+    mmr_diversity_score: float = Field(default=0.0, description="Submodular MMR portfolio novelty & relevance gain")
     curation_rationale: str = ""
 
 
@@ -510,14 +620,45 @@ class ChapterPlan(BaseModel):
     subtitle: str = ""
     location_tag: str = "Park"
     time_of_day: Literal["morning", "afternoon", "twilight", "night"] = "afternoon"
-    editing_mode: Literal["dialogue_with_broll", "music_montage"] = "dialogue_with_broll"
+    editing_mode: Literal["dialogue_with_broll", "music_montage", "hybrid"] = "dialogue_with_broll"
     photo_integration_mode: Literal["beat_burst", "ken_burns_pause"] = "ken_burns_pause"
     selected_subclip_ids: list[str] = Field(default_factory=list)
+    candid_reaction_ids: list[str] = Field(
+        default_factory=list,
+        description="Short candid spoken reactions (1.5-4.0s) punching through a hybrid montage chapter",
+    )
     broll_anchor_map: dict[str, list[str]] = Field(
         default_factory=dict,
         description="Maps V1 A-roll subclip_id -> list of V2 B-roll/photo cutaway subclip_ids",
     )
+    story_stage: Literal[
+        "hook_arrival",
+        "rising_discovery",
+        "midpoint_wonder",
+        "intimate_connection",
+        "climax_highlight",
+        "warm_resolution",
+    ] = Field(default="rising_discovery", description="Dramaturgical stage within the overall narrative arc")
+    target_energy: float = Field(
+        default=0.6, ge=0.0, le=1.0, description="Target musical/emotional pacing energy (0..1) for this chapter"
+    )
+    shot_grammar_sequence: list[str] = Field(
+        default_factory=list,
+        description="Assigned Five-Shot cinematic grammar role per subclip (e.g., 'establishing_wide', 'aroll_anchor', 'detail_weave', 'resolving_button')",
+    )
     narrative_goal: str = ""
+
+
+class ColdOpenHookSlot(BaseModel):
+    """Optional 00:00-00:06 peak emotional/visual teaser slot at the front of paper_edit.json."""
+
+    enabled: bool = True
+    subclip_id: Optional[str] = None
+    in_tc: float = 0.0
+    out_tc: float = 3.8
+    target_window_sec: tuple[float, float] = (0.0, 6.0)
+    caption: str = ""
+    rationale: str = ""
 
 
 class PaperEdit(BaseModel):
@@ -525,6 +666,16 @@ class PaperEdit(BaseModel):
 
     project_title: str
     story_arc_summary: str
+    story_arc_mode: Literal[
+        "chronological_cinema",
+        "hero_journey",
+        "thematic_essay",
+        "high_energy_reel",
+    ] = Field(default="chronological_cinema")
+    cold_open_hook: Optional[ColdOpenHookSlot] = Field(
+        default=None,
+        description="Optional structured 00:00-00:06 peak emotional/visual teaser hook slot",
+    )
     cold_open_subclip_id: Optional[str] = Field(
         default=None,
         description="Optional subclip_id selected for the 0.0s-3.8s Cold-Open Teaser Hook before the Title Card",
@@ -608,8 +759,21 @@ class DirectorReviewReport(BaseModel):
         return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+class RevisionDirective(BaseModel):
+    """Structured chapter-scoped revision directive emitted by Stage 50/60 back to Stage 20/30/35 editors."""
+
+    directive_id: str
+    source_role_id: str = Field(default="showrunner")
+    target_role_id: str = Field(..., description="Target upstream editor role_id (e.g. montage_editor, dialogue_editor)")
+    chapter_id: Optional[str] = Field(default=None, description="Scoped chapter_id to re-cut without disturbing other chapters")
+    reason: str
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    revision_round: int = Field(default=1, ge=1, le=5)
+    resolved: bool = Field(default=False)
+
+
 class PacingAuditEntry(BaseModel):
-    """A single pacing or brief-compliance intervention recorded by Agent 5 (ShowrunnerAgent)."""
+    """A single pacing or brief-compliance check recorded by Stage 50 (ShowrunnerAgent)."""
 
     rule_name: str
     action_taken: Literal[
@@ -618,13 +782,17 @@ class PacingAuditEntry(BaseModel):
         "injected_chapter_title",
         "verified_must_have",
         "requested_revision",
+        "flagged_long_broll",
+        "flagged_consecutive_stills",
+        "flagged_timeline_gap_or_overlap",
+        "emitted_revision_directive",
     ]
     target_clip_id: str
     details: str
 
 
 class PacingAuditReport(BaseModel):
-    """Agent 5 Output (pacing_audit.json): Pacing critic audit report and inter-agent coordination log."""
+    """Agent 5 Output (pacing_audit.json): Deterministic compliance & pacing validator report."""
 
     passed_brief_compliance: bool = True
     revision_rounds_executed: int = 0
@@ -632,6 +800,10 @@ class PacingAuditReport(BaseModel):
     average_shot_length_after: float = 0.0
     total_cuts_before: int = 0
     total_cuts_after: int = 0
+    consecutive_stills_violations: int = 0
+    long_broll_violations: int = 0
+    gap_or_overlap_violations: int = 0
+    revision_directives_emitted: list[RevisionDirective] = Field(default_factory=list)
     entries: list[PacingAuditEntry] = Field(default_factory=list)
     coordination_log: list[AgentCoordinationMessage] = Field(default_factory=list)
 
@@ -669,20 +841,32 @@ class KenBurnsConfig(BaseModel):
     mode: PhotoModeType = Field(
         default="parallax_gallery",
         description=(
-            "'parallax_gallery' renders a 2.5D multi-plane counter-panning backdrop + double museum matte frame; "
-            "'cinematic_depth_3d' separates foreground subject from background with bokeh rack-focus parallax; "
-            "'triptych_cinematic' animates a 3-panel staggered storyboard reveal; "
-            "'polaroid_scrapbook' renders tilted vintage instant-film print(s) with organic rotation; "
-            "'curator_loupe' glides an optical 1.65x magnifying glass spotlight across key details; "
-            "'editorial_magazine' creates an asymmetric 62/38 luxury magazine spread; "
-            "'cinema_anamorphic' frames a 2.39:1 widescreen letterbox with 35mm highlight halation; "
-            "'diptych_frame' pairs two photos side-by-side; 'gallery_frame' renders a classic gallery frame; "
-            "'full_bleed' crops to fill the canvas."
+            "One of 16 curated photo presentation modes: "
+            "'parallax_gallery' (2.5D multi-plane counter-panning matte), "
+            "'cinematic_depth_3d' (foreground depth-mask parallax + rack-focus bokeh), "
+            "'triptych_cinematic' (3-panel staggered storyboard reveal), "
+            "'polaroid_scrapbook' (tilted vintage instant-film print stack), "
+            "'curator_loupe' (1.65x optical magnifying spotlight), "
+            "'editorial_magazine' (62/38 luxury monograph spread), "
+            "'cinema_anamorphic' (2.39:1 widescreen letterbox + halation), "
+            "'contact_sheet_zoom' (3x2 darkroom contact sheet -> hero push-in), "
+            "'split_diopter_focus' (54/46 wide context + 2.2x optical macro split), "
+            "'glassmorphic_pedestal' (frosted acrylic vitrine with live backdrop blur), "
+            "'medium_format_slide' (120 transparency mount with notches & rebate stamp), "
+            "'floating_tilt_plate' (3D projective homography perspective orbit), "
+            "'criterion_atelier_split' (3-viewport asymmetric architectural bento grid), "
+            "'diptych_frame' (side-by-side paired portrait split), "
+            "'gallery_frame' (classic floating gallery frame), "
+            "'full_bleed' (full-screen 16:9 Ken Burns)."
         ),
     )
     overlay_fx: PhotoOverlayFxType = Field(
         default="none",
-        description="Composable atmospheric finisher: 'none', 'golden_light_leak', 'champagne_bokeh', 'museum_spotlight', or 'nostalgic_film_grain'",
+        description=(
+            "Composable atmospheric finisher: 'none', 'golden_light_leak', 'champagne_bokeh', "
+            "'museum_spotlight', 'nostalgic_film_grain', 'anamorphic_streak', "
+            "'prism_chromatic_edge', 'velvet_vignette_rembrandt', or 'fine_art_rag_texture'"
+        ),
     )
     preset: Literal[
         "zoom_in",
@@ -700,10 +884,12 @@ class KenBurnsConfig(BaseModel):
     end_center: tuple[float, float] = Field(default=(0.5, 0.48))
     border_px: int = Field(default=16, description="White gallery frame border width in pixels (at 1080p scale)")
     secondary_source: Optional[str] = Field(
-        default=None, description="Optional second photo file path for diptych_frame / polaroid_scrapbook / triptych_cinematic"
+        default=None,
+        description="Optional second photo file path for diptych_frame / polaroid_scrapbook / triptych_cinematic / contact_sheet_zoom / criterion_atelier_split",
     )
     tertiary_source: Optional[str] = Field(
-        default=None, description="Optional third photo file path for 3-panel triptych_cinematic layout"
+        default=None,
+        description="Optional third photo file path for 3-panel triptych_cinematic / contact_sheet_zoom / criterion_atelier_split layouts",
     )
     caption_title: Optional[str] = Field(
         default=None, description="Curated subject/artwork/landmark title displayed on the museum plaque"
@@ -803,6 +989,7 @@ class TitleOverlayItem(BaseModel):
         "dialogue_badge",
         "closing_card",
         "route_map_card",
+        "exif_stamp",
     ] = Field(default="lower_third")
     text: str = Field(..., description="Primary title or callout headline")
     subtitle: Optional[str] = Field(default=None, description="Secondary line or English/bilingual subtitle")
@@ -811,6 +998,10 @@ class TitleOverlayItem(BaseModel):
     fade_in: float = Field(default=0.35, ge=0.0)
     fade_out: float = Field(default=0.35, ge=0.0)
     accent_color: str = Field(default="#E8E4DC", description="Hex color for subtle pearl/alabaster highlight")
+    hdr_safe: bool = Field(
+        default=False,
+        description="When True, clamps RGBA peak white & drop-shadow alpha to HLG diffuse white (~203 nits)",
+    )
     map_waypoints: list[dict[str, Any]] = Field(
         default_factory=list,
         description="Optional route waypoints [{'label': '...', 'active': True, 'lat': ..., 'lon': ...}] for route_map_card",
@@ -1097,3 +1288,409 @@ class EditTimeline(BaseModel):
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         return cls.model_validate(data)
+
+
+# ============================================================================
+# Upgraded Pipeline Contracts (DIT Ingest, Cast, Color, Mix, Graphics, Visual QC)
+# ============================================================================
+
+
+class DITIngestEntry(BaseModel):
+    """Technical media probe & clock-drift normalized record cached by Stage 05 DITIngestAgent."""
+
+    asset_id: str
+    source_path: str
+    filename: str
+    media_type: Literal["video", "photo", "audio"]
+    file_size_bytes: int = 0
+    mtime_ns: int = 0
+    file_hash: str = ""
+    cache_hit: bool = False
+    creation_time_raw: Optional[str] = None
+    normalized_timestamp: str = ""
+    camera_id: str = "primary_cam"
+    clock_offset_sec: float = 0.0
+    duration: float = 0.0
+    width: int = 1920
+    height: int = 1080
+    fps: float = 30.0
+    codec: str = "h264"
+    color_primaries: str = "bt709"
+    color_trc: str = "bt709"
+    color_space: str = "bt709"
+    pix_fmt: str = "yuv420p"
+    is_hdr: bool = False
+    is_log: bool = False
+    has_audio: bool = False
+    integrated_lufs: float = -24.0
+    snr_db: float = 22.0
+    has_diegetic_music: bool = False
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    camera_make_model: Optional[str] = None
+    exif_summary: Optional[str] = None
+    color_stats: dict[str, float] = Field(default_factory=dict)
+
+
+class DITIngestManifest(BaseModel):
+    """Stage 05 Output (dit_manifest.json): Deterministic media probing & clock-drift normalization manifest."""
+
+    source_directory: str
+    created_at: str
+    cache_hits_count: int = 0
+    cache_misses_count: int = 0
+    camera_clock_offsets_sec: dict[str, float] = Field(default_factory=dict)
+    entries: list[DITIngestEntry] = Field(default_factory=list)
+
+    @property
+    def cache_hits(self) -> int:
+        return self.cache_hits_count
+
+    @property
+    def cache_misses(self) -> int:
+        return self.cache_misses_count
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "DITIngestManifest":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class UtteranceLanguageTag(BaseModel):
+    """Per-utterance spoken language classification and speaker assignment."""
+
+    subclip_id: str
+    start_sec: float = 0.0
+    end_sec: float = 1.0
+    language: Literal["zh", "en", "mixed", "other"] = "en"
+    speaker_id: str = "cast_01"
+    text: str = ""
+
+
+class SubclipSubjectDetection(BaseModel):
+    """Normalized subject/face bounding box [x1, y1, x2, y2] in [0, 1] for face-safe reframing."""
+
+    subclip_id: str
+    media_type: Literal["video", "photo"] = "photo"
+    bbox: tuple[float, float, float, float] = (0.28, 0.14, 0.72, 0.72)
+    face_center: tuple[float, float] = (0.50, 0.34)
+    cast_ids: list[str] = Field(default_factory=list)
+    detector: str = "haar_or_saliency"
+
+
+class CastSubjectEntry(BaseModel):
+    """Recurring speaker or on-camera family/cast member tracked across media_index.json."""
+
+    cast_id: str
+    label: str
+    appearance_subclip_ids: list[str] = Field(default_factory=list)
+    primary_languages: list[str] = Field(default_factory=list)
+    utterance_count: int = 0
+    representative_bbox: tuple[float, float, float, float] = (0.28, 0.14, 0.72, 0.72)
+
+
+class CastManifest(BaseModel):
+    """Stage 15 Output (cast_manifest.json): Recurring speakers/faces, utterance languages, and face bounding boxes."""
+
+    project_title: str
+    recurring_cast_count: int = 0
+    languages_detected: list[str] = Field(default_factory=list)
+    cast_members: list[CastSubjectEntry] = Field(default_factory=list)
+    utterances: list[UtteranceLanguageTag] = Field(default_factory=list)
+    subclip_detections: dict[str, SubclipSubjectDetection] = Field(default_factory=dict)
+
+    @property
+    def recurring_subjects(self) -> list[CastSubjectEntry]:
+        return self.cast_members
+
+    @property
+    def utterance_languages(self) -> list[UtteranceLanguageTag]:
+        return self.utterances
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "CastManifest":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class ClipColorTransform(BaseModel):
+    """Per-clip color-space classification & 10-bit HLG diffuse-white transform specification."""
+
+    clip_id: str
+    source_path: str
+    media_type: Literal["video", "photo"] = "video"
+    input_classification: Literal[
+        "bt2020_hlg_10bit",
+        "bt2020_pq_10bit",
+        "camera_log",
+        "sdr_bt709_8bit",
+        "srgb_still",
+    ] = "sdr_bt709_8bit"
+    transform_mode: str = "zscale_sdr_to_hlg_203nits"
+    color_primaries: str = "bt709"
+    color_trc: str = "bt709"
+    color_space: str = "bt709"
+    pix_fmt: str = "yuv420p"
+    target_trc: str = "arib-std-b67"
+    target_diffuse_white_nits: float = 203.0
+    hdr_diffuse_white_nits: float = 203.0
+    hdr_signal_ceiling: float = 0.75
+    chapter_look: str = "archival_kodak_2383"
+    wb_red_shift: float = 0.0
+    wb_green_shift: float = 0.0
+    wb_blue_shift: float = 0.0
+    contrast: float = 1.04
+    saturation: float = 1.04
+    gamma: float = 1.00
+    ffmpeg_filters: list[str] = Field(default_factory=list)
+    ffmpeg_hdr_filters: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def _sync_color_fields(self) -> "ClipColorTransform":
+        if self.ffmpeg_filters and not self.ffmpeg_hdr_filters:
+            self.ffmpeg_hdr_filters = list(self.ffmpeg_filters)
+        elif self.ffmpeg_hdr_filters and not self.ffmpeg_filters:
+            self.ffmpeg_filters = list(self.ffmpeg_hdr_filters)
+        return self
+
+    @property
+    def input_color_class(self) -> str:
+        return self.input_classification
+
+
+class ColorTransformManifest(BaseModel):
+    """Stage 40 Output (color_transform_manifest.json): Per-clip SDR/Log/HLG color pipeline manifest."""
+
+    project_title: str
+    hdr_delivery: bool = True
+    target_transfer: str = "arib-std-b67"
+    target_primaries: str = "bt2020"
+    diffuse_white_nits: float = 203.0
+    primary_film_stock_look: str = "archival_kodak_2383"
+    zscale_available: bool = True
+    shots_classified_count: int = 0
+    clips: list[ClipColorTransform] = Field(default_factory=list)
+    transforms: list[ClipColorTransform] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_transform_lists(self) -> "ColorTransformManifest":
+        if self.clips and not self.transforms:
+            self.transforms = list(self.clips)
+        elif self.transforms and not self.clips:
+            self.clips = list(self.transforms)
+        if self.shots_classified_count == 0 and self.clips:
+            self.shots_classified_count = len(self.clips)
+        return self
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "ColorTransformManifest":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class ClipAudioMixEntry(BaseModel):
+    """Per-clip dialogue loudness normalization & crossfade specification."""
+
+    clip_id: str
+    roll_type: Literal["a_roll", "b_roll", "still"] = "b_roll"
+    role_type: str = "b_roll"
+    measured_lufs: float = -24.0
+    target_lufs: float = -14.0
+    applied_gain_db: float = 0.0
+    linear_volume: float = 1.0
+    has_diegetic_music: bool = False
+    crossfade_sec: float = 0.33
+    rationale: str = ""
+
+
+class DuckingEnvelopeSegment(BaseModel):
+    """Frame-accurate BGM attenuation segment generated by Stage 40 SoundDesignerMixerAgent."""
+
+    start_sec: float = 0.0
+    end_sec: float = 1.0
+    mode: Literal["speech_duck", "nat_sound_bed", "diegetic_music_mute", "full_bgm"] = "full_bgm"
+    bgm_attenuation_db: float = 0.0
+    bgm_linear_gain: float = 1.0
+    trigger_clip_id: Optional[str] = None
+    reason: str = ""
+
+
+class AudioMixManifest(BaseModel):
+    """Stage 40 Output (audio_mix_manifest.json): Post-assembly dialogue LUFS, BGM ducking, and diegetic muting."""
+
+    project_title: str
+    target_dialogue_lufs: float = -14.0
+    dialogue_target_lufs: float = -14.0
+    nat_sound_bed_db: float = -20.0
+    bgm_speech_duck_db: float = -14.0
+    speech_duck_db: float = -14.0
+    bgm_diegetic_duck_db: float = -30.0
+    diegetic_music_duck_db: float = -30.0
+    default_crossfade_sec: float = 0.33
+    diegetic_music_clips_muted: int = 0
+    clip_mix: list[ClipAudioMixEntry] = Field(default_factory=list)
+    ducking_envelope: list[DuckingEnvelopeSegment] = Field(default_factory=list)
+    bgm_ducking_segments: list[DuckingEnvelopeSegment] = Field(default_factory=list)
+    ambient_beds_count: int = 0
+    foley_accents_count: int = 0
+
+    @model_validator(mode="after")
+    def _sync_ducking_lists(self) -> "AudioMixManifest":
+        if self.ducking_envelope and not self.bgm_ducking_segments:
+            self.bgm_ducking_segments = list(self.ducking_envelope)
+        elif self.bgm_ducking_segments and not self.ducking_envelope:
+            self.ducking_envelope = list(self.bgm_ducking_segments)
+        return self
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "AudioMixManifest":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class GraphicsOverlaySpec(BaseModel):
+    """Consolidated Track V3 graphic overlay entry in graphics_manifest.json."""
+
+    overlay_id: str
+    style: Literal[
+        "opening_card",
+        "act_banner",
+        "lower_third",
+        "dialogue_badge",
+        "closing_card",
+        "route_map_card",
+        "exif_stamp",
+    ] = "lower_third"
+    overlay_kind: str = "lower_third"
+    text: str
+    subtitle: str = ""
+    timeline_start: float = 0.0
+    duration: float = 3.2
+    hdr_safe_clamped: bool = True
+    peak_rgb_limit: int = 192
+    peak_rgb_clamped: tuple[int, int, int] = (192, 192, 192)
+    shadow_alpha_cap: int = 152
+    bbox_norm: tuple[float, float, float, float] | list[float] = (0.10, 0.72, 0.90, 0.88)
+    rationale: str = ""
+
+
+class GraphicsManifest(BaseModel):
+    """Stage 40 Output (graphics_manifest.json): Consolidated Track V3 overlays & bilingual subtitle typography."""
+
+    project_title: str
+    hdr_safe_mode: bool = True
+    hdr_safe_clamping: bool = True
+    hdr_peak_code_value_8bit: int = 192
+    primary_font_family: str = "PingFang SC"
+    secondary_font_family: str = "Avenir Next"
+    subtitle_count: int = 0
+    bilingual_subtitles_count: int = 0
+    overlays_count: int = 0
+    overlays: list[GraphicsOverlaySpec] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_graphics_counts(self) -> "GraphicsManifest":
+        self.hdr_safe_clamping = self.hdr_safe_mode
+        if self.overlays_count == 0 and self.overlays:
+            self.overlays_count = len(self.overlays)
+        if self.bilingual_subtitles_count == 0 and self.subtitle_count > 0:
+            self.bilingual_subtitles_count = self.subtitle_count
+        return self
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "GraphicsManifest":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class VisualQCIssue(BaseModel):
+    """A visual or cut-boundary defect detected by Stage 55 ProxyWatchdownQCAgent."""
+
+    issue_id: str = ""
+    issue_type: Literal["black_flash", "frozen_frame", "overlay_overlap", "clipped_luminance", "audio_spike"] = (
+        "overlay_overlap"
+    )
+    category: Optional[str] = None
+    severity: Literal["info", "warning", "error", "critical"] = "warning"
+    timeline_sec: float = 0.0
+    timestamp_sec: float = 0.0
+    chapter_id: Optional[str] = None
+    clip_id: Optional[str] = None
+    measured_value: float = 0.0
+    details: str = ""
+    description: str = ""
+    auto_remediated: bool = False
+
+    @model_validator(mode="after")
+    def _sync_issue_fields(self) -> "VisualQCIssue":
+        if not self.category:
+            self.category = self.issue_type
+        if self.timeline_sec > 0.0 and self.timestamp_sec == 0.0:
+            self.timestamp_sec = self.timeline_sec
+        if self.details and not self.description:
+            self.description = self.details
+        elif self.description and not self.details:
+            self.details = self.description
+        return self
+
+
+class VisualQCReport(BaseModel):
+    """Stage 55 Output (visual_qc_report.json): Proxy boundary & overlay QC watchdown report."""
+
+    project_title: str
+    passed_qc: bool = True
+    passed: bool = True
+    proxy_frames_sampled: int = 0
+    sampled_cut_boundaries: int = 0
+    sampled_overlay_frames: int = 0
+    black_flashes_detected: int = 0
+    black_flash_count: int = 0
+    frozen_frames_detected: int = 0
+    frozen_frame_count: int = 0
+    overlay_overlaps_detected: int = 0
+    overlay_overlap_count: int = 0
+    clipped_luminance_blocks_detected: int = 0
+    clipped_luminance_count: int = 0
+    audio_cut_spikes_detected: int = 0
+    audio_spike_count: int = 0
+    issues: list[VisualQCIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_qc_counts(self) -> "VisualQCReport":
+        self.passed = self.passed_qc
+        self.black_flash_count = max(self.black_flash_count, self.black_flashes_detected)
+        self.frozen_frame_count = max(self.frozen_frame_count, self.frozen_frames_detected)
+        self.overlay_overlap_count = max(self.overlay_overlap_count, self.overlay_overlaps_detected)
+        self.clipped_luminance_count = max(self.clipped_luminance_count, self.clipped_luminance_blocks_detected)
+        self.audio_spike_count = max(self.audio_spike_count, self.audio_cut_spikes_detected)
+        return self
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "VisualQCReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))

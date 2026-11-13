@@ -280,20 +280,36 @@ def generate_intake_questions(
             question="3. Premium Photo Presentation Effects Suite (Multi-Select — Pick all styles to choreograph across chapters)",
             options=[
                 "cinematic_depth_3d (Recommended) — 3-Plane Subject Depth-Mask Parallax & Bokeh Rack-Focus (Hero Landmarks & Sculptures)",
+                "split_diopter_focus (Recommended) — A24 Split-Diopter 54/46 Wide Context + 2.2x Optical Macro Detail",
+                "contact_sheet_zoom (Recommended) — Magnum 3x2 Darkroom Contact Sheet Proof -> Eased Push-In onto Hero Frame",
+                "glassmorphic_pedestal (Recommended) — Apple VisionOS / Museum Frosted Acrylic Vitrine Card with Live Backdrop Blur",
+                "medium_format_slide (Recommended) — Hasselblad 120 Transparency Slide Mount with V-Notches & Archival Rebate Stamp",
+                "floating_tilt_plate (Recommended) — True 3D Perspective Homography Orbit Plate with Detached Floor Shadow",
+                "criterion_atelier_split (Recommended) — Criterion / Kinfolk 3-Viewport Asymmetric Bento Exhibition Grid",
                 "triptych_cinematic (Recommended) — 3-Panel Staggered Storyboard Triptych (Culinary Courses & Architectural Sequences)",
                 "polaroid_scrapbook (Recommended) — Tilted Vintage Instant-Film Polaroid Stack (Candid Selfies, Café & Keepsakes)",
                 "curator_loupe (Recommended) — 1.65x Optical Magnifying Glass Spotlight (Architectural Carvings, Menus & Artworks)",
                 "editorial_magazine (Recommended) — Asymmetric 62/38 Luxury Architectural Monograph Spread (Chapter Openers)",
-                "cinema_anamorphic (Recommended) — 2.39:1 CinemaScope Widescreen Letterbox with 35mm Highlight Halation (Waterfront & City Panoramas)",
+                "cinema_anamorphic (Recommended) — 2.39:1 CinemaScope Widescreen Letterbox with 35mm Highlight Halation",
                 "parallax_gallery (Recommended) — 2.5D Counter-Panning Double Archival Matte Frame",
                 "diptych_frame (Recommended) — Side-by-Side Vertical Portrait Diptych Split-Screen",
                 "gallery_frame — Classic Static Floating Gallery Frame",
                 "full_bleed — Full-Screen 16:9 Crop with Classic Ken Burns Pan/Zoom",
             ],
-            default_answer="cinematic_depth_3d,triptych_cinematic,polaroid_scrapbook,curator_loupe,editorial_magazine,cinema_anamorphic,parallax_gallery,diptych_frame",
+            default_answer=(
+                "cinematic_depth_3d,split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,"
+                "medium_format_slide,floating_tilt_plate,criterion_atelier_split,triptych_cinematic,"
+                "polaroid_scrapbook,curator_loupe,editorial_magazine,cinema_anamorphic,parallax_gallery,diptych_frame"
+            ),
             is_multi_select=True,
             recommended_options=[
                 "cinematic_depth_3d",
+                "split_diopter_focus",
+                "contact_sheet_zoom",
+                "glassmorphic_pedestal",
+                "medium_format_slide",
+                "floating_tilt_plate",
+                "criterion_atelier_split",
                 "triptych_cinematic",
                 "polaroid_scrapbook",
                 "curator_loupe",
@@ -303,9 +319,9 @@ def generate_intake_questions(
                 "diptych_frame",
             ],
             recommendation_rationale=(
-                "Combining these 8 cinema-grade modes lets the Photo Curator & VFX Designer match each photo's geometry "
-                "(e.g., 3-panel Triptych for culinary sequences, Optical Loupe for fine art/architectural carvings, Polaroid Stack for candid portraits, "
-                "and 3D Depth Parallax for hero landmarks) so no two consecutive stills ever feel repetitive."
+                "Combining all 14 curated cinema-grade modes lets the Photo Curator & VFX Designer match every photo's geometry "
+                "(Split-Diopter macro for architectural details, Contact-Sheet proof push-ins for bursts, Glassmorphic Vitrine & 3D Tilt "
+                "for gallery heroes, Medium-Format 120 Slides & Polaroids for portraits, and Criterion Bento Grids for stories) cleanly."
             ),
         ),
         InterviewQuestion(
@@ -316,19 +332,30 @@ def generate_intake_questions(
                 "museum_spotlight (Recommended) — Radial Gallery Track-Light Spotlight on Subject Focal Point (Interiors & Artworks)",
                 "champagne_bokeh (Recommended) — Softly Drifting Golden Bokeh Orbs (River Cruises, Evening & Bistro Finale)",
                 "nostalgic_film_grain (Recommended) — Subtle 35mm Kodak Portra Organic Luminance Grain (Polaroid & Street Keepsakes)",
+                "anamorphic_streak (Recommended) — Horizontal Panavision Sapphire-Champagne Specular Streak Across Highlights",
+                "prism_chromatic_edge (Recommended) — Subtle Optical Glass Chromatic Dispersion at Outer Periphery (Center Crisp)",
+                "velvet_vignette_rembrandt (Recommended) — Directional Chiaroscuro Upper-Left Warm Key Light + Deep Gallery Falloff",
+                "fine_art_rag_texture (Recommended) — Cold-Press Cotton-Rag Archival Fine-Art Paper Micro-Relief Finish",
                 "none — Clean Unfiltered Digital Master Only",
             ],
-            default_answer="golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain",
+            default_answer=(
+                "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain,"
+                "anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture"
+            ),
             is_multi_select=True,
             recommended_options=[
                 "golden_light_leak",
                 "museum_spotlight",
                 "champagne_bokeh",
                 "nostalgic_film_grain",
+                "anamorphic_streak",
+                "prism_chromatic_edge",
+                "velvet_vignette_rembrandt",
+                "fine_art_rag_texture",
             ],
             recommendation_rationale=(
-                "Blending subtle optical finishers (warm sun leaks on outdoor views, gallery spotlights on cathedral interiors, "
-                "and champagne bokeh on evening dining) makes still photos feel alive like moving cinema footage."
+                "Blending subtle optical finishers (Panavision sapphire streaks on highlights, chiaroscuro Rembrandt key lighting, "
+                "cotton-rag museum paper relief, warm sun leaks, and champagne bokeh) gives every still frame authentic theatrical depth."
             ),
         ),
         InterviewQuestion(
@@ -336,7 +363,13 @@ def generate_intake_questions(
             question="5. Primary Anchor Photo Mode (Default fallback when a single mode is used)",
             options=[
                 "cinematic_depth_3d (Recommended) — 3-Plane Subject Depth Parallax + Bokeh Defocus + Frosted Documentary Card",
-                "parallax_gallery — 2.5D Counter-Panning Museum Matte Frame + Frosted Documentary Card",
+                "split_diopter_focus — A24 Split-Diopter 54/46 Wide Context + 2.2x Macro Detail",
+                "contact_sheet_zoom — Magnum 3x2 Darkroom Contact Sheet Proof Push-In",
+                "glassmorphic_pedestal — VisionOS Frosted Acrylic Vitrine Card",
+                "medium_format_slide — Hasselblad 120 Transparency Slide Mount",
+                "floating_tilt_plate — True 3D Perspective Homography Orbit Plate",
+                "criterion_atelier_split — Criterion 3-Viewport Asymmetric Bento Grid",
+                "parallax_gallery — 2.5D Counter-Panning Museum Matte Frame",
                 "editorial_magazine — Asymmetric 62/38 Luxury Magazine Monograph Spread",
                 "polaroid_scrapbook — Vintage Instant-Film Polaroid Scrapbook",
                 "cinema_anamorphic — 2.39:1 CinemaScope Widescreen Letterbox",
@@ -436,6 +469,58 @@ def build_ask_question_tool_payload(questions: list[InterviewQuestion], max_ques
     return payload
 
 
+def _resolve_photo_suite_answers(
+    q_by_id: dict[str, InterviewQuestion],
+    answers: dict[str, str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Resolve enabled photo modes, finishers, and Director recommendation defaults."""
+    default_fx_suite = (
+        q_by_id["photo_effects_suite"].recommended_options
+        if "photo_effects_suite" in q_by_id
+        else [
+            "cinematic_depth_3d",
+            "split_diopter_focus",
+            "contact_sheet_zoom",
+            "glassmorphic_pedestal",
+            "medium_format_slide",
+            "floating_tilt_plate",
+            "criterion_atelier_split",
+            "parallax_gallery",
+            "editorial_magazine",
+            "diptych_frame",
+            "triptych_cinematic",
+            "polaroid_scrapbook",
+            "curator_loupe",
+            "cinema_anamorphic",
+        ]
+    )
+    enabled_modes = _extract_multi_codes(
+        answers.get("photo_effects_suite", ""),
+        VALID_PHOTO_MODES,
+        default_fx_suite,
+    )
+    default_finishers = (
+        q_by_id["photo_overlay_finishers"].recommended_options
+        if "photo_overlay_finishers" in q_by_id
+        else [
+            "golden_light_leak",
+            "champagne_bokeh",
+            "museum_spotlight",
+            "nostalgic_film_grain",
+            "anamorphic_streak",
+            "prism_chromatic_edge",
+            "velvet_vignette_rembrandt",
+            "fine_art_rag_texture",
+        ]
+    )
+    enabled_overlays = _extract_multi_codes(
+        answers.get("photo_overlay_finishers", ""),
+        VALID_OVERLAY_FX,
+        default_finishers,
+    )
+    return enabled_modes, enabled_overlays, default_fx_suite, default_finishers
+
+
 def refine_intake_interactively(
     media_dir: str | Path,
     user_message: str = "",
@@ -497,7 +582,7 @@ def refine_intake_interactively(
     elif not answers.get("target_duration_sec"):
         answers["target_duration_sec"] = str(rec_sec)
 
-    # 2. Narrative style refinement
+    # 2. Narrative style & Story Arc Mode refinement
     if "vlog" in msg_low or "chronological" in msg_low:
         answers["narrative_style"] = "day_in_the_life_vlog"
         refinements_applied.append("Story Arc -> Chronological Day-in-the-Life Vlog")
@@ -510,10 +595,44 @@ def refine_intake_interactively(
     elif not answers.get("narrative_style"):
         answers["narrative_style"] = "family_keepsake_4act"
 
+    if any(k in msg_low for k in ["thematic_essay", "thematic essay", "by theme", "thematic"]):
+        answers["story_arc_mode"] = "thematic_essay"
+        refinements_applied.append("Storyline Mode -> Thematic Essay (Semantic Concept Acts)")
+    elif any(k in msg_low for k in ["hero_journey", "hero's journey", "hero journey", "dramatic arc"]):
+        answers["story_arc_mode"] = "hero_journey"
+        refinements_applied.append("Storyline Mode -> Hero's Journey (5-Stage Dramaturgical Arc)")
+    elif any(k in msg_low for k in ["high_energy_reel", "high energy reel", "fast reel", "social reel"]):
+        answers["story_arc_mode"] = "high_energy_reel"
+        refinements_applied.append("Storyline Mode -> High-Energy Beat-Drop Reel")
+    elif not answers.get("story_arc_mode"):
+        answers["story_arc_mode"] = (
+            "high_energy_reel"
+            if answers.get("narrative_style") == "upbeat_montage"
+            else "chronological_cinema"
+        )
+
     # 3. Primary Photo mode & Multi-Select Photo Effects Suite refinement
     if "full_bleed" in msg_low or "full screen" in msg_low or "full-bleed" in msg_low:
         answers["photo_mode"] = "full_bleed"
         refinements_applied.append("Primary Photo Mode -> Full-Bleed 16:9 Ken Burns")
+    elif "split_diopter" in msg_low or "split diopter" in msg_low or "diopter" in msg_low:
+        answers["photo_mode"] = "split_diopter_focus"
+        refinements_applied.append("Primary Photo Mode -> A24 Split-Diopter Macro + Context Split")
+    elif "contact_sheet" in msg_low or "contact sheet" in msg_low:
+        answers["photo_mode"] = "contact_sheet_zoom"
+        refinements_applied.append("Primary Photo Mode -> Magnum 3x2 Darkroom Contact Sheet Push-In")
+    elif "glassmorphic" in msg_low or "acrylic" in msg_low or "vitrine" in msg_low:
+        answers["photo_mode"] = "glassmorphic_pedestal"
+        refinements_applied.append("Primary Photo Mode -> VisionOS Frosted Glassmorphic Vitrine")
+    elif "medium_format" in msg_low or "medium format" in msg_low or "hasselblad" in msg_low or "120 slide" in msg_low:
+        answers["photo_mode"] = "medium_format_slide"
+        refinements_applied.append("Primary Photo Mode -> Hasselblad 120 Medium-Format Transparency Slide")
+    elif "floating_tilt" in msg_low or "3d tilt" in msg_low or "perspective orbit" in msg_low:
+        answers["photo_mode"] = "floating_tilt_plate"
+        refinements_applied.append("Primary Photo Mode -> 3D Projective Perspective Orbit Plate")
+    elif "criterion" in msg_low or "atelier" in msg_low or "bento" in msg_low:
+        answers["photo_mode"] = "criterion_atelier_split"
+        refinements_applied.append("Primary Photo Mode -> Criterion 3-Viewport Bento Exhibition Grid")
     elif "3d depth" in msg_low or "cinematic_depth_3d" in msg_low:
         answers["photo_mode"] = "cinematic_depth_3d"
         refinements_applied.append("Primary Photo Mode -> 3D Depth-Map Parallax + Bokeh")
@@ -532,32 +651,8 @@ def refine_intake_interactively(
     elif not answers.get("photo_mode"):
         answers["photo_mode"] = _extract_option_code(q_by_id["photo_mode"].default_answer) if "photo_mode" in q_by_id else "parallax_gallery"
 
-    default_fx_suite = q_by_id["photo_effects_suite"].recommended_options if "photo_effects_suite" in q_by_id else [
-        "cinematic_depth_3d",
-        "parallax_gallery",
-        "editorial_magazine",
-        "diptych_frame",
-        "triptych_cinematic",
-        "polaroid_scrapbook",
-    ]
-    enabled_modes = _extract_multi_codes(
-        answers.get("photo_effects_suite", ""),
-        VALID_PHOTO_MODES,
-        default_fx_suite,
-    )
+    enabled_modes, enabled_overlays, default_fx_suite, default_finishers = _resolve_photo_suite_answers(q_by_id, answers)
     answers["photo_effects_suite"] = ", ".join(enabled_modes)
-
-    default_finishers = q_by_id["photo_overlay_finishers"].recommended_options if "photo_overlay_finishers" in q_by_id else [
-        "golden_light_leak",
-        "champagne_bokeh",
-        "museum_spotlight",
-        "nostalgic_film_grain",
-    ]
-    enabled_overlays = _extract_multi_codes(
-        answers.get("photo_overlay_finishers", ""),
-        VALID_OVERLAY_FX,
-        default_finishers,
-    )
     answers["photo_overlay_finishers"] = ", ".join(enabled_overlays)
 
     # 4. BGM mood refinement
@@ -621,11 +716,21 @@ def refine_intake_interactively(
         },
     }
 
+    story_arc_mode = _extract_option_code(str(answers.get("story_arc_mode", "chronological_cinema")))
+    if story_arc_mode not in {
+        "chronological_cinema",
+        "hero_journey",
+        "thematic_essay",
+        "high_energy_reel",
+    }:
+        story_arc_mode = "chronological_cinema"
+
     project_title = info["display_title"].replace(" ", "_")
     draft_brief = CreativeBrief(
         project_title=project_title,
         raw_user_prompt=raw_msg,
         narrative_style=_extract_option_code(str(answers["narrative_style"])),  # type: ignore[arg-type]
+        story_arc_mode=story_arc_mode,  # type: ignore[arg-type]
         tone="warm_joyful",
         target_duration_sec=chosen_dur,
         must_include_topics=must_topics,
@@ -671,7 +776,7 @@ def refine_intake_interactively(
         f"🎬 Use Director's Recommended Length ({rec_sec}s / {dur_rec['director_recommended_mmss']})",
         f"📽️ Make it an Extended Documentary Cut ({ext_sec}s / {dur_rec['extended_mmss']})",
         "🗣️ Keep all candid spoken dialogue with B-roll cutaways",
-        "🖼️ Enable 3D Depth Parallax + Curator Loupe + Editorial Magazine + Polaroid Scrapbook",
+        "🖼️ Enable Split-Diopter + Contact Sheet Zoom + Glassmorphic Vitrine + 3D Tilt + Medium Format",
     ]
 
     return {
@@ -725,6 +830,24 @@ class ClientIntakeAgent(BaseEditingAgent):
         }:
             narrative_style = "family_keepsake_4act"
 
+        prompt_low = (blackboard.user_prompt or "").lower()
+        default_arc_mode = "chronological_cinema"
+        if any(k in prompt_low for k in ["thematic_essay", "thematic essay", "by theme"]):
+            default_arc_mode = "thematic_essay"
+        elif any(k in prompt_low for k in ["hero_journey", "hero's journey", "hero journey"]):
+            default_arc_mode = "hero_journey"
+        elif any(k in prompt_low for k in ["high_energy_reel", "high energy reel"]) or narrative_style == "upbeat_montage":
+            default_arc_mode = "high_energy_reel"
+
+        story_arc_mode = _clean_choice("story_arc_mode", default_arc_mode)
+        if story_arc_mode not in {
+            "chronological_cinema",
+            "hero_journey",
+            "thematic_essay",
+            "high_energy_reel",
+        }:
+            story_arc_mode = default_arc_mode
+
         dialogue_pref = _clean_choice("dialogue_preference", "keep_full_sentences_with_broll_cutaways")
         if dialogue_pref not in {
             "keep_full_sentences_with_broll_cutaways",
@@ -738,31 +861,7 @@ class ClientIntakeAgent(BaseEditingAgent):
         if photo_mode not in VALID_PHOTO_MODES:
             photo_mode = "parallax_gallery"
 
-        default_fx_suite = q_by_id["photo_effects_suite"].recommended_options if "photo_effects_suite" in q_by_id else [
-            "cinematic_depth_3d",
-            "parallax_gallery",
-            "editorial_magazine",
-            "diptych_frame",
-            "triptych_cinematic",
-            "polaroid_scrapbook",
-        ]
-        enabled_modes = _extract_multi_codes(
-            answers.get("photo_effects_suite", ""),
-            VALID_PHOTO_MODES,
-            default_fx_suite,
-        )
-
-        default_finishers = q_by_id["photo_overlay_finishers"].recommended_options if "photo_overlay_finishers" in q_by_id else [
-            "golden_light_leak",
-            "champagne_bokeh",
-            "museum_spotlight",
-            "nostalgic_film_grain",
-        ]
-        enabled_overlays = _extract_multi_codes(
-            answers.get("photo_overlay_finishers", ""),
-            VALID_OVERLAY_FX,
-            default_finishers,
-        )
+        enabled_modes, enabled_overlays, default_fx_suite, default_finishers = _resolve_photo_suite_answers(q_by_id, answers)
 
         try:
             target_dur = float(_clean_choice("target_duration_sec", rec_default_dur))
@@ -825,6 +924,7 @@ class ClientIntakeAgent(BaseEditingAgent):
             project_title=project_title,
             raw_user_prompt=blackboard.user_prompt,
             narrative_style=narrative_style,  # type: ignore[arg-type]
+            story_arc_mode=story_arc_mode,  # type: ignore[arg-type]
             tone="warm_joyful",
             target_duration_sec=target_dur,
             must_include_topics=must_topics,
@@ -898,6 +998,7 @@ class ClientIntakeAgent(BaseEditingAgent):
             subject="Structure chapters according to client narrative style and target duration",
             payload={
                 "narrative_style": brief.narrative_style,
+                "story_arc_mode": brief.story_arc_mode,
                 "target_duration_sec": brief.target_duration_sec,
                 "photo_mode": brief.photo_mode,
             },

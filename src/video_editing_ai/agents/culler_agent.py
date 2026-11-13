@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
@@ -13,6 +13,14 @@ from PIL import Image, ImageDraw
 
 from ..analyzer.ag_annotator import analyze_media_directory
 from ..analyzer.media_probe import _get_cjk_font
+from ..analyzer.semantic_intelligence import (
+    SemanticEmbeddingEngine,
+    analyze_human_and_aesthetic_perception,
+)
+from ..analyzer.video_moment_analyzer import (
+    analyze_video_temporal_telemetry,
+    extract_candidate_video_moments,
+)
 from ..models.schema import (
     CulledSubClip,
     DialogueSegment,
@@ -342,12 +350,26 @@ def _dialogues_to_word_timestamps(dialogues: list[DialogueSegment]) -> list[Word
     return words_out
 
 
+def _offset_iso_timestamp(iso_str: str, offset_sec: float) -> str:
+    """Add offset_sec seconds to an ISO-8601 timestamp string for multi-moment intra-clip ordering."""
+    if offset_sec <= 0.01 or not iso_str:
+        return iso_str
+    try:
+        norm = iso_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(norm)
+        shifted = dt + timedelta(seconds=float(offset_sec))
+        return shifted.isoformat().replace("+00:00", "Z")
+    except Exception:
+        return iso_str
+
+
 def _compute_brief_match_boost(
     text_blob: str,
     has_dialogue: bool,
     must_topics: list[str],
+    avoid_topics: Optional[list[str]] = None,
 ) -> float:
-    """Calculate score boost when a clip or photo matches the client's must-include topics."""
+    """Calculate semantic + lexical score boost against CreativeBrief must_include_topics & avoid_topics."""
     blob_lower = text_blob.lower()
     boost = 0.0
     for topic in must_topics:
@@ -358,27 +380,62 @@ def _compute_brief_match_boost(
         if t_low in blob_lower or any(k in blob_lower for k in keywords):
             boost += 0.8
         elif has_dialogue and any(k in t_low for k in ("dialogue", "spoken", "quote", "talk", "voice", "kid")):
-            boost += 1.2
-    return round(min(2.0, boost), 2)
+            boost += 1.0
+
+    # Neural / concept semantic similarity boost for cross-vocabulary topic alignment
+    if must_topics and text_blob.strip():
+        sem_sim = SemanticEmbeddingEngine.instance().best_topic_similarity(text_blob, must_topics)
+        if sem_sim >= 0.30:
+            boost += min(1.25, (sem_sim - 0.24) * 2.2)
+
+    if avoid_topics and text_blob.strip():
+        generic_avoids = {"blurry pocket shots", "duplicate photo bursts"}
+        custom_avoids = [a for a in avoid_topics if a.lower().strip() not in generic_avoids]
+        if custom_avoids:
+            avoid_sim = SemanticEmbeddingEngine.instance().best_topic_similarity(text_blob, custom_avoids)
+            if avoid_sim >= 0.42:
+                boost -= min(1.5, (avoid_sim - 0.35) * 2.5)
+
+    return round(float(np.clip(boost, -1.5, 2.2)), 2)
 
 
 @register_agent
 class CullerAgent(BaseEditingAgent):
-    """Agent 1: Normalizes multi-cam timecodes, extracts golden windows, and scores selects."""
+    """Agent 1: Normalizes multi-cam timecodes, extracts multi-moment golden windows, and scores selects."""
 
     role_id = "culler"
-    display_name = "1. Wrangler & Culler"
+    display_name = "1. Semantic Culler & Select Scorer"
     stage_order = 10
+    substage_priority = 0
     description = (
-        "Normalizes multi-cam timecodes, tags shot scale & motion, extracts 2-5s golden windows, "
-        "preserves word-aligned A-roll dialogue, and drops duplicate bursts into media_index.json."
+        "Consumes cached DIT ingest metadata, runs Whisper ASR, optical-flow camera stability & prosody peak analysis, "
+        "filters operator filler chatter, splits multi-moment videos into golden windows with elastic usable_in/usable_out handles, "
+        "and scores selects in media_index.json."
     )
     enabled_by_default = True
-    requires_artifacts = ["creative_brief.json"]
+    requires_artifacts = ["creative_brief.json", "dit_manifest.json"]
     produces_artifacts = ["media_index.json", "annotations.yaml"]
     skill_reference_file = "01_culler_agent.md"
 
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
+        if blackboard.dit_manifest is None:
+            dit_path = blackboard.project_dir / "dit_manifest.json"
+            if dit_path.exists():
+                from ..models.schema import DITIngestManifest
+
+                try:
+                    blackboard.dit_manifest = DITIngestManifest.from_json_file(dit_path)
+                except Exception:
+                    blackboard.dit_manifest = None
+            if blackboard.dit_manifest is None:
+                from .dit_ingest_agent import DITIngestAgent
+
+                DITIngestAgent().run(blackboard)
+
+        dit_by_path = {
+            str(Path(e.source_path).resolve()): e
+            for e in (blackboard.dit_manifest.entries if blackboard.dit_manifest else [])
+        }
         annotations_path = blackboard.project_dir / "annotations.yaml"
         if blackboard.catalog is not None:
             catalog = blackboard.catalog
@@ -420,9 +477,11 @@ class CullerAgent(BaseEditingAgent):
         blackboard.catalog = catalog
 
         must_topics: list[str] = []
+        avoid_topics: list[str] = []
         max_broll_sec = 4.5
         if blackboard.creative_brief is not None:
             must_topics = list(blackboard.creative_brief.must_include_topics)
+            avoid_topics = list(blackboard.creative_brief.avoid_topics)
             max_broll_sec = blackboard.creative_brief.max_broll_duration_sec
 
         for msg in blackboard.get_messages_for(self.role_id):
@@ -432,22 +491,46 @@ class CullerAgent(BaseEditingAgent):
 
         subclips: list[CulledSubClip] = []
         discarded_count = 0
+        moments_cache_dir = blackboard.project_dir / "cache" / "moments"
 
         blackboard.emit_activity(
             self.role_id,
-            f"Ingesting & probing {len(catalog.videos)} videos and {len(catalog.photos)} photos (Whisper ASR + scene boundaries)",
-            detail=f"Matching against {len(must_topics)} client must-have topics",
+            f"Ingesting & probing {len(catalog.videos)} videos and {len(catalog.photos)} photos (Whisper ASR + optical flow + prosody)",
+            detail=f"Matching against {len(must_topics)} client must-have topics with multi-moment extraction",
         )
 
-        # 1. Process Videos -> A-Roll Dialogue vs B-Roll Golden Windows
+        # 1. Process Videos -> Multi-Moment A-Roll Quotes & B-Roll Golden Windows with Optical-Flow Stability
         sorted_videos: list[VideoAsset] = sorted(
             catalog.videos, key=lambda v: (v.creation_time or "", v.filename)
         )
         for v_idx, vid in enumerate(sorted_videos, start=1):
-            kf_paths = [sc.keyframe_path for sc in vid.scenes if sc.keyframe_path]
-            shot_scale, cam_motion = _estimate_shot_scale_and_motion(kf_paths, vid.overall_summary)
-            words = _dialogues_to_word_timestamps(vid.dialogues)
-            has_speech = len(vid.dialogues) > 0
+            kf_paths = [sc.keyframe_path for sc in vid.scenes if sc.keyframe_path and Path(sc.keyframe_path).exists()]
+            shot_scale, fallback_motion = _estimate_shot_scale_and_motion(kf_paths, vid.overall_summary)
+
+            # Perceptual portrait/focus check on representative keyframe
+            focal_pt: tuple[float, float] = (0.5, 0.5)
+            eye_open_val = 1.0
+            expr_val = 0.5
+            if kf_paths:
+                kf_perc = analyze_human_and_aesthetic_perception(kf_paths[len(kf_paths) // 2], vid.filename)
+                focal_pt = kf_perc["focal_point"]
+                eye_open_val = float(kf_perc["eye_open_score"])
+                expr_val = round(min(1.0, 0.35 + float(kf_perc["smile_score"]) * 0.65), 3)
+
+            telemetry = analyze_video_temporal_telemetry(
+                Path(vid.path),
+                duration=max(0.5, vid.duration),
+                cache_dir=moments_cache_dir,
+            )
+            cam_motion: Literal["static", "pan_left", "pan_right", "tilt_up", "walk_forward"] = (
+                telemetry.get("camera_movement") or fallback_motion
+            )
+            candidate_moments = extract_candidate_video_moments(
+                vid=vid,
+                telemetry=telemetry,
+                max_broll_sec=max_broll_sec,
+            )
+
             avg_scene_q = (
                 sum(sc.quality_score for sc in vid.scenes) / len(vid.scenes)
                 if vid.scenes
@@ -457,136 +540,225 @@ class CullerAgent(BaseEditingAgent):
                 "landscape" if vid.width > vid.height else ("portrait" if vid.height > vid.width else "square")
             )
 
-            blob = f"{vid.filename} {vid.overall_summary} " + " ".join(d.text for d in vid.dialogues)
-            boost = _compute_brief_match_boost(blob, has_speech, must_topics)
+            dit_ent = dit_by_path.get(str(Path(vid.path).resolve()))
+            base_norm_ts = (
+                (dit_ent.normalized_timestamp if dit_ent and dit_ent.normalized_timestamp else None)
+                or vid.creation_time
+                or f"1970-01-01T00:{v_idx:02d}:00Z"
+            )
+            c_prim = (dit_ent.color_primaries if dit_ent else vid.color_primaries) or "bt709"
+            c_trc = (dit_ent.color_trc if dit_ent else vid.color_transfer) or "bt709"
+            c_space = (dit_ent.color_space if dit_ent else vid.color_space) or "bt709"
+            p_fmt = (dit_ent.pix_fmt if dit_ent else vid.pix_fmt) or "yuv420p"
+            v_lufs = float(dit_ent.integrated_lufs if dit_ent else vid.integrated_lufs)
+            v_snr = float(dit_ent.snr_db if dit_ent else vid.snr_db)
+            v_diegetic = bool(dit_ent.has_diegetic_music if dit_ent else vid.has_diegetic_music)
+            v_lat = dit_ent.gps_lat if dit_ent and dit_ent.gps_lat is not None else vid.gps_lat
+            v_lon = dit_ent.gps_lon if dit_ent and dit_ent.gps_lon is not None else vid.gps_lon
 
-            if has_speech:
-                first_word_start = min(d.start_time for d in vid.dialogues)
-                last_word_end = max(d.end_time for d in vid.dialogues)
-                in_tc = round(max(0.0, first_word_start - 0.35), 2)
-                out_tc = round(min(vid.duration, max(last_word_end + 0.55, min(vid.duration, in_tc + 4.5))), 2)
-                if vid.duration <= 16.0:
-                    in_tc = 0.0
-                    out_tc = round(vid.duration, 2)
+            aroll_seq = 0
+            broll_seq = 0
+            total_aroll_in_vid = sum(1 for m in candidate_moments if m["roll_type"] == "a_roll")
+            total_broll_in_vid = sum(1 for m in candidate_moments if m["roll_type"] == "b_roll")
 
-                spoken_text = " ".join(d.text.strip() for d in vid.dialogues if d.text.strip())
-                translations = [d.translation for d in vid.dialogues if d.translation]
-                emo_score = min(10.0, round(avg_scene_q + 0.8 + boost * 0.5, 2))
-                v_title, v_sub, v_trans, v_rat = _synthesize_video_scene_caption_and_transition(
-                    vid=vid,
-                    shot_scale=shot_scale,
-                    cam_motion=cam_motion,
-                    has_speech=True,
-                    spoken_text=spoken_text,
-                    v_idx=v_idx,
-                    total_videos=len(sorted_videos),
-                    user_prompt=blackboard.user_prompt,
-                )
-                subclips.append(
-                    CulledSubClip(
-                        subclip_id=f"vid_aroll_{v_idx:02d}",
-                        source_asset_id=vid.id,
-                        source_path=vid.path,
-                        filename=vid.filename,
-                        media_type="video",
-                        normalized_timestamp=vid.creation_time or f"1970-01-01T00:{v_idx:02d}:00Z",
-                        in_tc=in_tc,
-                        out_tc=out_tc,
-                        duration=round(max(0.5, out_tc - in_tc), 2),
-                        roll_type="a_roll",
+            for m_info in candidate_moments:
+                m_roll: Literal["a_roll", "b_roll"] = m_info["roll_type"]
+                in_tc = float(m_info["in_tc"])
+                out_tc = float(m_info["out_tc"])
+                g_in = float(m_info["golden_in"])
+                g_out = float(m_info["golden_out"])
+                u_in = float(m_info["usable_in"])
+                u_out = float(m_info["usable_out"])
+                m_stab = float(m_info["stability_score"])
+                m_pros = float(m_info["prosody_excitement_score"])
+                m_peak = float(m_info["action_peak_tc"])
+                m_dialogues = m_info["dialogues"]
+                m_norm_ts = _offset_iso_timestamp(base_norm_ts, in_tc)
+
+                if m_roll == "a_roll":
+                    aroll_seq += 1
+                    sid = (
+                        f"vid_aroll_{v_idx:02d}"
+                        if total_aroll_in_vid == 1
+                        else f"vid_aroll_{v_idx:02d}_s{aroll_seq}"
+                    )
+                    m_words = _dialogues_to_word_timestamps(m_dialogues)
+                    spoken_text = " ".join(d.text.strip() for d in m_dialogues if d.text.strip())
+                    translations = [d.translation for d in m_dialogues if d.translation]
+                    blob = f"{vid.filename} {vid.overall_summary} {spoken_text}"
+                    boost = _compute_brief_match_boost(blob, True, must_topics, avoid_topics)
+                    prosody_bonus = max(0.0, (m_pros - 0.35) * 1.1)
+                    stab_adj = (m_stab - 0.75) * 0.8
+                    emo_score = float(
+                        np.clip(round(avg_scene_q + 0.75 + boost * 0.5 + prosody_bonus + stab_adj, 2), 1.0, 10.0)
+                    )
+                    v_title, v_sub, v_trans, v_rat = _synthesize_video_scene_caption_and_transition(
+                        vid=vid,
                         shot_scale=shot_scale,
-                        camera_movement=cam_motion,
-                        orientation=orientation,
-                        focal_point=(0.5, 0.5),
-                        people_present=["family", "speaker"],
-                        summary=vid.overall_summary or f"{v_title} ({v_sub})",
+                        cam_motion=cam_motion,
+                        has_speech=True,
                         spoken_text=spoken_text,
-                        translation=" | ".join(translations) if translations else None,
-                        emotion_score=emo_score,
-                        action_peak_tc=round(0.5 * (in_tc + out_tc), 2),
-                        aesthetic_score=round(min(10.0, avg_scene_q), 2),
-                        brief_match_boost=boost,
-                        annotation_title=v_title,
-                        annotation_subtitle=v_sub,
-                        recommended_transition=v_trans,
-                        ai_rationale=v_rat,
-                        is_discarded=False,
-                        words=words,
+                        v_idx=v_idx,
+                        total_videos=len(sorted_videos),
+                        user_prompt=blackboard.user_prompt,
                     )
-                )
-            else:
-                # Preserve full natural scene context (up to 10.5s-14.0s for scenic clips so viewers understand the action)
-                win_cap = max(max_broll_sec, 12.0 if vid.duration >= 10.0 else 8.5)
-                best_in = 0.0
-                best_out = min(vid.duration, win_cap)
-                if vid.scenes:
-                    best_sc = max(vid.scenes, key=lambda s: s.quality_score)
-                    sc_mid = 0.5 * (best_sc.start_time + best_sc.end_time)
-                    half_w = 0.5 * min(win_cap, max(2.8, vid.duration))
-                    best_in = round(max(0.0, min(vid.duration - min(vid.duration, 2.5), sc_mid - half_w)), 2)
-                    best_out = round(min(vid.duration, best_in + min(win_cap, vid.duration)), 2)
-                elif vid.duration > win_cap:
-                    best_in = round(max(0.0, (vid.duration - win_cap) * 0.35), 2)
-                    best_out = round(min(vid.duration, best_in + win_cap), 2)
-
-                is_disc = avg_scene_q < 3.0
-                if is_disc:
-                    discarded_count += 1
-                emo_score = min(10.0, round(avg_scene_q + boost * 0.5, 2))
-                v_title, v_sub, v_trans, v_rat = _synthesize_video_scene_caption_and_transition(
-                    vid=vid,
-                    shot_scale=shot_scale,
-                    cam_motion=cam_motion,
-                    has_speech=False,
-                    spoken_text="",
-                    v_idx=v_idx,
-                    total_videos=len(sorted_videos),
-                    user_prompt=blackboard.user_prompt,
-                )
-                subclips.append(
-                    CulledSubClip(
-                        subclip_id=f"vid_broll_{v_idx:02d}",
-                        source_asset_id=vid.id,
-                        source_path=vid.path,
-                        filename=vid.filename,
-                        media_type="video",
-                        normalized_timestamp=vid.creation_time or f"1970-01-01T00:{v_idx:02d}:30Z",
-                        in_tc=best_in,
-                        out_tc=best_out,
-                        duration=round(max(0.5, best_out - best_in), 2),
-                        roll_type="b_roll",
+                    subclips.append(
+                        CulledSubClip(
+                            subclip_id=sid,
+                            source_asset_id=vid.id,
+                            source_path=vid.path,
+                            filename=vid.filename,
+                            media_type="video",
+                            normalized_timestamp=m_norm_ts,
+                            in_tc=in_tc,
+                            out_tc=out_tc,
+                            golden_in=g_in,
+                            golden_out=g_out,
+                            usable_in=u_in,
+                            usable_out=u_out,
+                            duration=round(max(0.5, out_tc - in_tc), 2),
+                            color_primaries=c_prim,
+                            color_trc=c_trc,
+                            color_space=c_space,
+                            pix_fmt=p_fmt,
+                            integrated_lufs=v_lufs,
+                            snr_db=v_snr,
+                            has_diegetic_music=v_diegetic,
+                            roll_type="a_roll",
+                            shot_scale=shot_scale,
+                            camera_movement=cam_motion,
+                            orientation=orientation,
+                            focal_point=focal_pt,
+                            people_present=["family", "speaker"],
+                            summary=vid.overall_summary or f"{v_title} ({v_sub})",
+                            spoken_text=spoken_text,
+                            translation=" | ".join(translations) if translations else None,
+                            emotion_score=emo_score,
+                            action_peak_tc=m_peak,
+                            aesthetic_score=round(float(np.clip(avg_scene_q + stab_adj * 0.5, 1.0, 10.0)), 2),
+                            brief_match_boost=boost,
+                            annotation_title=v_title,
+                            annotation_subtitle=v_sub,
+                            recommended_transition=v_trans,
+                            ai_rationale=f"{v_rat} [stability={m_stab:.2f}, prosody={m_pros:.2f}]",
+                            is_discarded=False,
+                            stability_score=m_stab,
+                            expression_score=expr_val,
+                            eye_open_score=eye_open_val,
+                            prosody_excitement_score=m_pros,
+                            is_filler_utterance=False,
+                            gps_lat=v_lat,
+                            gps_lon=v_lon,
+                            words=m_words,
+                        )
+                    )
+                else:
+                    broll_seq += 1
+                    sid = (
+                        f"vid_broll_{v_idx:02d}"
+                        if (total_broll_in_vid == 1 and total_aroll_in_vid == 0)
+                        else f"vid_broll_{v_idx:02d}_b{broll_seq}"
+                    )
+                    blob = f"{vid.filename} {vid.overall_summary}"
+                    boost = _compute_brief_match_boost(blob, False, must_topics, avoid_topics)
+                    is_disc = avg_scene_q < 3.0 or m_stab < 0.25
+                    if is_disc:
+                        discarded_count += 1
+                    stab_adj = (m_stab - 0.72) * 1.1
+                    prosody_bonus = max(0.0, (m_pros - 0.40) * 0.8)
+                    emo_score = float(
+                        np.clip(round(avg_scene_q + boost * 0.5 + stab_adj + prosody_bonus, 2), 1.0, 10.0)
+                    )
+                    v_title, v_sub, v_trans, v_rat = _synthesize_video_scene_caption_and_transition(
+                        vid=vid,
                         shot_scale=shot_scale,
-                        camera_movement=cam_motion,
-                        orientation=orientation,
-                        focal_point=(0.5, 0.5),
-                        people_present=["family"],
-                        summary=vid.overall_summary or f"{v_title} ({v_sub})",
+                        cam_motion=cam_motion,
+                        has_speech=False,
                         spoken_text="",
-                        emotion_score=emo_score,
-                        action_peak_tc=round(0.5 * (best_in + best_out), 2),
-                        aesthetic_score=round(min(10.0, avg_scene_q), 2),
-                        brief_match_boost=boost,
-                        annotation_title=v_title,
-                        annotation_subtitle=v_sub,
-                        recommended_transition=v_trans,
-                        ai_rationale=v_rat,
-                        is_discarded=is_disc,
-                        discard_reason="low_sharpness_or_score" if is_disc else None,
-                        words=[],
+                        v_idx=v_idx,
+                        total_videos=len(sorted_videos),
+                        user_prompt=blackboard.user_prompt,
                     )
-                )
+                    subclips.append(
+                        CulledSubClip(
+                            subclip_id=sid,
+                            source_asset_id=vid.id,
+                            source_path=vid.path,
+                            filename=vid.filename,
+                            media_type="video",
+                            normalized_timestamp=m_norm_ts,
+                            in_tc=in_tc,
+                            out_tc=out_tc,
+                            golden_in=g_in,
+                            golden_out=g_out,
+                            usable_in=u_in,
+                            usable_out=u_out,
+                            duration=round(max(0.5, out_tc - in_tc), 2),
+                            color_primaries=c_prim,
+                            color_trc=c_trc,
+                            color_space=c_space,
+                            pix_fmt=p_fmt,
+                            integrated_lufs=v_lufs,
+                            snr_db=v_snr,
+                            has_diegetic_music=v_diegetic,
+                            roll_type="b_roll",
+                            shot_scale=shot_scale,
+                            camera_movement=cam_motion,
+                            orientation=orientation,
+                            focal_point=focal_pt,
+                            people_present=["family"],
+                            summary=vid.overall_summary or f"{v_title} ({v_sub})",
+                            spoken_text="",
+                            emotion_score=emo_score,
+                            action_peak_tc=m_peak,
+                            aesthetic_score=round(float(np.clip(avg_scene_q + stab_adj * 0.6, 1.0, 10.0)), 2),
+                            brief_match_boost=boost,
+                            annotation_title=v_title,
+                            annotation_subtitle=v_sub,
+                            recommended_transition=v_trans,
+                            ai_rationale=f"{v_rat} [stability={m_stab:.2f}, peak={m_peak:.2f}s]",
+                            is_discarded=is_disc,
+                            discard_reason="excessive_camera_shake_or_low_score" if is_disc else None,
+                            stability_score=m_stab,
+                            expression_score=expr_val,
+                            eye_open_score=eye_open_val,
+                            prosody_excitement_score=m_pros,
+                            is_filler_utterance=False,
+                            gps_lat=v_lat,
+                            gps_lon=v_lon,
+                            words=[],
+                        )
+                    )
 
-        # 2. Process Photos -> Deduplicate bursts and rank top selects
+        # 2. Process Photos -> Perceptual portrait/aesthetic scoring & initial selects
         sorted_photos: list[PhotoAsset] = sorted(
             catalog.photos, key=lambda p: (p.creation_time or "", p.filename)
         )
         photo_candidates: list[CulledSubClip] = []
         for p_idx, ph in enumerate(sorted_photos, start=1):
-            img_list = [ph.preview_path] if ph.preview_path else [ph.path]
+            img_target = ph.preview_path if ph.preview_path and Path(ph.preview_path).exists() else ph.path
+            img_list = [img_target]
             shot_scale, _ = _estimate_shot_scale_and_motion(img_list, ph.caption)
-            blob = f"{ph.filename} {ph.caption} {' '.join(ph.subjects)}"
-            boost = _compute_brief_match_boost(blob, False, must_topics)
-            emo_score = min(10.0, round(ph.quality_score + boost * 0.4, 2))
+            perc = analyze_human_and_aesthetic_perception(img_target, ph.filename)
+            if perc["face_boxes"] and shot_scale == "wide":
+                # Large detected portrait face overrides wide heuristic to medium/closeup
+                fx1, fy1, fx2, fy2 = perc["face_boxes"][0]
+                face_area = (fx2 - fx1) * (fy2 - fy1)
+                shot_scale = "closeup" if face_area >= 0.14 else "medium"
+
+            blob = f"{ph.filename} {ph.caption} {' '.join(ph.subjects)} {perc['inferred_category']}"
+            boost = _compute_brief_match_boost(blob, False, must_topics, avoid_topics)
+            taste_q = float(perc["overall_taste_score"])
+            emo_score = float(np.clip(round(taste_q + boost * 0.45 + float(perc["smile_score"]) * 0.3, 2), 1.0, 10.0))
+            dit_ph = dit_by_path.get(str(Path(ph.path).resolve()))
+            ph_norm_ts = (
+                (dit_ph.normalized_timestamp if dit_ph and dit_ph.normalized_timestamp else None)
+                or ph.creation_time
+                or f"1970-01-01T01:{p_idx % 60:02d}:00Z"
+            )
+            ph_lat = dit_ph.gps_lat if dit_ph and dit_ph.gps_lat is not None else ph.gps_lat
+            ph_lon = dit_ph.gps_lon if dit_ph and dit_ph.gps_lon is not None else ph.gps_lon
+            ph_focal = perc["focal_point"] if ph.focal_point == (0.5, 0.5) else ph.focal_point
             photo_candidates.append(
                 CulledSubClip(
                     subclip_id=f"ph_still_{p_idx:03d}",
@@ -594,23 +766,41 @@ class CullerAgent(BaseEditingAgent):
                     source_path=ph.path,
                     filename=ph.filename,
                     media_type="photo",
-                    normalized_timestamp=ph.creation_time or f"1970-01-01T01:{p_idx % 60:02d}:00Z",
+                    normalized_timestamp=ph_norm_ts,
                     in_tc=0.0,
                     out_tc=3.2,
+                    golden_in=0.0,
+                    golden_out=3.2,
+                    usable_in=0.0,
+                    usable_out=8.0,
                     duration=3.2,
+                    color_primaries="bt709",
+                    color_trc="iec61966-2-1",
+                    color_space="srgb",
+                    pix_fmt="rgb24",
+                    integrated_lufs=-60.0,
+                    snr_db=30.0,
+                    has_diegetic_music=False,
                     roll_type="still",
                     shot_scale=shot_scale,
                     camera_movement="static",
                     orientation=ph.orientation,
-                    focal_point=ph.focal_point,
-                    people_present=list(ph.subjects),
+                    focal_point=ph_focal,
+                    people_present=list(ph.subjects) + (["portrait_subject"] if perc["face_boxes"] else []),
                     summary=ph.caption or f"Family travel photo ({ph.filename})",
                     spoken_text="",
                     emotion_score=emo_score,
                     action_peak_tc=1.5,
-                    aesthetic_score=round(min(10.0, max(1.0, ph.quality_score)), 2),
+                    aesthetic_score=round(min(10.0, max(1.0, taste_q)), 2),
                     brief_match_boost=boost,
+                    subject_category=str(perc["inferred_category"]),
                     is_discarded=False,
+                    stability_score=1.0,
+                    expression_score=round(min(1.0, 0.3 + float(perc["smile_score"]) * 0.7), 3),
+                    eye_open_score=float(perc["eye_open_score"]),
+                    prosody_excitement_score=0.0,
+                    gps_lat=ph_lat,
+                    gps_lon=ph_lon,
                     words=[],
                 )
             )
@@ -646,6 +836,11 @@ class CullerAgent(BaseEditingAgent):
             detail=f"Video spine: {video_dur_sum:.1f}s | Initial photo budget for {target_dur:.0f}s target: {target_active_photos} plates",
         )
 
+        clock_offsets = (
+            dict(blackboard.dit_manifest.camera_clock_offsets_sec)
+            if blackboard.dit_manifest and blackboard.dit_manifest.camera_clock_offsets_sec
+            else {"primary_cam": 0.0}
+        )
         media_index = MediaIndex(
             source_directory=str(blackboard.media_dir),
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -653,7 +848,7 @@ class CullerAgent(BaseEditingAgent):
             total_raw_photos=len(catalog.photos),
             kept_selects_count=kept_count,
             discarded_count=discarded_count,
-            camera_clock_offsets_sec={"primary_cam": 0.0},
+            camera_clock_offsets_sec=clock_offsets,
             subclips=subclips,
         )
 

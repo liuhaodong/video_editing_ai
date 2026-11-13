@@ -92,9 +92,17 @@ def probe_video_file(video_path: Path) -> dict:
             "fps": 30.0,
             "codec": "unknown",
             "color_transfer": "bt709",
+            "codec": "h264",
+            "color_primaries": "bt709",
+            "color_transfer": "bt709",
+            "color_trc": "bt709",
             "color_space": "bt709",
+            "pix_fmt": "yuv420p",
             "has_audio": False,
             "creation_time": None,
+            "camera_make_model": None,
+            "gps_lat": None,
+            "gps_lon": None,
         }
 
     data = json.loads(proc.stdout)
@@ -127,10 +135,35 @@ def probe_video_file(video_path: Path) -> dict:
 
     fps = _parse_fps(v_stream.get("r_frame_rate") or v_stream.get("avg_frame_rate") or "30/1")
     codec = v_stream.get("codec_name", "h264")
-    color_transfer = v_stream.get("color_transfer", "bt709")
-    color_space = v_stream.get("color_space", "bt709")
+    color_primaries = v_stream.get("color_primaries") or "bt709"
+    color_transfer = v_stream.get("color_transfer") or "bt709"
+    color_space = v_stream.get("color_space") or "bt709"
+    pix_fmt = v_stream.get("pix_fmt") or "yuv420p"
     fmt_tags = fmt.get("tags", {}) or {}
-    creation_time = fmt_tags.get("creation_time") or tags.get("creation_time")
+    creation_time = (
+        fmt_tags.get("com.apple.quicktime.creationdate")
+        or fmt_tags.get("creation_time")
+        or tags.get("creation_time")
+    )
+    make_str = str(
+        fmt_tags.get("com.apple.quicktime.make") or fmt_tags.get("com.android.manufacturer") or ""
+    ).strip()
+    model_str = str(
+        fmt_tags.get("com.apple.quicktime.model") or fmt_tags.get("com.android.model") or ""
+    ).strip()
+    cam_make_model = f"{make_str} {model_str}".strip() or None
+
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    iso_loc = str(fmt_tags.get("com.apple.quicktime.location.ISO6709") or fmt_tags.get("location") or "")
+    if iso_loc:
+        m_gps = re.match(r"^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", iso_loc)
+        if m_gps:
+            try:
+                gps_lat = round(float(m_gps.group(1)), 6)
+                gps_lon = round(float(m_gps.group(2)), 6)
+            except ValueError:
+                pass
 
     return {
         "duration": round(duration, 3),
@@ -138,10 +171,96 @@ def probe_video_file(video_path: Path) -> dict:
         "height": height,
         "fps": fps,
         "codec": codec,
+        "color_primaries": color_primaries,
         "color_transfer": color_transfer,
+        "color_trc": color_transfer,
         "color_space": color_space,
+        "pix_fmt": pix_fmt,
         "has_audio": a_stream is not None,
         "creation_time": creation_time,
+        "camera_make_model": cam_make_model,
+        "gps_lat": gps_lat,
+        "gps_lon": gps_lon,
+    }
+
+
+def compute_file_fingerprint(path: Path) -> tuple[int, int, str]:
+    """Return (file_size_bytes, mtime_ns, fast_sha1_hex) using head+tail 64KB chunks for O(1) ingest caching."""
+    import hashlib
+
+    st = path.stat()
+    h = hashlib.sha1()
+    h.update(f"{st.st_size}:{st.st_mtime_ns}".encode("utf-8"))
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+            h.update(head)
+            if st.st_size > 131072:
+                f.seek(max(0, st.st_size - 65536))
+                h.update(f.read(65536))
+    except Exception:
+        pass
+    return st.st_size, st.st_mtime_ns, h.hexdigest()[:20]
+
+
+def probe_audio_signal_metrics(media_path: Path, max_seconds: float = 16.0) -> dict[str, Any]:
+    """Measure integrated LUFS approximation, SNR (dB), and diegetic music presence from mono 8kHz PCM."""
+    import math
+
+    default_res = {"integrated_lufs": -24.0, "snr_db": 22.0, "has_diegetic_music": False}
+    if not media_path.exists():
+        return default_res
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-t",
+        f"{max_seconds:.1f}",
+        "-i",
+        str(media_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "8000",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, check=False)
+    if proc.returncode != 0 or len(proc.stdout) < 1600:
+        return default_res
+
+    samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    mean_sq = float(np.mean(samples * samples)) + 1e-12
+    lufs = round(max(-60.0, min(-5.0, -0.691 + 10.0 * math.log10(mean_sq))), 2)
+
+    win = 400  # 50ms windows at 8kHz
+    n_win = len(samples) // win
+    if n_win < 4:
+        return {"integrated_lufs": lufs, "snr_db": 20.0, "has_diegetic_music": False}
+
+    framed = samples[: n_win * win].reshape(n_win, win)
+    rms_win = np.sqrt(np.mean(framed * framed, axis=1) + 1e-12)
+    db_win = 20.0 * np.log10(rms_win)
+    p90 = float(np.percentile(db_win, 90))
+    p15 = float(np.percentile(db_win, 15))
+    snr_db = round(max(6.0, min(45.0, p90 - p15 + 12.0)), 2)
+
+    # Diegetic music heuristic: sustained active energy + rhythmic envelope modulation + multi-band harmonicity
+    active_ratio = float(np.mean(db_win > (p90 - 14.0)))
+    env_std = float(np.std(db_win))
+    spec = np.abs(np.fft.rfft(framed, axis=1)) + 1e-9
+    geo_mean = np.exp(np.mean(np.log(spec), axis=1))
+    arith_mean = np.mean(spec, axis=1)
+    flatness = float(np.mean(geo_mean / arith_mean))
+    # Pure unmodulated sine test tones have env_std ~ 0.0; live music/singing has rhythmic envelope variance (1.2..9.5 dB)
+    has_music = bool(active_ratio >= 0.72 and 1.2 <= env_std <= 11.0 and flatness < 0.28 and lufs > -34.0)
+    return {
+        "integrated_lufs": lufs,
+        "snr_db": snr_db,
+        "has_diegetic_music": has_music,
     }
 
 
@@ -587,6 +706,12 @@ def build_initial_catalog(
         ext = f.suffix.lower()
         if ext in VIDEO_EXTENSIONS:
             info = probe_video_file(f)
+            _, _, f_hash = compute_file_fingerprint(f)
+            aud_sig = probe_audio_signal_metrics(f) if info["has_audio"] else {
+                "integrated_lufs": -60.0,
+                "snr_db": 20.0,
+                "has_diegetic_music": False,
+            }
             scenes = detect_scenes_and_extract_keyframes(f, info["duration"], keyframes_dir)
             v_color_stats: dict[str, float] = {}
             for sc in scenes:
@@ -607,10 +732,18 @@ def build_initial_catalog(
                     height=info["height"],
                     fps=info["fps"],
                     codec=info["codec"],
+                    color_primaries=info["color_primaries"],
                     color_transfer=info["color_transfer"],
                     color_space=info["color_space"],
+                    pix_fmt=info["pix_fmt"],
                     has_audio=info["has_audio"],
+                    integrated_lufs=aud_sig["integrated_lufs"],
+                    snr_db=aud_sig["snr_db"],
+                    has_diegetic_music=aud_sig["has_diegetic_music"],
+                    file_hash=f_hash,
                     creation_time=info["creation_time"],
+                    gps_lat=info["gps_lat"],
+                    gps_lon=info["gps_lon"],
                     color_stats=v_color_stats,
                     overall_summary=f"Video clip {f.name} ({info['duration']:.1f}s, {info['width']}x{info['height']})",
                     scenes=scenes,

@@ -13,14 +13,15 @@ class VFXAgent(BaseEditingAgent):
     """Pluggable Stage-40 Agent: Attaches non-destructive visual polish & beat-accent VFX to timeline.effects_track."""
 
     role_id = "vfx_designer"
-    display_name = "4. VFX & Motion Polish Designer (Plugin)"
+    display_name = "4b. VFX & Motion Polish Designer"
     stage_order = 40
+    substage_priority = 1
     description = (
         "AI-guided Stage-40 specialist that adds warm golden glow, subtle portrait vignettes, "
         "and beat-drop contrast pops to timeline.effects_track and writes vfx_manifest.json."
     )
     enabled_by_default = True
-    requires_artifacts = ["paper_edit.json", "beat_grid.json"]
+    requires_artifacts = ["paper_edit.json", "beat_grid.json", "timeline.yaml"]
     produces_artifacts = ["vfx_manifest.json"]
     skill_reference_file = "06_vfx_agent.md"
 
@@ -35,9 +36,19 @@ class VFXAgent(BaseEditingAgent):
         for idx, item in enumerate(timeline.visual_track):
             note_low = (item.narrative_note or "").lower()
             if item.roll_type == "a_roll" or (
-                item.type == "photo" and item.ken_burns and item.ken_burns.mode in ("curator_loupe", "cinematic_depth_3d")
+                item.type == "photo"
+                and item.ken_burns
+                and item.ken_burns.mode
+                in (
+                    "curator_loupe",
+                    "cinematic_depth_3d",
+                    "split_diopter_focus",
+                    "glassmorphic_pedestal",
+                    "floating_tilt_plate",
+                    "medium_format_slide",
+                )
             ):
-                # Subtle vignette focus on spoken A-roll hero takes and 3D depth / loupe focal plates
+                # Subtle vignette focus on spoken A-roll hero takes and sculpted optical/3D focal plates
                 effects.append(
                     EffectTrackItem(
                         id=f"fx_{fx_counter:03d}",

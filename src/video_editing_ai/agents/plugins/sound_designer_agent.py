@@ -1,16 +1,199 @@
-"""Stage 45 Sub-Agent: Supervising Sound Designer & Foley/Ambience Mixer (sound_designer)."""
+"""Stage 40 Specialist: Supervising Sound Designer & Loudness/Ducking Mixer (sound_mixer)."""
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 import wave
 
 import numpy as np
 
-from ...models.schema import AudioTrackItem, SoundDesignCue, SoundDesignReport
+from ...models.schema import (
+    AudioMixManifest,
+    AudioTrackItem,
+    ClipAudioMixEntry,
+    CulledSubClip,
+    DuckingEnvelopeSegment,
+    EditTimeline,
+    MediaIndex,
+    SoundDesignCue,
+    SoundDesignReport,
+)
 from ..base import BaseEditingAgent, PipelineBlackboard, register_agent
+
+
+def compute_dialogue_normalization_gain(
+    measured_lufs: float,
+    target_lufs: float = -14.0,
+    min_gain_db: float = -12.0,
+    max_gain_db: float = 12.0,
+) -> tuple[float, float]:
+    """
+    Compute (applied_gain_db, linear_volume) normalizing spoken dialogue toward target_lufs (-14 LUFS).
+    Boosts quiet children's speech (e.g. -25 LUFS) and attenuates loud camera-operator speech (e.g. -9 LUFS).
+    """
+    if measured_lufs <= -65.0:
+        return 0.0, 1.0
+    raw_delta_db = float(target_lufs) - float(measured_lufs)
+    applied_db = round(max(min_gain_db, min(max_gain_db, raw_delta_db)), 3)
+    linear_vol = round(max(0.15, min(3.9811, 10.0 ** (applied_db / 20.0))), 4)
+    return applied_db, linear_vol
+
+
+def build_audio_mix_plan(
+    timeline: EditTimeline,
+    media_index: Optional[MediaIndex] = None,
+    target_dialogue_lufs: float = -14.0,
+    nat_sound_bed_db: float = -20.0,
+    bgm_speech_duck_db: float = -14.0,
+    bgm_diegetic_duck_db: float = -30.0,
+    crossfade_sec: float = 0.33,
+) -> tuple[list[ClipAudioMixEntry], list[DuckingEnvelopeSegment]]:
+    """
+    Build per-clip dialogue loudness normalization entries and frame-accurate BGM ducking segments.
+    Enforces <= -28 dB (default -30 dB) BGM muting during clips flagged with has_diegetic_music.
+    """
+    sc_by_path: dict[str, list[CulledSubClip]] = {}
+    if media_index is not None:
+        for sc in media_index.subclips:
+            sc_by_path.setdefault(sc.source_path, []).append(sc)
+
+    nat_linear = round(10.0 ** (nat_sound_bed_db / 20.0), 4)  # 0.1000 (-20 dB)
+    speech_duck_linear = round(10.0 ** (bgm_speech_duck_db / 20.0), 4)  # 0.1995 (-14 dB)
+    diegetic_duck_linear = round(10.0 ** (bgm_diegetic_duck_db / 20.0), 5)  # 0.03162 (-30 dB <= -28 dB)
+
+    clip_entries: list[ClipAudioMixEntry] = []
+    envelope: list[DuckingEnvelopeSegment] = []
+
+    for clip in timeline.visual_track:
+        cands = sc_by_path.get(clip.source, [])
+        best_sc = min(cands, key=lambda c: abs(c.golden_in - clip.source_in)) if cands else None
+
+        measured_lufs = float(best_sc.integrated_lufs) if best_sc is not None else -20.0
+        has_diegetic = bool(best_sc.has_diegetic_music) if best_sc is not None else False
+        st_sec = round(clip.timeline_start, 3)
+        en_sec = round(clip.timeline_start + clip.duration, 3)
+
+        if clip.type == "photo":
+            clip.volume = 0.0
+            clip.audio_crossfade_sec = 0.0
+            clip_entries.append(
+                ClipAudioMixEntry(
+                    clip_id=clip.id,
+                    role_type="still",
+                    measured_lufs=-70.0,
+                    target_lufs=-70.0,
+                    applied_gain_db=0.0,
+                    linear_volume=0.0,
+                    has_diegetic_music=False,
+                    crossfade_sec=0.0,
+                )
+            )
+            envelope.append(
+                DuckingEnvelopeSegment(
+                    start_sec=st_sec,
+                    end_sec=en_sec,
+                    mode="full_bgm",
+                    bgm_attenuation_db=0.0,
+                    bgm_linear_gain=1.0,
+                    trigger_clip_id=clip.id,
+                )
+            )
+        elif has_diegetic:
+            gain_db, lin_vol = compute_dialogue_normalization_gain(measured_lufs, target_lufs=target_dialogue_lufs)
+            clip.volume = lin_vol
+            clip.audio_crossfade_sec = max(crossfade_sec, clip.audio_crossfade_sec)
+            clip_entries.append(
+                ClipAudioMixEntry(
+                    clip_id=clip.id,
+                    role_type="diegetic_music",
+                    measured_lufs=measured_lufs,
+                    target_lufs=target_dialogue_lufs,
+                    applied_gain_db=gain_db,
+                    linear_volume=lin_vol,
+                    has_diegetic_music=True,
+                    crossfade_sec=clip.audio_crossfade_sec,
+                )
+            )
+            envelope.append(
+                DuckingEnvelopeSegment(
+                    start_sec=st_sec,
+                    end_sec=en_sec,
+                    mode="diegetic_music_mute",
+                    bgm_attenuation_db=bgm_diegetic_duck_db,
+                    bgm_linear_gain=diegetic_duck_linear,
+                    trigger_clip_id=clip.id,
+                )
+            )
+        elif clip.roll_type == "a_roll":
+            gain_db, lin_vol = compute_dialogue_normalization_gain(measured_lufs, target_lufs=target_dialogue_lufs)
+            clip.volume = lin_vol
+            clip.audio_crossfade_sec = max(crossfade_sec, clip.audio_crossfade_sec)
+            clip_entries.append(
+                ClipAudioMixEntry(
+                    clip_id=clip.id,
+                    role_type="dialogue",
+                    measured_lufs=measured_lufs,
+                    target_lufs=target_dialogue_lufs,
+                    applied_gain_db=gain_db,
+                    linear_volume=lin_vol,
+                    has_diegetic_music=False,
+                    crossfade_sec=clip.audio_crossfade_sec,
+                )
+            )
+            envelope.append(
+                DuckingEnvelopeSegment(
+                    start_sec=st_sec,
+                    end_sec=en_sec,
+                    mode="speech_duck",
+                    bgm_attenuation_db=bgm_speech_duck_db,
+                    bgm_linear_gain=speech_duck_linear,
+                    trigger_clip_id=clip.id,
+                )
+            )
+        else:
+            clip.volume = nat_linear
+            clip.audio_crossfade_sec = max(crossfade_sec, clip.audio_crossfade_sec)
+            clip_entries.append(
+                ClipAudioMixEntry(
+                    clip_id=clip.id,
+                    role_type="b_roll_nat",
+                    measured_lufs=measured_lufs,
+                    target_lufs=nat_sound_bed_db,
+                    applied_gain_db=nat_sound_bed_db,
+                    linear_volume=nat_linear,
+                    has_diegetic_music=False,
+                    crossfade_sec=clip.audio_crossfade_sec,
+                )
+            )
+            envelope.append(
+                DuckingEnvelopeSegment(
+                    start_sec=st_sec,
+                    end_sec=en_sec,
+                    mode="nat_sound_bed",
+                    bgm_attenuation_db=0.0,
+                    bgm_linear_gain=1.0,
+                    trigger_clip_id=clip.id,
+                )
+            )
+
+    # Also add speech_duck windows for any Track A1 voiceover cues
+    for a_item in timeline.audio_tracks:
+        if a_item.role == "voiceover" and a_item.duration:
+            envelope.append(
+                DuckingEnvelopeSegment(
+                    start_sec=round(a_item.timeline_start, 3),
+                    end_sec=round(a_item.timeline_start + a_item.duration, 3),
+                    mode="speech_duck",
+                    bgm_attenuation_db=bgm_speech_duck_db,
+                    bgm_linear_gain=speech_duck_linear,
+                    trigger_clip_id=a_item.id,
+                )
+            )
+
+    envelope.sort(key=lambda seg: (seg.start_sec, 0 if seg.mode == "diegetic_music_mute" else 1))
+    return clip_entries, envelope
 
 
 def _synthesize_sound_design_wav(
@@ -19,16 +202,13 @@ def _synthesize_sound_design_wav(
     duration_sec: float = 4.0,
     sample_rate: int = 48000,
 ) -> Path:
-    """
-    Mechanically synthesize a 48kHz stereo spatial ambience bed or subtle transition foley cue.
-    """
+    """Mechanically synthesize a 48kHz stereo spatial ambience bed or subtle transition foley cue."""
     output_wav.parent.mkdir(parents=True, exist_ok=True)
     dur = max(0.5, min(30.0, float(duration_sec)))
     n = int(round(dur * sample_rate))
     t = np.linspace(0.0, dur, n, endpoint=False, dtype=np.float32)
     rng = np.random.default_rng(seed=abs(hash(cue_type)) % 10000 + 7)
 
-    # Smooth fade-in and fade-out envelope
     fi = min(n // 3, int(0.35 * sample_rate))
     fo = min(n // 3, int(0.45 * sample_rate))
     env = np.ones(n, dtype=np.float32)
@@ -39,30 +219,25 @@ def _synthesize_sound_design_wav(
 
     white_l = rng.normal(0.0, 1.0, n).astype(np.float32)
     white_r = rng.normal(0.0, 1.0, n).astype(np.float32)
-    # Moving-average low-pass filter to create warm brown/pink room air
     kernel_len = 64 if "air" in cue_type or "room" in cue_type else 32
     kernel = np.ones(kernel_len, dtype=np.float32) / float(kernel_len)
     warm_l = np.convolve(white_l, kernel, mode="same")
     warm_r = np.convolve(white_r, kernel, mode="same")
 
     if cue_type == "polaroid_shutter":
-        # Tactile mechanical shutter click + film advance whirr
         click_env = np.exp(-t * 28.0) + 0.45 * np.exp(-np.maximum(0.0, t - 0.06) * 22.0)
         sig_l = (white_l * click_env * 0.25).astype(np.float32)
         sig_r = (white_r * click_env * 0.25).astype(np.float32)
     elif cue_type == "optical_loupe_chime":
-        # Delicate crystal glass harmonic shimmer
         chime_env = np.exp(-t * 2.8) * env
         sig_l = (0.14 * np.sin(2.0 * math.pi * 528.0 * t) + 0.07 * np.sin(2.0 * math.pi * 1056.0 * t)) * chime_env
         sig_r = (0.14 * np.sin(2.0 * math.pi * 530.0 * t) + 0.07 * np.sin(2.0 * math.pi * 1060.0 * t)) * chime_env
     elif cue_type == "velvet_whoosh":
-        # Soft sub-bass cinematic transition swell
         swell = np.exp(-((t - dur * 0.45) ** 2) / (2.0 * (dur * 0.18) ** 2))
         sub_tone = np.sin(2.0 * math.pi * (65.0 + 35.0 * (t / dur)) * t)
         sig_l = (warm_l * 0.4 + sub_tone * 0.2) * swell * 0.22
         sig_r = (warm_r * 0.4 + sub_tone * 0.2) * swell * 0.22
     else:
-        # Spatial room tone / breeze / gallery hall acoustic bed with gentle stereo modulation
         mod_l = 0.75 + 0.25 * np.sin(2.0 * math.pi * 0.22 * t)
         mod_r = 0.75 + 0.25 * np.cos(2.0 * math.pi * 0.22 * t)
         harmonic = 0.04 * np.sin(2.0 * math.pi * 110.0 * t) + 0.025 * np.sin(2.0 * math.pi * 165.0 * t)
@@ -80,20 +255,23 @@ def _synthesize_sound_design_wav(
 
 
 @register_agent
-class SoundDesignerAgent(BaseEditingAgent):
-    """Stage 45 Agent: Synthesizes diegetic spatial ambience beds, foley accents, and J/L-cut audio polish."""
+class SoundDesignerMixerAgent(BaseEditingAgent):
+    """Stage 40 Agent: Normalizes dialogue to -14 LUFS, ducks BGM (-14 dB speech / -30 dB diegetic music), and mixes foley."""
 
-    role_id = "sound_designer"
-    display_name = "4c. Supervising Sound Designer & Foley Mixer"
-    stage_order = 45
+    role_id = "sound_mixer"
+    legacy_role_aliases = ["sound_designer"]
+    display_name = "4d. Supervising Sound Designer & Re-Recording Mixer"
+    stage_order = 40
+    substage_priority = 3
     description = (
-        "Big-budget Supervising Sound Designer that layers subtle spatial room-tone ambience under "
-        "silent photo galleries, adds tactile foley accents on Polaroid/Loupe reveals, and enforces "
-        "smooth 0.40s J/L-cut audio crossfades across all video cuts."
+        "Post-assembly re-recording mixer that normalizes dialogue clips toward -14 LUFS, generates "
+        "frame-accurate BGM ducking (-14 dB under speech, -20 dB Nat-Sound under pure B-roll, and "
+        "<=-28 dB deep muting during has_diegetic_music clips), applies 0.33s audio crossfades, and "
+        "synthesizes spatial foley/ambience stems."
     )
     enabled_by_default = True
-    requires_artifacts = ["paper_edit.json"]
-    produces_artifacts = ["sound_design_plan.json"]
+    requires_artifacts = ["media_index.json", "paper_edit.json", "beat_grid.json", "timeline.yaml"]
+    produces_artifacts = ["audio_mix_manifest.json", "sound_design_plan.json"]
     skill_reference_file = "14_sound_designer_agent.md"
 
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
@@ -101,12 +279,25 @@ class SoundDesignerAgent(BaseEditingAgent):
         if timeline is None:
             return {"ambient_beds_count": 0, "foley_accents_count": 0}
 
-        # 1. Mechanical J/L-cut audio crossfade polish across all Track V1 video clips
-        for clip in timeline.visual_track:
-            if clip.type == "video":
-                clip.audio_crossfade_sec = max(0.40, clip.audio_crossfade_sec)
+        # 1. Compute post-assembly dialogue loudness normalization (-14 LUFS), -20 dB Nat-Sound, -30 dB diegetic mute & 0.33s crossfades
+        clip_mix_entries, ducking_envelope = build_audio_mix_plan(
+            timeline=timeline,
+            media_index=blackboard.media_index,
+            target_dialogue_lufs=-14.0,
+            nat_sound_bed_db=-20.0,
+            bgm_speech_duck_db=-14.0,
+            bgm_diegetic_duck_db=-30.0,
+            crossfade_sec=0.33,
+        )
 
-        # 2. Build spatial ambience & foley cues for photo plates and chapter transitions
+        # Calibrate Track A3 BGM duck_volume to -14 dB relative to base_vol (0.28 * 10^(-14/20) = 0.0559)
+        for a_trk in timeline.audio_tracks:
+            if a_trk.role == "music":
+                a_trk.duck_under_dialogue = True
+                a_trk.duck_volume = round(a_trk.volume * (10.0 ** (-14.0 / 20.0)), 4)
+                a_trk.duration = round(timeline.total_duration, 2)
+
+        # 2. Build spatial ambience & foley cues for photo plates
         cues: list[SoundDesignCue] = []
         ambient_count = 0
         foley_count = 0
@@ -161,7 +352,6 @@ class SoundDesignerAgent(BaseEditingAgent):
                         )
                     )
 
-        # Allow AI Agent creative refinement via ai_decisions/sound_designer.json
         ai_resp = self.ask_ai_creative_json(
             blackboard=blackboard,
             prompt=(
@@ -174,7 +364,11 @@ class SoundDesignerAgent(BaseEditingAgent):
         if isinstance(ai_resp, dict) and isinstance(ai_resp.get("cues"), list) and ai_resp["cues"]:
             try:
                 cues = [SoundDesignCue.model_validate(c) for c in ai_resp["cues"]]
-                ambient_count = sum(1 for c in cues if "air" in c.cue_type or "breeze" in c.cue_type or "murmur" in c.cue_type or "room" in c.cue_type)
+                ambient_count = sum(
+                    1
+                    for c in cues
+                    if "air" in c.cue_type or "breeze" in c.cue_type or "murmur" in c.cue_type or "room" in c.cue_type
+                )
                 foley_count = len(cues) - ambient_count
             except Exception:
                 pass
@@ -206,7 +400,24 @@ class SoundDesignerAgent(BaseEditingAgent):
             )
 
         proj_title = blackboard.creative_brief.project_title if blackboard.creative_brief else timeline.project_name
-        report = SoundDesignReport(
+        diegetic_muted = sum(1 for c in clip_mix_entries if c.has_diegetic_music)
+
+        mix_manifest = AudioMixManifest(
+            project_title=proj_title,
+            target_dialogue_lufs=-14.0,
+            nat_sound_bed_db=-20.0,
+            bgm_speech_duck_db=-14.0,
+            bgm_diegetic_duck_db=-30.0,
+            default_crossfade_sec=0.33,
+            diegetic_music_clips_muted=diegetic_muted,
+            clip_mix=clip_mix_entries,
+            ducking_envelope=ducking_envelope,
+        )
+        mix_path = blackboard.project_dir / "audio_mix_manifest.json"
+        mix_manifest.to_json_file(mix_path)
+        blackboard.audio_mix_manifest = mix_manifest
+
+        sd_report = SoundDesignReport(
             project_title=proj_title,
             target_loudness_lufs=-14.0,
             j_l_cut_crossfade_sec=0.40,
@@ -214,25 +425,37 @@ class SoundDesignerAgent(BaseEditingAgent):
             foley_accents_count=foley_count,
             cues=cues,
         )
-        out_path = blackboard.project_dir / "sound_design_plan.json"
-        report.to_json_file(out_path)
-        blackboard.set_custom_artifact("sound_design_plan.json", report.model_dump(mode="json"))
+        sd_path = blackboard.project_dir / "sound_design_plan.json"
+        sd_report.to_json_file(sd_path)
+        blackboard.set_custom_artifact("sound_design_plan.json", sd_report.model_dump(mode="json"))
         timeline.to_yaml(blackboard.project_dir / "timeline.yaml")
 
         blackboard.emit_activity(
             self.role_id,
-            f"Synthesized {ambient_count} spatial ambience beds & {foley_count} foley accents (-14 LUFS master)",
-            detail=f"Saved sound_design_plan.json and {len(cues)} 48kHz stereo WAV stems in sound_design/",
+            f"Normalized {len(clip_mix_entries)} clips (-14 LUFS dialogue, -20 dB Nat-Sound, {diegetic_muted} diegetic BGM mutes) & {len(cues)} foley stems",
+            detail="Saved audio_mix_manifest.json (0.33s crossfades, -30 dB diegetic ducking) + sound_design_plan.json",
         )
         blackboard.send_message(
             sender_role=self.role_id,
             recipient_role="showrunner",
             message_type="handoff",
-            subject=f"Mixed {len(cues)} spatial sound design stems and enforced 0.40s J/L-cut crossfades",
-            payload={"ambient_beds": ambient_count, "foley_accents": foley_count},
+            subject="Post-assembly audio loudness normalization, ducking envelope, and foley stems complete",
+            payload={
+                "clips_mixed": len(clip_mix_entries),
+                "diegetic_music_clips_muted": diegetic_muted,
+                "ambient_beds": ambient_count,
+                "foley_accents": foley_count,
+            },
         )
         return {
+            "clips_mixed_count": len(clip_mix_entries),
+            "diegetic_music_clips_muted": diegetic_muted,
             "ambient_beds_count": ambient_count,
             "foley_accents_count": foley_count,
-            "sound_design_plan_path": str(out_path),
+            "audio_mix_manifest_path": str(mix_path),
+            "sound_design_plan_path": str(sd_path),
         }
+
+
+# Backward-compatible class alias
+SoundDesignerAgent = SoundDesignerMixerAgent

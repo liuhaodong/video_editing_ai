@@ -128,25 +128,30 @@ def _analyze_music_waveform(audio_path: Path, max_duration: float = 180.0) -> Be
 
 @register_agent
 class AudioVibeAgent(BaseEditingAgent):
-    """Agent 4 (Stage 10): Detects music beat/downbeat grid and configures 3-layer audio mix rules."""
+    """Agent 4 (Stage 10): Scoped strictly to BPM, beat/downbeat tracking, and musical energy segmentation."""
 
     role_id = "audio_vibe"
-    display_name = "1b. Audio & Vibe Specialist"
+    display_name = "1b. Music Beat & Energy Analyst"
     stage_order = 10
+    substage_priority = 1
     description = (
-        "Analyzes background music for BPM, beats, downbeats, and energy drops into beat_grid.json, "
-        "and sets -20dB Nat-Sound & -14dB auto-ducking envelopes."
+        "Analyzes selected background music strictly for BPM, beat/downbeat grid, and musical energy "
+        "sections (intro, verse, chorus_drop, outro) into beat_grid.json (delegating audio mixing to Stage 40 sound_mixer)."
     )
     enabled_by_default = True
-    requires_artifacts = ["creative_brief.json"]
+    requires_artifacts = ["creative_brief.json", "bgm_selection.json"]
     produces_artifacts = ["beat_grid.json"]
     skill_reference_file = "04_audio_vibe_agent.md"
 
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
         audio_candidate: Optional[Path] = None
-        if blackboard.extra_audio_paths:
+        if blackboard.bgm_selection and blackboard.bgm_selection.selected_track_path:
+            p_sel = Path(blackboard.bgm_selection.selected_track_path)
+            if p_sel.exists():
+                audio_candidate = p_sel
+        if audio_candidate is None and blackboard.extra_audio_paths:
             audio_candidate = blackboard.extra_audio_paths[0]
-        elif blackboard.catalog and blackboard.catalog.audio_files:
+        elif audio_candidate is None and blackboard.catalog and blackboard.catalog.audio_files:
             p = Path(blackboard.catalog.audio_files[0].path)
             if p.exists():
                 audio_candidate = p
@@ -182,7 +187,7 @@ class AudioVibeAgent(BaseEditingAgent):
         blackboard.emit_activity(
             self.role_id,
             f"Extracted musical beat grid at {beat_grid.tempo_bpm} BPM ({len(beat_grid.beats)} beats, {len(beat_grid.downbeats)} downbeats)",
-            detail="Configured 3-layer audio mix: Track A1 Speech (0dB), Track A2 Nat-Sound (-20dB), Track A3 BGM (-14dB auto-duck)",
+            detail=f"Segmented {len(beat_grid.energy_sections)} musical energy sections (intro/verse/chorus_drop/outro)",
         )
 
         blackboard.send_message(
@@ -193,10 +198,8 @@ class AudioVibeAgent(BaseEditingAgent):
             payload={
                 "tempo_bpm": beat_grid.tempo_bpm,
                 "downbeat_count": len(beat_grid.downbeats),
+                "energy_sections_count": len(beat_grid.energy_sections),
                 "source_audio": beat_grid.source_audio,
-                "nat_sound_db": -20.0,
-                "music_duck_db": -14.0,
-                "duck_ramp_sec": 1.0,
             },
         )
 

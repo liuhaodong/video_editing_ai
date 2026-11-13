@@ -1,4 +1,4 @@
-"""Multi-Agent Pipeline Orchestrator with Executive Movie Production Director supervision and revision loops."""
+"""Multi-Agent Pipeline Orchestrator with Beat-Preserving Chapter Revision Loops (max_revisions=2)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,19 @@ from ..renderer.ffmpeg_composer import render_timeline
 from ..renderer.subtitles import export_ass_subtitles, export_srt_subtitles
 from . import (
     audio_vibe_agent as _audio_vibe,  # noqa: F401
+    cast_continuity_agent as _cast_tracker,  # noqa: F401
     culler_agent as _culler,  # noqa: F401
     director_agent as _director,  # noqa: F401
+    dit_ingest_agent as _dit_ingest,  # noqa: F401
     intake_agent as _intake,  # noqa: F401
+    lead_editor_agent as _lead_editor,  # noqa: F401
+    music_supervisor_agent as _music_sup,  # noqa: F401
+    nle_export_agent as _nle_exporter,  # noqa: F401
+    photo_curator_agent as _photo_curator,  # noqa: F401
     picture_editors as _editors,  # noqa: F401
     showrunner_agent as _showrunner,  # noqa: F401
+    story_producer_agent as _story_prod,  # noqa: F401
+    visual_qc_agent as _visual_qc,  # noqa: F401
 )
 from .base import AgentRegistry, BaseEditingAgent, PipelineBlackboard
 from .director_agent import ProductionDirectorAgent
@@ -51,15 +59,21 @@ class MultiAgentOrchestrator:
         self,
         blackboard: PipelineBlackboard,
         render_video: bool = False,
+        export_fcpxml: bool = True,
         output_video_name: str = "final_story.mp4",
         progress_callback: Optional[Callable[[str, str, int], None]] = None,
         event_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> PipelineBlackboard:
         plan = self.get_execution_plan()
+        if not export_fcpxml:
+            plan = [a for a in plan if a.role_id != "nle_exporter"]
+
+        pre_export_plan = [a for a in plan if a.stage_order <= 60]
+        post_export_plan = [a for a in plan if a.stage_order > 60]
         total_steps = max(1, len(plan))
 
         director: Optional[ProductionDirectorAgent] = next(
-            (a for a in plan if isinstance(a, ProductionDirectorAgent)),
+            (a for a in pre_export_plan if isinstance(a, ProductionDirectorAgent)),
             None,
         )
         stage_reviews: list[DirectorStageReview] = []
@@ -73,12 +87,14 @@ class MultiAgentOrchestrator:
                         **entry,
                     }
                 )
+
             blackboard.activity_callback = _on_bb_activity
 
         agent_pct_span = 75 if render_video else 95
 
-        for idx, agent in enumerate(plan):
-            pct = int(round((idx / total_steps) * agent_pct_span))
+        def _execute_single_agent(agent: BaseEditingAgent, step_idx: int) -> None:
+            nonlocal total_steps
+            pct = int(round((step_idx / max(1, total_steps)) * agent_pct_span))
             t0 = time.monotonic()
             if progress_callback:
                 progress_callback(agent.role_id, f"Running {agent.display_name}...", pct)
@@ -107,8 +123,7 @@ class MultiAgentOrchestrator:
             )
 
             review_obj: Optional[DirectorStageReview] = None
-            # Executive Production Director supervises each stage (< 60) and directs immediate improvements if needed
-            if director is not None and agent.role_id != director.role_id:
+            if director is not None and agent.role_id != director.role_id and agent.stage_order < 60:
                 review, should_rerun = director.supervise_stage(agent, blackboard)
                 review_obj = review
                 stage_reviews.append(review)
@@ -146,7 +161,7 @@ class MultiAgentOrchestrator:
                         }
                     )
 
-            end_pct = int(round(((idx + 1) / total_steps) * agent_pct_span))
+            end_pct = int(round(((step_idx + 1) / max(1, total_steps)) * agent_pct_span))
             if event_callback:
                 event_callback(
                     {
@@ -183,32 +198,56 @@ class MultiAgentOrchestrator:
 
             blackboard.save_snapshot()
 
-            # If Stage 0 ClientIntakeAgent enabled optional agents in creative_brief, merge them into the plan
+        # 1. Execute Stages 00 -> 60
+        idx = 0
+        while idx < len(pre_export_plan):
+            agent = pre_export_plan[idx]
+            _execute_single_agent(agent, idx)
             if agent.role_id == "client_intake" and blackboard.creative_brief is not None:
                 for opt_role in blackboard.creative_brief.enabled_optional_agents:
-                    if opt_role not in self.enabled_optional_roles and opt_role not in self.disabled_roles:
-                        self.enabled_optional_roles.append(opt_role)
-                        new_cls = AgentRegistry.get(opt_role)
-                        if new_cls is not None and not any(a.role_id == opt_role for a in plan):
-                            plan.append(new_cls())
-                            plan.sort(key=lambda a: (a.stage_order, a.role_id))
-                            total_steps = max(1, len(plan))
+                    new_cls = AgentRegistry.get(opt_role)
+                    if new_cls is not None:
+                        canon_id = new_cls.role_id
+                        if canon_id not in self.enabled_optional_roles and canon_id not in self.disabled_roles:
+                            self.enabled_optional_roles.append(canon_id)
+                            if not any(a.role_id == canon_id for a in pre_export_plan):
+                                pre_export_plan.append(new_cls())
+                                pre_export_plan.sort(
+                                    key=lambda a: (a.stage_order, a.substage_priority, a.role_id)
+                                )
+                                total_steps = max(1, len(pre_export_plan) + len(post_export_plan))
+            idx += 1
 
-        # Check if Showrunner requested a full cross-stage revision loop (at most 1 revision round)
-        has_revision_request = any(
-            m.message_type == "revision_request" and m.sender_role == "showrunner"
-            for m in blackboard.messages
-        )
-        if has_revision_request and blackboard.revision_round == 0:
-            blackboard.revision_round = 1
-            blackboard.timeline = None
-            revision_agents = [a for a in self.get_execution_plan() if a.stage_order >= 20]
+        # 2. Structured Beat-Preserving Chapter Revision Loop (strictly capped at max_revisions = 2)
+        while blackboard.pending_revision_directives() and blackboard.revision_round < blackboard.max_revisions:
+            pending = blackboard.pending_revision_directives()
+            blackboard.revision_round += 1
+
+            target_stages: list[int] = []
+            needs_story_rebuild = False
+            for d in pending:
+                t_cls = AgentRegistry.get(d.target_role_id)
+                if t_cls is not None:
+                    target_stages.append(t_cls.stage_order)
+                    if t_cls.role_id == "story_producer":
+                        needs_story_rebuild = True
+                else:
+                    target_stages.append(30)
+
+            min_stage = min(target_stages) if target_stages else 30
+            if needs_story_rebuild:
+                blackboard.timeline = None
+                blackboard.chapter_timeline_cache.clear()
+
+            revision_agents = [
+                a for a in pre_export_plan if min_stage <= a.stage_order <= 60
+            ]
             for r_agent in revision_agents:
                 if progress_callback:
                     progress_callback(
                         r_agent.role_id,
-                        f"[Revision Round 1] Re-running {r_agent.display_name}...",
-                        88,
+                        f"[Revision Round {blackboard.revision_round}/{blackboard.max_revisions}] Re-running {r_agent.display_name}...",
+                        min(92, agent_pct_span),
                     )
                 r_summary = r_agent.run(blackboard)
                 blackboard.executed_agents.append(
@@ -221,19 +260,28 @@ class MultiAgentOrchestrator:
                     }
                 )
             blackboard.send_message(
-                sender_role="showrunner",
+                sender_role="orchestrator",
                 recipient_role="all",
                 message_type="revision_completed",
-                subject="Completed Showrunner revision loop and verified must-have selects",
-                payload={"revision_round": blackboard.revision_round},
+                subject=f"Completed Revision Round {blackboard.revision_round}/{blackboard.max_revisions}",
+                payload={"revision_round": blackboard.revision_round, "min_stage": min_stage},
             )
             blackboard.save_snapshot()
 
-        # Export NLE timelines (.fcpxml, .edl, .otio) and subtitle sidecars (.srt, .ass)
+        # 3. Execute Post-Signoff Stage 65 NLE Exporter (timeline.fcpxml + EDL/OTIO/SRT/ASS)
+        for p_idx, p_agent in enumerate(post_export_plan):
+            _execute_single_agent(p_agent, len(pre_export_plan) + p_idx)
+
+        # Ensure subtitle sidecars exist even if nle_exporter was disabled
         if blackboard.timeline is not None:
-            export_all_nle_formats(blackboard.timeline, blackboard.project_dir)
+            if export_fcpxml and not (blackboard.project_dir / "timeline.fcpxml").exists():
+                export_all_nle_formats(blackboard.timeline, blackboard.project_dir)
             export_srt_subtitles(blackboard.timeline, blackboard.project_dir / "subtitles.srt")
-            export_ass_subtitles(blackboard.timeline, blackboard.project_dir / "subtitles.ass")
+            export_ass_subtitles(
+                blackboard.timeline,
+                blackboard.project_dir / "subtitles.ass",
+                hdr=blackboard.timeline.settings.hdr,
+            )
 
             if render_video:
                 render_t0 = time.monotonic()
@@ -321,6 +369,7 @@ def run_multi_agent_pipeline(
     use_antigravity: bool = True,
     whisper_model: str = "small",
     render_video: bool = False,
+    export_fcpxml: bool = True,
     output_video_name: str = "final_story.mp4",
     progress_callback: Optional[Callable[[str, str, int], None]] = None,
     event_callback: Optional[Callable[[dict[str, Any]], None]] = None,
@@ -346,6 +395,7 @@ def run_multi_agent_pipeline(
     return orchestrator.run(
         blackboard=blackboard,
         render_video=render_video,
+        export_fcpxml=export_fcpxml,
         output_video_name=output_video_name,
         progress_callback=progress_callback,
         event_callback=event_callback,

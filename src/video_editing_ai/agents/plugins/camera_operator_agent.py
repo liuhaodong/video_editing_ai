@@ -23,7 +23,7 @@ class CameraOperatorAgent(BaseEditingAgent):
         "to handheld walking B-roll."
     )
     enabled_by_default = True
-    requires_artifacts = ["media_index.json", "paper_edit.json"]
+    requires_artifacts = ["media_index.json", "paper_edit.json", "timeline.yaml"]
     produces_artifacts = ["cinematography_report.json"]
     skill_reference_file = "11_camera_operator_agent.md"
 
