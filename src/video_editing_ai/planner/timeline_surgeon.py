@@ -48,6 +48,10 @@ def _ripple_shift_downstream(timeline: EditTimeline, pivot_time: float, delta: f
             sub.start = round(max(0.0, sub.start + delta), 2)
             sub.end = round(max(sub.start + 0.2, sub.end + delta), 2)
 
+    for a in timeline.audio_tracks:
+        if a.role != "music" and a.timeline_start >= pivot_time - 0.05:
+            a.timeline_start = round(max(0.0, a.timeline_start + delta), 3)
+
 
 def _resolve_media_source(
     project_dir: Path,
@@ -162,7 +166,18 @@ def apply_surgical_edit(
             if v1_idx is not None:
                 dropped = timeline.visual_track.pop(v1_idx)
                 old_end = dropped.timeline_start + dropped.duration
-                timeline.effects_track = [fx for fx in timeline.effects_track if fx.target_clip_id != clip_id]
+                timeline.effects_track = [
+                    fx
+                    for fx in timeline.effects_track
+                    if not (
+                        fx.target_clip_id == clip_id
+                        or (
+                            fx.target_clip_id is None
+                            and abs(fx.timeline_start - dropped.timeline_start) < 0.05
+                            and abs(fx.duration - dropped.duration) < 0.05
+                        )
+                    )
+                ]
                 _ripple_shift_downstream(timeline, old_end, -dropped.duration)
                 applied_logs.append(f"Dropped V1 clip {clip_id} ({dropped.duration:.2f}s) and closed gap")
             else:
@@ -279,10 +294,11 @@ def apply_surgical_edit(
         # 7. AUDIO-MIX: Adjust BGM volume, ducking level, or B-Roll Nat-Sound volume
         elif action in ("audio-mix", "audio_mix", "audio"):
             for a in timeline.audio_tracks:
-                if op.get("bgm_volume") is not None:
-                    a.volume = float(op["bgm_volume"])
-                if op.get("duck_volume") is not None:
-                    a.duck_volume = float(op["duck_volume"])
+                if a.role == "music":
+                    if op.get("bgm_volume") is not None:
+                        a.volume = float(op["bgm_volume"])
+                    if op.get("duck_volume") is not None:
+                        a.duck_volume = float(op["duck_volume"])
             if op.get("nat_sound_volume") is not None:
                 nat_v = float(op["nat_sound_volume"])
                 for v in timeline.visual_track:
@@ -290,8 +306,11 @@ def apply_surgical_edit(
                         v.volume = nat_v
             applied_logs.append("Updated timeline audio mix parameters")
 
-    # Sync BGM duration with updated total timeline duration
+    # Sync BGM duration and closing cards with updated total timeline duration
     total_dur = round(timeline.total_duration, 3)
+    for t_ov in timeline.title_track:
+        if t_ov.id == "title_closing" or t_ov.style == "closing_card":
+            t_ov.timeline_start = round(max(0.0, total_dur - t_ov.duration - 0.2), 2)
     for a in timeline.audio_tracks:
         if a.role == "music":
             a.duration = total_dur

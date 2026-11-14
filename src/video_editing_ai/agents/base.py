@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import ssl
 from typing import Any, Callable, Optional, Type
 
 from ..models.schema import (
@@ -30,6 +31,19 @@ from ..models.schema import (
     RevisionDirective,
     VisualQCReport,
 )
+
+
+def _build_verified_ssl_context() -> ssl.SSLContext:
+    """Build a verified TLS context using certifi (fixes Python.org macOS missing system CA bundle)."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        macos_cert = Path("/etc/ssl/cert.pem")
+        if macos_cert.exists():
+            return ssl.create_default_context(cafile=str(macos_cert))
+        return ssl.create_default_context()
 
 
 def _now_iso() -> str:
@@ -537,7 +551,7 @@ class BaseEditingAgent(ABC):
                         }
                     ).encode("utf-8")
                     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    with urllib.request.urlopen(req, timeout=timeout_sec, context=_build_verified_ssl_context()) as resp:
                         resp_doc = json.loads(resp.read().decode("utf-8"))
                         cand_text = (
                             resp_doc.get("candidates", [{}])[0]
@@ -583,7 +597,7 @@ class BaseEditingAgent(ABC):
                             "Authorization": f"Bearer {oai_key}",
                         },
                     )
-                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    with urllib.request.urlopen(req, timeout=timeout_sec, context=_build_verified_ssl_context()) as resp:
                         resp_doc = json.loads(resp.read().decode("utf-8"))
                         cand_text = resp_doc.get("choices", [{}])[0].get("message", {}).get("content", "")
                         result = _extract_json_dict(cand_text)
@@ -632,7 +646,7 @@ class BaseEditingAgent(ABC):
                             "anthropic-version": "2023-06-01",
                         },
                     )
-                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    with urllib.request.urlopen(req, timeout=timeout_sec, context=_build_verified_ssl_context()) as resp:
                         resp_doc = json.loads(resp.read().decode("utf-8"))
                         parts_out = resp_doc.get("content", [])
                         cand_text = "".join(p.get("text", "") for p in parts_out if isinstance(p, dict))

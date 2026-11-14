@@ -20,6 +20,25 @@ try:
 except ImportError:
     pass
 
+_UNSUPPORTED_AUDIO_CODECS = {"apac", "apple_apac"}
+
+
+def select_decodable_audio_stream_pos(streams: list[dict]) -> Optional[int]:
+    """Return 0-based audio stream index for the first non-APAC decodable audio stream."""
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    for idx, s in enumerate(audio_streams):
+        codec = str(s.get("codec_name") or "").strip().lower()
+        if codec not in _UNSUPPORTED_AUDIO_CODECS:
+            return idx
+    return None
+
+
+def find_decodable_audio_stream_pos(media_path: Path) -> Optional[int]:
+    """Return 0-based position of the first decodable audio stream for FFmpeg `-map 0:a:<pos>`."""
+    pos = probe_video_file(media_path).get("audio_stream_pos")
+    return int(pos) if pos is not None else None
+
+
 from ..models.schema import (
     AudioAsset,
     MediaCatalog,
@@ -99,6 +118,7 @@ def probe_video_file(video_path: Path) -> dict:
             "color_space": "bt709",
             "pix_fmt": "yuv420p",
             "has_audio": False,
+            "audio_stream_pos": None,
             "creation_time": None,
             "camera_make_model": None,
             "gps_lat": None,
@@ -110,7 +130,9 @@ def probe_video_file(video_path: Path) -> dict:
     streams = data.get("streams", [])
 
     v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
-    a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    decodable_pos = select_decodable_audio_stream_pos(streams)
+    a_stream = audio_streams[decodable_pos] if decodable_pos is not None else None
 
     duration = float(fmt.get("duration") or v_stream.get("duration") or 0.0)
     width = int(v_stream.get("width") or 1920)
@@ -177,6 +199,7 @@ def probe_video_file(video_path: Path) -> dict:
         "color_space": color_space,
         "pix_fmt": pix_fmt,
         "has_audio": a_stream is not None,
+        "audio_stream_pos": decodable_pos,
         "creation_time": creation_time,
         "camera_make_model": cam_make_model,
         "gps_lat": gps_lat,
@@ -210,6 +233,9 @@ def probe_audio_signal_metrics(media_path: Path, max_seconds: float = 16.0) -> d
     default_res = {"integrated_lufs": -24.0, "snr_db": 22.0, "has_diegetic_music": False}
     if not media_path.exists():
         return default_res
+    a_pos = find_decodable_audio_stream_pos(media_path)
+    if a_pos is None:
+        return default_res
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -219,6 +245,8 @@ def probe_audio_signal_metrics(media_path: Path, max_seconds: float = 16.0) -> d
         f"{max_seconds:.1f}",
         "-i",
         str(media_path),
+        "-map",
+        f"0:a:{a_pos}",
         "-vn",
         "-ac",
         "1",

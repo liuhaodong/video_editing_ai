@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import Any, Callable, Optional
@@ -59,6 +60,167 @@ def _video_encoder_args(hdr: bool, force_software: bool = False) -> list[str]:
     return get_video_encoder_args(hdr=hdr, force_software=force_software)
 
 
+def _probe_video_extradata_sig(mp4_path: Path) -> tuple[str, str]:
+    """Return (codec_name, extradata) signature of stream v:0 so mixed parameter sets are never blindly stream-copied."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,extradata",
+                "-show_data",
+                "-of",
+                "json",
+                str(mp4_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return ("", "")
+        data = json.loads(proc.stdout or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            return ("", "")
+        s = streams[0]
+        return (str(s.get("codec_name") or ""), str(s.get("extradata") or ""))
+    except Exception:
+        return ("", "")
+
+
+def _concat_segments_safe(
+    segment_files: list[Path],
+    output_mp4: Path,
+    w_dir: Path,
+    fps: int,
+    hdr: bool,
+    list_filename: str = "segments_concat.txt",
+) -> Path:
+    """Concatenate rendered Track V1 segments safely, falling back to chunked filter concat when hvcC extradata differs."""
+    if not segment_files:
+        raise ValueError("segment_files must not be empty")
+
+    concat_list_path = w_dir / list_filename
+    concat_lines = [f"file '{p.as_posix()}'" for p in segment_files]
+    concat_list_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+
+    if len(segment_files) == 1:
+        shutil.copy2(segment_files[0], output_mp4)
+        return output_mp4
+
+    sigs = [_probe_video_extradata_sig(p) for p in segment_files]
+    uniform_extradata = len(set(sigs)) == 1 and bool(sigs[0][0]) and bool(sigs[0][1])
+
+    if uniform_extradata:
+        concat_cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-display_rotation",
+            "0",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list_path),
+            "-c",
+            "copy",
+            "-metadata:s:v:0",
+            "rotate=0",
+            str(output_mp4),
+        ]
+        proc = subprocess.run(concat_cmd, capture_output=True, text=True, check=False)
+        if proc.returncode == 0:
+            return output_mp4
+
+    def _run_filter_concat(inputs: list[Path], target_mp4: Path) -> None:
+        if len(inputs) == 1:
+            shutil.copy2(inputs[0], target_mp4)
+            return
+
+        v_post = (
+            f"fps={fps},format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc"
+            if hdr
+            else f"fps={fps},format=yuv420p"
+        )
+        in_pads = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(len(inputs)))
+        fc = (
+            f"{in_pads}concat=n={len(inputs)}:v=1:a=1[vcat][acat];"
+            f"[vcat]{v_post}[vout];"
+            f"[acat]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+        )
+        in_args: list[str] = []
+        for p in inputs:
+            in_args.extend(["-i", str(p)])
+
+        def _cmd(force_sw: bool) -> list[str]:
+            return [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *in_args,
+                "-filter_complex",
+                fc,
+                "-map",
+                "[vout]",
+                "-map",
+                "[aout]",
+                *_video_encoder_args(hdr, force_software=force_sw),
+                "-video_track_timescale",
+                "30000",
+                "-metadata:s:v:0",
+                "rotate=0",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k" if hdr else "192k",
+                str(target_mp4),
+            ]
+
+        proc = subprocess.run(_cmd(force_sw=False), capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            proc = subprocess.run(_cmd(force_sw=True), capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                raise RuntimeError(f"FFmpeg filter concat failed: {proc.stderr}")
+
+    chunk_size = 16
+    if len(segment_files) <= chunk_size:
+        _run_filter_concat(segment_files, output_mp4)
+        return output_mp4
+
+    chunk_files: list[Path] = []
+    try:
+        for c_idx in range(0, len(segment_files), chunk_size):
+            chunk_inputs = segment_files[c_idx : c_idx + chunk_size]
+            chunk_mp4 = w_dir / f"concat_chunk_{c_idx // chunk_size:02d}.mp4"
+            _run_filter_concat(chunk_inputs, chunk_mp4)
+            chunk_files.append(chunk_mp4)
+        _concat_segments_safe(
+            segment_files=chunk_files,
+            output_mp4=output_mp4,
+            w_dir=w_dir,
+            fps=fps,
+            hdr=hdr,
+            list_filename="chunks_concat.txt",
+        )
+    finally:
+        for cf in chunk_files:
+            if cf.exists():
+                cf.unlink()
+
+    return output_mp4
+
+
 def _render_video_segment(
     item: VisualTrackItem,
     output_mp4: Path,
@@ -71,6 +233,7 @@ def _render_video_segment(
     """Trim, scale/composite (with ambient blurred backdrop for portrait 9:16 videos), overlay documentary card, and encode."""
     info = probe_video_file(Path(item.source))
     has_audio = bool(info.get("has_audio", False))
+    audio_pos = int(info.get("audio_stream_pos") or 0)
     src_trc = str(info.get("color_transfer") or info.get("color_trc") or "bt709")
     src_prim = str(info.get("color_primaries") or "bt709")
     src_space = str(info.get("color_space") or "bt709")
@@ -274,7 +437,7 @@ def _render_video_segment(
                     "-map",
                     "[vout]",
                     "-map",
-                    "0:a:0",
+                    f"0:a:{audio_pos}",
                 ]
             )
 
@@ -515,34 +678,14 @@ def render_timeline(
     if progress_callback:
         progress_callback("Concatenating Track V1 storyline segments...", 0.75)
 
-    concat_list_path = w_dir / "segments_concat.txt"
-    concat_lines = [f"file '{p.as_posix()}'" for p in segment_files]
-    concat_list_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
-
     base_concat_mp4 = w_dir / "base_concat.mp4"
-    concat_cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-display_rotation",
-        "0",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_list_path),
-        "-c",
-        "copy",
-        "-metadata:s:v:0",
-        "rotate=0",
-        str(base_concat_mp4),
-    ]
-    proc = subprocess.run(concat_cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg concat failed: {proc.stderr}")
+    _concat_segments_safe(
+        segment_files=segment_files,
+        output_mp4=base_concat_mp4,
+        w_dir=w_dir,
+        fps=fps,
+        hdr=hdr,
+    )
 
     # 4. Render RGBA PNG plates for title_track and composite V2 B-Roll + V3 Titles + Full-Length BGM
     if progress_callback:

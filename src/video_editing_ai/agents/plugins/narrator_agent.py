@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
-from typing import Any
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any, Optional
 import wave
 
 import numpy as np
@@ -18,13 +23,66 @@ def _synthesize_narration_wav(
     spoken_text: str,
     duration_sec: float = 3.2,
     sample_rate: int = 48000,
+    prefer_system_tts: Optional[bool] = None,
 ) -> tuple[Path, str]:
     """
-    Mechanically synthesize a broadcast-clean 48kHz stereo WAV file for a narration cue.
-    Produces a warm, syllabic vocal-formant envelope cue so headless and offline environments
-    render deterministically without requiring cloud TTS credentials.
+    Synthesize a broadcast-clean 48kHz stereo WAV file for a narration cue.
+    Uses macOS `/usr/bin/say` + FFmpeg loudnorm when running live on macOS, with
+    deterministic acoustic formant synthesis as a cross-platform / test fallback.
     """
     output_wav.parent.mkdir(parents=True, exist_ok=True)
+    clean_text = (spoken_text or "").strip()
+    use_macos_tts = (
+        (prefer_system_tts if prefer_system_tts is not None else (not os.environ.get("PYTEST_CURRENT_TEST")))
+        and sys.platform == "darwin"
+        and bool(clean_text)
+        and bool(shutil.which("say"))
+        and bool(shutil.which("ffmpeg"))
+    )
+    if use_macos_tts:
+        say_bin = shutil.which("say") or "/usr/bin/say"
+        tmp_fd, tmp_name = tempfile.mkstemp(suffix=".aiff", dir=str(output_wav.parent))
+        os.close(tmp_fd)
+        tmp_aiff = Path(tmp_name)
+        try:
+            subprocess.run(
+                [say_bin, "-v", "Samantha", "-r", "165", "-o", str(tmp_aiff), "--", clean_text],
+                check=True,
+                timeout=30,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(tmp_aiff),
+                    "-ar",
+                    str(sample_rate),
+                    "-ac",
+                    "2",
+                    "-af",
+                    "loudnorm=I=-17:TP=-1.5:LRA=9",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(output_wav),
+                ],
+                check=True,
+                timeout=30,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if output_wav.exists() and output_wav.stat().st_size > 1000:
+                return output_wav, "macos_say_tts"
+        except Exception:
+            pass
+        finally:
+            tmp_aiff.unlink(missing_ok=True)
+
     dur = max(1.2, min(12.0, float(duration_sec)))
     n_samples = int(round(dur * sample_rate))
     t = np.linspace(0.0, dur, n_samples, endpoint=False, dtype=np.float32)
@@ -100,6 +158,14 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
             chap_clips = [sc_map[sid] for sid in chap.selected_subclip_ids if sid in sc_map]
             aroll_count = sum(1 for c in chap_clips if c.roll_type == "a_roll")
             chap_dur = sum(c.duration for c in chap_clips) or 18.0
+            leading_aroll_dur = 0.0
+            for c_item in chap_clips:
+                if c_item.roll_type == "a_roll":
+                    leading_aroll_dur += c_item.duration
+                else:
+                    break
+            raw_loc = (chap.location_tag or "").strip()
+            loc_label = proj_title if (not raw_loc or raw_loc.lower() in ("living", "scene", "general", "location")) else raw_loc
 
             if idx == 0 or aroll_count == 0 or idx == len(paper.chapters) - 1:
                 cue_id = f"vo_{len(cues) + 1:02d}"
@@ -107,10 +173,10 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
                     line = f"{proj_title} begins with quiet anticipation as the journey unfolds."
                     rationale = "Opening chapter voiceover sets the documentary tone and invites the viewer in."
                 elif idx == len(paper.chapters) - 1:
-                    line = f"As the light softens over {chap.location_tag}, the day's small details become lasting memories."
+                    line = f"As the light softens over {loc_label}, the day's small details become lasting memories."
                     rationale = "Closing chapter reflection provides emotional resolution before the final title card."
                 else:
-                    line = f"In {chap.title}, every frame captures the rhythm and texture of {chap.location_tag}."
+                    line = f"In {chap.title}, every frame captures the rhythm and texture of {loc_label}."
                     rationale = "Bridges visual montage chapter without live camera dialogue."
 
                 words_cnt = len(line.split())
@@ -119,7 +185,7 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
                     NarrationCue(
                         cue_id=cue_id,
                         chapter_id=chap.chapter_id,
-                        target_timeline_sec=round(cursor_est + 1.2, 2),
+                        target_timeline_sec=round(cursor_est + leading_aroll_dur + 0.6, 2),
                         duration_sec=est_dur,
                         spoken_text=line,
                         voice_persona=persona,
@@ -175,6 +241,12 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
                 duration_sec=cue.duration_sec,
             )
             cue.audio_path = str(synth_path.resolve())
+            try:
+                with wave.open(str(synth_path), "rb") as wf:
+                    if wf.getframerate() > 0:
+                        cue.duration_sec = round(wf.getnframes() / float(wf.getframerate()), 2)
+            except Exception:
+                pass
 
         report = NarrationScriptReport(
             project_title=proj_title,

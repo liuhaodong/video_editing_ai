@@ -927,8 +927,8 @@ class VisualTrackItem(BaseModel):
     volume: float = Field(
         default=1.0,
         ge=0.0,
-        le=2.0,
-        description="Clip audio volume (1.0 for A-roll speech, ~0.10 [-20dB] for B-roll Nat-Sound, 0.0 for photos)",
+        le=4.0,
+        description="Clip audio volume (up to 4.0 [+12dB] for normalized A-roll speech, ~0.10 [-20dB] for B-roll Nat-Sound, 0.0 for photos)",
     )
     j_l_cut_audio_offset: float = Field(
         default=0.0,

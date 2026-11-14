@@ -41,19 +41,53 @@ def clamp_rgba_for_hdr(
     return (int(r), int(g), int(b), int(a))
 
 
-def _load_font(size: int, bold: bool = True, serif: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _contains_cjk(text: str) -> bool:
+    """Return True when text contains CJK/East Asian ideographs or punctuation."""
+    return any(
+        "\u2e80" <= ch <= "\u9fff"
+        or "\u3000" <= ch <= "\u303f"
+        or "\uf900" <= ch <= "\ufaff"
+        or "\uff00" <= ch <= "\uffef"
+        for ch in (text or "")
+    )
+
+
+def _load_font(
+    size: int,
+    bold: bool = True,
+    serif: bool = False,
+    text: str = "",
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    has_cjk = _contains_cjk(text)
     if serif:
-        candidates = [
+        cjk_serif = [
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+        ]
+        latin_serif = [
             "C:/Windows/Fonts/georgiab.ttf" if bold else "C:/Windows/Fonts/georgia.ttf",
             "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
             "/System/Library/Fonts/Supplemental/Georgia Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Georgia.ttf",
             "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
             "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
         ]
+        candidates = (cjk_serif + latin_serif) if has_cjk else latin_serif
     else:
-        candidates = [
+        cjk_sans = [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+        ]
+        latin_sans = [
             "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/Avenir Next.ttc",
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
@@ -61,9 +95,12 @@ def _load_font(size: int, bold: bool = True, serif: bool = False) -> ImageFont.F
             "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
             "/System/Library/Fonts/HelveticaNeue.ttc",
             "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
+        candidates = (cjk_sans + latin_sans) if has_cjk else latin_sans
     for path in candidates:
         if os.path.exists(path):
             try:
@@ -174,8 +211,8 @@ def render_title_png(
             title_pt = 44 if item.style == "opening_card" else 36
 
         draw = ImageDraw.Draw(img)
-        f_title = _load_font(int(round(title_pt * s)), bold=True, serif=True)
-        f_sub = _load_font(int(round(21 * s)), bold=False, serif=False)
+        f_title = _load_font(int(round(title_pt * s)), bold=True, serif=True, text=item.text)
+        f_sub = _load_font(int(round(21 * s)), bold=False, serif=False, text=sub_text)
 
         bt = draw.textbbox((0, 0), item.text, font=f_title)
         tw = bt[2] - bt[0]
@@ -218,8 +255,8 @@ def render_title_png(
         _draw_bottom_scrim(img, scrim_height_ratio=0.26, max_alpha=115, hdr_safe=use_hdr_safe)
         draw = ImageDraw.Draw(img)
 
-        f_title = _load_font(int(round(25 * s)), bold=True, serif=True)
-        f_sub = _load_font(int(round(16 * s)), bold=False, serif=False)
+        f_title = _load_font(int(round(25 * s)), bold=True, serif=True, text=item.text)
+        f_sub = _load_font(int(round(16 * s)), bold=False, serif=False, text=sub_text)
         f_wp = _load_font(int(round(14 * s)), bold=True, serif=False)
 
         waypoints = item.map_waypoints or [
@@ -305,8 +342,8 @@ def render_title_png(
     elif item.style == "dialogue_badge":
         # Upper-left editorial quote callout badge so it NEVER collides with bottom bilingual subtitles!
         draw = ImageDraw.Draw(img)
-        f_title = _load_font(int(round(23 * s)), bold=True, serif=True)
-        f_sub = _load_font(int(round(16 * s)), bold=False, serif=False)
+        f_title = _load_font(int(round(23 * s)), bold=True, serif=True, text=item.text)
+        f_sub = _load_font(int(round(16 * s)), bold=False, serif=False, text=sub_text)
         tw = draw.textbbox((0, 0), item.text, font=f_title)[2]
         sw = draw.textbbox((0, 0), sub_text, font=f_sub)[2] if sub_text else 0
         pw = min(int(width * 0.50), max(tw, sw) + int(round(56 * s)))
@@ -380,8 +417,8 @@ def render_title_png(
         _draw_bottom_scrim(img, scrim_height_ratio=0.22, max_alpha=100, hdr_safe=use_hdr_safe)
         draw = ImageDraw.Draw(img)
 
-        f_title = _load_font(int(round(26 * s)), bold=True, serif=True)
-        f_sub = _load_font(int(round(18 * s)), bold=False, serif=False)
+        f_title = _load_font(int(round(26 * s)), bold=True, serif=True, text=item.text)
+        f_sub = _load_font(int(round(18 * s)), bold=False, serif=False, text=sub_text)
 
         sub_lines = textwrap.wrap(sub_text, width=78)[:2] if sub_text else []
 

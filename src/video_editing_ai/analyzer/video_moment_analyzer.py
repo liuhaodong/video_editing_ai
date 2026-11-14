@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from ..models.schema import DialogueSegment, VideoAsset
-from .media_probe import compute_file_fingerprint
+from .media_probe import compute_file_fingerprint, find_decodable_audio_stream_pos
 
 
 _OPERATOR_FILLER_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -88,6 +88,9 @@ def _decode_prosody_excitement_curve(
     out = np.full(max(1, n_steps), 0.25, dtype=np.float32)
     if not video_path.exists() or n_steps <= 0:
         return out
+    a_pos = find_decodable_audio_stream_pos(video_path)
+    if a_pos is None:
+        return out
 
     sr = 8000
     cmd = [
@@ -99,6 +102,8 @@ def _decode_prosody_excitement_curve(
         f"{max_duration:.2f}",
         "-i",
         str(video_path),
+        "-map",
+        f"0:a:{a_pos}",
         "-vn",
         "-ac",
         "1",

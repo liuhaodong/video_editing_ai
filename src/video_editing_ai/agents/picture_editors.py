@@ -543,6 +543,7 @@ def _enforce_chapter_revision_constraints(
     beat_grid: Optional[BeatGrid],
     prefer_downbeat: bool,
     media_index_subclips: list[CulledSubClip],
+    global_used_sources: Optional[set[str]] = None,
 ) -> list[VisualTrackItem]:
     """Apply chapter-scoped RevisionDirective constraints while keeping cuts snapped on-grid."""
     max_broll_c = float(constraints.get("max_broll_duration_sec", 4.5))
@@ -561,12 +562,15 @@ def _enforce_chapter_revision_constraints(
             item.duration = new_d
             item.source_out = round(item.source_in + new_d, 3)
 
-    # 2. Break >max_stills_c consecutive static stills by interleaving a video B-roll or trimming excess stills
-    used_sources = {c.source for c in ch_clips}
+    # 2. Break >max_stills_c consecutive static stills by interleaving an unused B-roll video (never recycling A-roll speech)
+    used_sources = set(global_used_sources or set()) | {c.source for c in ch_clips}
     spare_videos = [
         sc
         for sc in media_index_subclips
-        if sc.media_type == "video" and not sc.is_discarded and sc.source_path not in used_sources
+        if sc.media_type == "video"
+        and not sc.is_discarded
+        and sc.roll_type != "a_roll"
+        and sc.source_path not in used_sources
     ]
     revised: list[VisualTrackItem] = []
     still_run = 0
@@ -578,6 +582,9 @@ def _enforce_chapter_revision_constraints(
                 if spare_idx < len(spare_videos):
                     sv = spare_videos[spare_idx]
                     spare_idx += 1
+                    used_sources.add(sv.source_path)
+                    if global_used_sources is not None:
+                        global_used_sources.add(sv.source_path)
                     sv_in = sv.golden_in if sv.golden_in is not None else sv.in_tc
                     sv_dur = _snap_montage_duration(
                         min(max_broll_c, sv.duration),
@@ -611,6 +618,10 @@ def _enforce_chapter_revision_constraints(
                     revised.append(item)
                     still_run = 1
                 else:
+                    if item.ken_burns is not None and item.ken_burns.caption_title:
+                        revised.append(item)
+                        still_run = 1
+                        continue
                     # Drop excess consecutive still when no video cutaway exists so chapter honors <=max_stills_c
                     continue
             else:
@@ -829,6 +840,8 @@ class MontageEditorAgent(BaseEditingAgent):
                 )
                 cursor = round(hook_item.duration, 3)
 
+            all_used_sources = {c.source for c in timeline.visual_track}
+
             for c_idx, chap in enumerate(paper.chapters):
                 # Before entering any music_montage chapter, align preceding chapter tail so montage starts on a downbeat
                 if chap.editing_mode == "music_montage" and rebuilt_v1 and beat_grid is not None:
@@ -861,6 +874,7 @@ class MontageEditorAgent(BaseEditingAgent):
                         beat_grid=beat_grid,
                         prefer_downbeat=(chap.editing_mode == "music_montage"),
                         media_index_subclips=(media_index.subclips if media_index else []),
+                        global_used_sources=all_used_sources,
                     )
                     snapped_count += len(ch_clips)
 
@@ -1117,14 +1131,49 @@ class MontageEditorAgent(BaseEditingAgent):
         }
 
 
+def _ripple_shift_downstream_tracks(
+    timeline: EditTimeline,
+    after_v1_index: int,
+    pivot_time: float,
+    delta: float,
+    exclude_clip_id: str,
+) -> None:
+    """Shift V1 clips after `after_v1_index` and all downstream secondary tracks starting at >= `pivot_time`."""
+    if abs(delta) < 1e-4:
+        return
+    thresh = pivot_time - 0.05
+    for v_item in timeline.visual_track[after_v1_index + 1 :]:
+        v_item.timeline_start = round(max(0.0, v_item.timeline_start + delta), 3)
+    for b in timeline.broll_track:
+        if b.timeline_start >= thresh:
+            b.timeline_start = round(max(0.0, b.timeline_start + delta), 3)
+    for t_ov in timeline.title_track:
+        if t_ov.timeline_start >= thresh:
+            t_ov.timeline_start = round(max(0.0, t_ov.timeline_start + delta), 3)
+    for fx in timeline.effects_track:
+        if fx.target_clip_id != exclude_clip_id and fx.timeline_start >= thresh:
+            fx.timeline_start = round(max(0.0, fx.timeline_start + delta), 3)
+    for m in timeline.markers:
+        if m.time_sec >= thresh:
+            m.time_sec = round(max(0.0, m.time_sec + delta), 3)
+    for sub in timeline.subtitles.items:
+        if sub.start >= thresh:
+            sub.start = round(max(0.0, sub.start + delta), 2)
+            sub.end = round(max(sub.start + 0.2, sub.end + delta), 2)
+    for a_item in timeline.audio_tracks:
+        if a_item.role != "music" and a_item.timeline_start >= thresh:
+            a_item.timeline_start = round(max(0.0, a_item.timeline_start + delta), 3)
+
+
 def _apply_timeline_intelligence_to_obj(timeline: EditTimeline, overrides: dict[str, Any]) -> int:
     """Apply AI transition, duration, photo mode, and lower-third overrides directly to an EditTimeline."""
     clips_ov = overrides.get("clips") or {}
     if isinstance(clips_ov, list):
         clips_ov = {str(c.get("id") or c.get("clip_id")): c for c in clips_ov if isinstance(c, dict)}
 
+    timeline.recalculate_sequential_starts()
     updated = 0
-    for item in timeline.visual_track:
+    for idx, item in enumerate(timeline.visual_track):
         u = clips_ov.get(item.id)
         if not isinstance(u, dict):
             continue
@@ -1140,10 +1189,28 @@ def _apply_timeline_intelligence_to_obj(timeline: EditTimeline, overrides: dict[
                 type=t_type,  # type: ignore[arg-type]
                 duration=0.0 if t_type in ("none", "cut") else float(u.get("transition_duration", 0.35)),
             )
+        if isinstance(u.get("source_in"), (int, float)):
+            item.source_in = round(max(0.0, float(u["source_in"])), 3)
+            item.source_out = round(item.source_in + item.duration, 3)
+        if isinstance(u.get("volume"), (int, float)):
+            item.volume = round(max(0.0, min(4.0, float(u["volume"]))), 4)
         if isinstance(u.get("duration"), (int, float)):
-            new_d = max(1.8, min(12.0, float(u["duration"])))
-            item.duration = round(new_d, 2)
-            item.source_out = round(item.source_in + new_d, 2)
+            old_dur = item.duration
+            old_end = round(item.timeline_start + old_dur, 3)
+            new_d = round(max(1.8, min(12.0, float(u["duration"]))), 2)
+            delta = round(new_d - old_dur, 3)
+            item.duration = new_d
+            item.source_out = round(item.source_in + new_d, 3)
+            for fx in timeline.effects_track:
+                if fx.target_clip_id == item.id:
+                    fx.duration = new_d
+            _ripple_shift_downstream_tracks(
+                timeline,
+                after_v1_index=idx,
+                pivot_time=old_end,
+                delta=delta,
+                exclude_clip_id=item.id,
+            )
         if item.ken_burns is not None:
             if u.get("photo_mode"):
                 item.ken_burns.mode = u["photo_mode"]
@@ -1153,10 +1220,21 @@ def _apply_timeline_intelligence_to_obj(timeline: EditTimeline, overrides: dict[
                 item.ken_burns.caption_title = str(u["caption_title"])
             if u.get("caption_subtitle"):
                 item.ken_burns.caption_subtitle = str(u["caption_subtitle"])
+            if "secondary_source" in u:
+                item.ken_burns.secondary_source = str(u["secondary_source"]) if u["secondary_source"] else None
+            if "tertiary_source" in u:
+                item.ken_burns.tertiary_source = str(u["tertiary_source"]) if u["tertiary_source"] else None
         updated += 1
 
     if updated > 0:
         timeline.recalculate_sequential_starts()
+        clip_by_id = {c.id: c for c in timeline.visual_track}
+        for fx in timeline.effects_track:
+            if fx.target_clip_id and fx.target_clip_id in clip_by_id:
+                fx.timeline_start = clip_by_id[fx.target_clip_id].timeline_start
+        for t_ov in timeline.title_track:
+            if t_ov.id == "title_closing" or t_ov.style == "closing_card":
+                t_ov.timeline_start = round(max(0.0, timeline.total_duration - t_ov.duration - 0.2), 2)
         for a_item in timeline.audio_tracks:
             if a_item.role == "music":
                 a_item.duration = round(timeline.total_duration, 2)

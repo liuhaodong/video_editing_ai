@@ -443,7 +443,7 @@ def build_ask_question_tool_payload(questions: list[InterviewQuestion], max_ques
     for q in ordered[:max_questions]:
         clean_q = re.sub(r"^\d+\.\s*", "", q.question).strip()
         if q.recommendation_rationale:
-            short_rat = q.recommendation_rationale.split(".")[0].strip() + "."
+            short_rat = re.split(r"\.(?:\s+|$)", q.recommendation_rationale)[0].strip() + "."
             clean_q = f"{clean_q} — {short_rat}"
 
         formatted_opts: list[str] = []

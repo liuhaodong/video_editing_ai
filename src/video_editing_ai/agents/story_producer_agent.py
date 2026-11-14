@@ -11,7 +11,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 
 from ..analyzer.semantic_intelligence import SemanticEmbeddingEngine
-from ..models.schema import ChapterPlan, ColdOpenHookSlot, CulledSubClip, PaperEdit
+from ..models.schema import ChapterPlan, ColdOpenHookSlot, CreativeBrief, CulledSubClip, PaperEdit
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
 
 
@@ -978,6 +978,15 @@ def apply_story_plan_overrides(
         raise FileNotFoundError(f"paper_edit.json not found in {proj}")
 
     pe = PaperEdit.from_json_file(pe_path)
+    if overrides.get("project_title"):
+        new_title = str(overrides["project_title"]).strip()
+        if new_title:
+            pe.project_title = new_title
+            cb_path = proj / "creative_brief.json"
+            if cb_path.exists():
+                cb = CreativeBrief.from_json_file(cb_path)
+                cb.project_title = new_title
+                cb.to_json_file(cb_path)
     if "cold_open_subclip_id" in overrides:
         pe.cold_open_subclip_id = overrides["cold_open_subclip_id"]
     if "cold_open_in_tc" in overrides:
@@ -988,6 +997,36 @@ def apply_story_plan_overrides(
         pe.cold_open_hook_caption = str(overrides["cold_open_hook_caption"] or "")
     if "cold_open_rationale" in overrides:
         pe.cold_open_rationale = str(overrides["cold_open_rationale"] or "")
+    if any(
+        k in overrides
+        for k in (
+            "cold_open_subclip_id",
+            "cold_open_in_tc",
+            "cold_open_out_tc",
+            "cold_open_hook_caption",
+            "cold_open_rationale",
+        )
+    ):
+        if not pe.cold_open_subclip_id:
+            pe.cold_open_hook = None
+        else:
+            prev_slot = pe.cold_open_hook
+            pe.cold_open_hook = ColdOpenHookSlot(
+                enabled=True,
+                subclip_id=pe.cold_open_subclip_id,
+                in_tc=(
+                    pe.cold_open_in_tc
+                    if pe.cold_open_in_tc is not None
+                    else (prev_slot.in_tc if prev_slot else 0.0)
+                ),
+                out_tc=(
+                    pe.cold_open_out_tc
+                    if pe.cold_open_out_tc is not None
+                    else (prev_slot.out_tc if prev_slot else 3.8)
+                ),
+                caption=pe.cold_open_hook_caption,
+                rationale=pe.cold_open_rationale,
+            )
     if overrides.get("story_arc_summary"):
         pe.story_arc_summary = str(overrides["story_arc_summary"])
     if overrides.get("story_arc_mode") in ("chronological_cinema", "hero_journey", "thematic_essay", "high_energy_reel"):

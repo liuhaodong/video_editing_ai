@@ -94,7 +94,7 @@ def render_director_screening_sheet(
                 try:
                     import subprocess
 
-                    seek_t = max(0.0, float(clip.in_tc) + float(clip.duration) * 0.5)
+                    seek_t = max(0.0, float(getattr(clip, "source_in", 0.0) or 0.0) + float(clip.duration) * 0.5)
                     subprocess.run(
                         [
                             "ffmpeg",

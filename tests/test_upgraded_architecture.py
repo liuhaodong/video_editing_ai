@@ -45,14 +45,21 @@ from video_editing_ai.models.schema import (
     EditTimeline,
     EnergySection,
     KenBurnsConfig,
+    MediaCatalog,
     MediaIndex,
     PaperEdit,
+    PhotoAsset,
     SubtitleConfig,
     SubtitleItem,
     TimelineMarker,
     TimelineSettings,
     TitleOverlayItem,
+    VideoAsset,
     VisualTrackItem,
+)
+from video_editing_ai.agents.plugins.motion_graphics_agent import (
+    _format_exif_date,
+    _format_gps_or_camera,
 )
 from video_editing_ai.renderer.ffmpeg_composer import _build_ducking_volume_expr
 from video_editing_ai.renderer.ken_burns import build_hdr_color_filters
@@ -886,3 +893,565 @@ def test_gate6_and_gate7_fcpxml_integrity_and_docs_sync_cli(tmp_path: Path) -> N
         assert f"`{cls.role_id}`" in skill_text, f"{cls.role_id} missing from SKILL.md"
         assert f"`{cls.__name__}`" in skill_text, f"{cls.__name__} missing from SKILL.md"
         assert (refs_dir / cls.skill_reference_file).exists(), f"Missing playbook {cls.skill_reference_file}"
+
+
+def test_motion_graphics_exif_stamp_string_dates_and_west_hemisphere(tmp_path: Path) -> None:
+    """Verify MotionGraphicsTitleAgent handles string creation_time, W/S coords, and camera_make_model fallback."""
+    assert _format_exif_date("2026-10-25T11:15:30-07:00") == "2026.10.25"
+    assert _format_exif_date("2026:10:25 14:20:00") == "2026.10.25"
+    assert _format_gps_or_camera(37.7857, -122.4011, "iPhone") == "37.79N, 122.40W"
+    assert _format_gps_or_camera(0.0, 0.0, "iPhone") == "0.00N, 0.00E"
+    assert _format_gps_or_camera(None, None, "Apple iPhone 18 Pro") == "Apple iPhone 18 Pro"
+
+    def _run_case(name: str, catalog: MediaCatalog) -> list[str]:
+        proj_dir = tmp_path / name
+        media_dir = tmp_path / f"{name}_media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        bb = PipelineBlackboard(media_dir=media_dir, project_dir=proj_dir)
+        bb.creative_brief = CreativeBrief(project_title="SFMOMA Test", raw_user_prompt="SFMOMA test")
+        bb.paper_edit = PaperEdit(project_title="SFMOMA Test", story_arc_summary="Day at SFMOMA")
+        bb.catalog = catalog
+        bb.timeline = EditTimeline(
+            project_name="SFMOMA Test",
+            settings=TimelineSettings(width=1920, height=1080, fps=30, hdr=False),
+            visual_track=[
+                VisualTrackItem(
+                    id="v1_01",
+                    type="video",
+                    roll_type="a_roll",
+                    source=str(media_dir / "clip.mov"),
+                    source_in=0.0,
+                    source_out=30.0,
+                    duration=30.0,
+                    timeline_start=0.0,
+                )
+            ],
+        )
+        res = MotionGraphicsTitleAgent().run(bb)
+        assert res["graphics_injected"] >= 1
+        assert (proj_dir / "graphics_manifest.json").exists()
+        return [f"{t.text} | {t.subtitle}" for t in bb.timeline.title_track]
+
+    sf_photo_titles = _run_case(
+        "sf_photo",
+        MediaCatalog(
+            source_directory=str(tmp_path),
+            created_at="2026-10-25T18:00:00Z",
+            photos=[
+                PhotoAsset(
+                    id="p1",
+                    path=str(tmp_path / "p1.heic"),
+                    filename="p1.heic",
+                    width=4032,
+                    height=3024,
+                    creation_time="2026-10-25T11:15:30-07:00",
+                    gps_lat=37.7857,
+                    gps_lon=-122.4011,
+                    camera_make_model="Apple iPhone 18 Pro",
+                )
+            ],
+        ),
+    )
+    assert any("2026.10.25" in s and "37.79N, 122.40W" in s for s in sf_photo_titles)
+
+    no_gps_first_photo_titles = _run_case(
+        "no_gps_first_photo",
+        MediaCatalog(
+            source_directory=str(tmp_path),
+            created_at="2026-10-25T18:00:00Z",
+            photos=[
+                PhotoAsset(
+                    id="p2",
+                    path=str(tmp_path / "p2.heic"),
+                    filename="p2.heic",
+                    width=3024,
+                    height=4032,
+                    creation_time="2026:10:25 12:00:00",
+                    camera_make_model="Apple iPhone 18 Pro",
+                ),
+                PhotoAsset(
+                    id="p3",
+                    path=str(tmp_path / "p3.heic"),
+                    filename="p3.heic",
+                    width=4032,
+                    height=3024,
+                    creation_time="2026:10:25 12:05:00",
+                    gps_lat=37.7857,
+                    gps_lon=-122.4011,
+                ),
+            ],
+        ),
+    )
+    assert any("2026.10.25" in s and "Apple iPhone 18 Pro" in s for s in no_gps_first_photo_titles)
+
+    video_only_titles = _run_case(
+        "video_only",
+        MediaCatalog(
+            source_directory=str(tmp_path),
+            created_at="2026-10-25T18:00:00Z",
+            videos=[
+                VideoAsset(
+                    id="v1",
+                    path=str(tmp_path / "v1.mov"),
+                    filename="v1.mov",
+                    duration=8.0,
+                    width=3840,
+                    height=2160,
+                    fps=30.0,
+                    creation_time="2026-10-25T14:05:00Z",
+                ),
+                VideoAsset(
+                    id="v2",
+                    path=str(tmp_path / "v2.mov"),
+                    filename="v2.mov",
+                    duration=8.0,
+                    width=3840,
+                    height=2160,
+                    fps=30.0,
+                    creation_time="2026-10-25T14:10:00Z",
+                    gps_lat=37.7857,
+                    gps_lon=-122.4011,
+                ),
+            ],
+        ),
+    )
+    assert any("2026.10.25" in s for s in video_only_titles)
+
+    no_gps_anywhere_titles = _run_case(
+        "no_gps_anywhere",
+        MediaCatalog(
+            source_directory=str(tmp_path),
+            created_at="2026-10-25T18:00:00Z",
+            videos=[
+                VideoAsset(
+                    id="v3",
+                    path=str(tmp_path / "v3.mov"),
+                    filename="v3.mov",
+                    duration=8.0,
+                    width=3840,
+                    height=2160,
+                    fps=30.0,
+                    creation_time="2026-10-25T15:00:00Z",
+                )
+            ],
+        ),
+    )
+    assert any("SFMOMA Test" in s for s in no_gps_anywhere_titles)
+
+
+def test_audio_stream_selection_and_whisper_pcm_decode(tmp_path: Path) -> None:
+    """Verify non-APAC audio stream selection and 16kHz PCM decoding for faster-whisper."""
+    from video_editing_ai.analyzer.media_probe import probe_video_file, select_decodable_audio_stream_pos
+    from video_editing_ai.analyzer.transcriber import _decode_audio_pcm_16k
+
+    assert (
+        select_decodable_audio_stream_pos(
+            [
+                {"codec_type": "video", "codec_name": "hevc"},
+                {"codec_type": "audio", "codec_name": "apple_apac"},
+                {"codec_type": "audio", "codec_name": "aac"},
+            ]
+        )
+        == 1
+    )
+    assert select_decodable_audio_stream_pos([{"codec_type": "audio", "codec_name": "apac"}]) is None
+    assert select_decodable_audio_stream_pos([{"codec_type": "audio", "codec_name": "aac"}]) == 0
+
+    synth = _make_synthetic_video(tmp_path / "synth_pcm.mp4", duration=2.0, freq=440)
+    info = probe_video_file(synth)
+    assert info["has_audio"] is True
+    assert info["audio_stream_pos"] == 0
+
+    pcm = _decode_audio_pcm_16k(synth)
+    assert pcm is not None
+    assert pcm.dtype == np.float32
+    assert 24000 <= pcm.size <= 36000
+    assert float(np.max(np.abs(pcm))) > 0.01
+
+
+def test_timeline_yaml_gain_roundtrip_cold_open_sync_ripple_and_cjk_title(tmp_path: Path) -> None:
+    """Verify +12dB YAML round-trip, cold_open_hook override sync, ripple duration edits, and CJK title font."""
+    from video_editing_ai.agents.picture_editors import _apply_timeline_intelligence_to_obj
+    from video_editing_ai.agents.story_producer_agent import apply_story_plan_overrides
+    from video_editing_ai.models.schema import ColdOpenHookSlot, EffectTrackItem
+    from video_editing_ai.renderer.titles import _load_font, render_title_png
+
+    # 1. VisualTrackItem.volume up to 4.0 (+12dB dialogue boost) round-trips via EditTimeline YAML
+    tl = EditTimeline(
+        project_name="SFMOMA — A Day in Modern Art",
+        visual_track=[
+            VisualTrackItem(
+                id="clip_001",
+                type="video",
+                roll_type="a_roll",
+                source=str(tmp_path / "a.mov"),
+                timeline_start=0.0,
+                duration=4.0,
+                source_in=0.0,
+                source_out=4.0,
+                volume=3.9811,
+            ),
+            VisualTrackItem(
+                id="clip_002",
+                type="photo",
+                roll_type="still",
+                source=str(tmp_path / "p.heic"),
+                timeline_start=4.0,
+                duration=3.0,
+                source_in=0.0,
+                source_out=3.0,
+                volume=0.0,
+                ken_burns=KenBurnsConfig(mode="parallax_gallery", caption_title="Gallery", caption_subtitle="Test"),
+            ),
+        ],
+        markers=[
+            TimelineMarker(time_sec=0.0, name="Act I"),
+            TimelineMarker(time_sec=4.0, name="Act II"),
+        ],
+        title_track=[
+            TitleOverlayItem(id="title_opening", style="opening_card", text="Open", timeline_start=0.2, duration=2.0),
+            TitleOverlayItem(id="title_quote", style="dialogue_badge", text="看出来3D了吗", timeline_start=4.5, duration=2.0),
+            TitleOverlayItem(id="title_closing", style="closing_card", text="Fin", timeline_start=4.8, duration=2.0),
+        ],
+        effects_track=[
+            EffectTrackItem(id="fx_1", effect_type="vignette_focus", target_clip_id="clip_001", timeline_start=0.0, duration=4.0),
+            EffectTrackItem(id="fx_2", effect_type="vignette_focus", target_clip_id="clip_002", timeline_start=4.0, duration=3.0),
+        ],
+        audio_tracks=[
+            AudioTrackItem(id="bgm_main", role="music", source=str(tmp_path / "bgm.mp3"), timeline_start=0.0, duration=7.0),
+            AudioTrackItem(id="sfx_01", role="sfx", source=str(tmp_path / "sfx.wav"), timeline_start=4.2, duration=1.0),
+        ],
+        subtitles=SubtitleConfig(
+            items=[
+                SubtitleItem(id="sub_1", start=0.5, end=3.5, text="这次我们去博物馆", speaker="Speaker"),
+                SubtitleItem(id="sub_2", start=4.3, end=6.0, text="看到3D了吗", speaker="Speaker"),
+            ]
+        ),
+    )
+    tl_path = tmp_path / "timeline.yaml"
+    tl.to_yaml(tl_path)
+    reloaded = EditTimeline.from_yaml(tl_path)
+    assert reloaded.visual_track[0].volume == pytest.approx(3.9811, rel=1e-4)
+
+    # 2. _apply_timeline_intelligence_to_obj ripples downstream tracks accurately when clip durations expand
+    _apply_timeline_intelligence_to_obj(
+        reloaded,
+        {"clips": {"clip_001": {"duration": 6.0}, "clip_002": {"duration": 5.5}}},
+    )
+    assert reloaded.total_duration == pytest.approx(11.5, abs=1e-2)
+    assert reloaded.visual_track[1].timeline_start == pytest.approx(6.0, abs=1e-2)
+    assert reloaded.markers[1].time_sec == pytest.approx(6.0, abs=1e-2)
+    assert reloaded.effects_track[0].duration == pytest.approx(6.0, abs=1e-2)
+    assert reloaded.effects_track[1].timeline_start == pytest.approx(6.0, abs=1e-2)
+    assert reloaded.effects_track[1].duration == pytest.approx(5.5, abs=1e-2)
+    assert reloaded.subtitles.items[0].start == pytest.approx(0.5, abs=1e-2)
+    assert reloaded.subtitles.items[1].start == pytest.approx(6.3, abs=1e-2)
+    assert reloaded.title_track[1].timeline_start == pytest.approx(6.5, abs=1e-2)
+    assert reloaded.title_track[2].timeline_start == pytest.approx(9.3, abs=1e-2)
+    assert reloaded.audio_tracks[0].duration == pytest.approx(11.5, abs=1e-2)
+    assert reloaded.audio_tracks[1].timeline_start == pytest.approx(6.2, abs=1e-2)
+
+    # 3. apply_story_plan_overrides syncs cold_open_hook when cold_open_subclip_id overrides are supplied
+    proj_story = tmp_path / "story_proj"
+    proj_story.mkdir(parents=True, exist_ok=True)
+    PaperEdit(
+        project_title="Old Title",
+        story_arc_summary="Summary",
+        cold_open_hook=ColdOpenHookSlot(enabled=True, subclip_id="stale_hook", in_tc=1.0, out_tc=3.0),
+        cold_open_subclip_id="stale_hook",
+    ).to_json_file(proj_story / "paper_edit.json")
+    apply_story_plan_overrides(
+        proj_story,
+        {
+            "project_title": "SFMOMA — A Day in Modern Art",
+            "cold_open_subclip_id": "new_leap_hook",
+            "cold_open_in_tc": 7.5,
+            "cold_open_out_tc": 11.2,
+            "cold_open_hook_caption": "Three Leaps Inside SFMOMA",
+        },
+    )
+    pe_updated = PaperEdit.from_json_file(proj_story / "paper_edit.json")
+    assert pe_updated.cold_open_hook is not None
+    assert pe_updated.cold_open_hook.subclip_id == "new_leap_hook"
+    assert pe_updated.cold_open_hook.in_tc == pytest.approx(7.5)
+    assert pe_updated.cold_open_hook.out_tc == pytest.approx(11.2)
+    assert pe_updated.cold_open_hook.caption == "Three Leaps Inside SFMOMA"
+
+    # 4. CJK serif & dialogue_badge rendering uses CJK-capable font on macOS
+    cjk_sample = "看到 看出来3D了吗"
+    cjk_font = _load_font(28, bold=True, serif=True, text=cjk_sample)
+    if sys.platform == "darwin":
+        family_name = " ".join(cjk_font.getname()).lower()
+        assert any(k in family_name for k in ("songti", "pingfang", "heiti", "hiragino", "arial unicode"))
+    badge_png = tmp_path / "cjk_badge.png"
+    render_title_png(
+        TitleOverlayItem(
+            id="t_cjk",
+            style="dialogue_badge",
+            text=f'"{cjk_sample}"',
+            subtitle="Candid Spoken Moment",
+            timeline_start=0.0,
+            duration=3.0,
+            hdr_safe=True,
+        ),
+        badge_png,
+        width=1280,
+        height=720,
+        hdr_safe=True,
+    )
+    assert badge_png.exists() and badge_png.stat().st_size > 1000
+
+
+def test_surgical_drop_ripple_audio_role_and_revision_constraints(tmp_path: Path) -> None:
+    """Verify surgical drop ripples non-music audio & closing card, audio-mix guards non-music, and revision constraints exclude A-roll."""
+    from video_editing_ai.agents.picture_editors import (
+        _apply_timeline_intelligence_to_obj,
+        _enforce_chapter_revision_constraints,
+    )
+    from video_editing_ai.models.schema import CulledSubClip, EffectTrackItem
+    from video_editing_ai.planner.timeline_surgeon import apply_surgical_edit
+
+    proj = tmp_path / "surgeon_proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    tl = EditTimeline(
+        project_name="Test Surgical Drop",
+        visual_track=[
+            VisualTrackItem(
+                id="c1",
+                type="video",
+                roll_type="a_roll",
+                source=str(tmp_path / "c1.mov"),
+                timeline_start=0.0,
+                duration=3.0,
+                source_in=0.0,
+                source_out=3.0,
+                volume=1.0,
+            ),
+            VisualTrackItem(
+                id="c2_break",
+                type="video",
+                roll_type="b_roll",
+                source=str(tmp_path / "c2.mov"),
+                timeline_start=3.0,
+                duration=2.5,
+                source_in=0.0,
+                source_out=2.5,
+                volume=0.1,
+            ),
+            VisualTrackItem(
+                id="c3",
+                type="photo",
+                roll_type="still",
+                source=str(tmp_path / "c3.heic"),
+                timeline_start=5.5,
+                duration=4.5,
+                source_in=0.0,
+                source_out=4.5,
+                volume=0.0,
+                ken_burns=KenBurnsConfig(mode="parallax_gallery", caption_title="Gallery Plate"),
+            ),
+        ],
+        title_track=[
+            TitleOverlayItem(id="title_closing", style="closing_card", text="Fin", timeline_start=7.8, duration=2.0),
+        ],
+        effects_track=[
+            EffectTrackItem(id="fx_break", effect_type="vignette_focus", target_clip_id="c2_break", timeline_start=3.0, duration=2.5),
+            EffectTrackItem(id="fx_c3", effect_type="vignette_focus", target_clip_id="c3", timeline_start=5.5, duration=4.5),
+        ],
+        audio_tracks=[
+            AudioTrackItem(id="bgm_main", role="music", source=str(tmp_path / "bgm.mp3"), timeline_start=0.0, duration=10.0, volume=0.25),
+            AudioTrackItem(id="vo_late", role="voiceover", source=str(tmp_path / "vo.wav"), timeline_start=6.0, duration=2.0, volume=0.92),
+        ],
+    )
+    tl.to_yaml(proj / "timeline.yaml")
+
+    apply_surgical_edit(proj, {"action": "drop", "clip_id": "c2_break"})
+    apply_surgical_edit(proj, {"action": "audio-mix", "bgm_volume": 0.35, "duck_volume": 0.08})
+
+    after = EditTimeline.from_yaml(proj / "timeline.yaml")
+    assert [c.id for c in after.visual_track] == ["c1", "c3"]
+    assert after.total_duration == pytest.approx(7.5, abs=1e-2)
+    assert [fx.id for fx in after.effects_track] == ["fx_c3"]
+    assert after.effects_track[0].timeline_start == pytest.approx(3.0, abs=1e-2)
+    assert after.title_track[0].timeline_start == pytest.approx(5.3, abs=1e-2)
+    vo = next(a for a in after.audio_tracks if a.id == "vo_late")
+    bgm = next(a for a in after.audio_tracks if a.id == "bgm_main")
+    assert vo.timeline_start == pytest.approx(3.5, abs=1e-2)
+    assert vo.volume == pytest.approx(0.92, abs=1e-3)
+    assert bgm.volume == pytest.approx(0.35, abs=1e-3)
+    assert bgm.duration == pytest.approx(7.5, abs=1e-2)
+
+    # Verify _apply_timeline_intelligence_to_obj sets clip volume cleanly
+    _apply_timeline_intelligence_to_obj(after, {"clips": {"c1": {"volume": 1.35}}})
+    assert after.visual_track[0].volume == pytest.approx(1.35, abs=1e-3)
+
+    # Verify _enforce_chapter_revision_constraints excludes a_roll & globally used sources and keeps captioned stills
+    stills = [
+        VisualTrackItem(
+            id=f"s_{i}",
+            type="photo",
+            roll_type="still",
+            source=str(tmp_path / f"s_{i}.jpg"),
+            timeline_start=float(i * 3),
+            duration=3.0,
+            source_in=0.0,
+            source_out=3.0,
+            ken_burns=KenBurnsConfig(mode="parallax_gallery", caption_title=f"Plate {i}"),
+        )
+        for i in range(5)
+    ]
+    subclips = [
+        CulledSubClip(
+            subclip_id="aroll_1",
+            source_asset_id="a1",
+            source_path=str(tmp_path / "aroll_1.mov"),
+            filename="aroll_1.mov",
+            media_type="video",
+            normalized_timestamp="2026-10-25T12:35:00Z",
+            in_tc=0.0,
+            out_tc=3.0,
+            usable_in=0.0,
+            usable_out=3.0,
+            duration=3.0,
+            roll_type="a_roll",
+        ),
+        CulledSubClip(
+            subclip_id="broll_used",
+            source_asset_id="b1",
+            source_path=str(tmp_path / "broll_used.mov"),
+            filename="broll_used.mov",
+            media_type="video",
+            normalized_timestamp="2026-10-25T12:40:00Z",
+            in_tc=0.0,
+            out_tc=3.0,
+            usable_in=0.0,
+            usable_out=3.0,
+            duration=3.0,
+            roll_type="b_roll",
+        ),
+    ]
+    revised = _enforce_chapter_revision_constraints(
+        ch_clips=stills,
+        constraints={"max_consecutive_stills": 3},
+        beat_grid=None,
+        prefer_downbeat=False,
+        media_index_subclips=subclips,
+        global_used_sources={str(tmp_path / "broll_used.mov")},
+    )
+    assert [c.id for c in revised] == [f"s_{i}" for i in range(5)]
+    assert all("_vid_break" not in c.id for c in revised)
+
+    # Verify verified SSL context uses CA trust (fixes macOS Python CA bundle errors)
+    import ssl
+    from video_editing_ai.agents.base import _build_verified_ssl_context
+
+    ctx = _build_verified_ssl_context()
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_mixed_hevc_extradata_concat_preserves_all_frames(tmp_path: Path) -> None:
+    """Ensure HDR concat preserves all frames and produces zero HEVC decode errors when hvcC extradata differs."""
+    from video_editing_ai.renderer.ffmpeg_composer import (
+        _concat_segments_safe,
+        _render_video_segment,
+    )
+    from video_editing_ai.renderer.ken_burns import render_photo_clip
+
+    src_vid = tmp_path / "src_vid.mp4"
+    gen_cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=15:duration=1.5",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000:duration=1.5",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        str(src_vid),
+    ]
+    gen_proc = subprocess.run(gen_cmd, capture_output=True, text=True, check=False)
+    assert gen_proc.returncode == 0, gen_proc.stderr
+
+    src_jpg = tmp_path / "src_photo.jpg"
+    img = Image.new("RGB", (320, 180), (42, 74, 118))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((40, 30, 280, 150), fill=(215, 165, 92))
+    img.save(src_jpg, quality=92)
+
+    seg_vid = tmp_path / "seg_vid.mp4"
+    _render_video_segment(
+        item=VisualTrackItem(
+            id="v1",
+            type="video",
+            source=str(src_vid),
+            timeline_start=0.0,
+            duration=1.0,
+            source_in=0.0,
+            source_out=1.0,
+        ),
+        output_mp4=seg_vid,
+        width=320,
+        height=180,
+        fps=15,
+        hdr=True,
+    )
+
+    seg_ph = tmp_path / "seg_ph.mp4"
+    render_photo_clip(
+        photo_path=src_jpg,
+        output_mp4=seg_ph,
+        duration=1.0,
+        width=320,
+        height=180,
+        fps=15,
+        hdr=True,
+        ken_burns=KenBurnsConfig(mode="parallax_gallery", caption_title="Test Plate"),
+    )
+
+    out_mp4 = tmp_path / "concat_out.mp4"
+    _concat_segments_safe([seg_vid, seg_ph], out_mp4, w_dir=tmp_path, fps=15, hdr=True)
+    assert out_mp4.exists()
+
+    dec_proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(out_mp4), "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert dec_proc.returncode == 0, dec_proc.stderr
+    assert dec_proc.stderr.strip() == "", f"Unexpected HEVC decode warnings: {dec_proc.stderr}"
+
+    probe_proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=nw=1:nk=1",
+            str(out_mp4),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe_proc.returncode == 0, probe_proc.stderr
+    nb_read = int(probe_proc.stdout.strip())
+    assert nb_read >= 29 and nb_read <= 30, f"Expected ~30 frames, got {nb_read}"

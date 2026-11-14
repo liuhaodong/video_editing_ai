@@ -14,7 +14,7 @@ from typing import Any, Optional
 import numpy as np
 
 from ..models.schema import BGMCandidate, BGMSelectionReport
-from .base import BaseEditingAgent, PipelineBlackboard, register_agent
+from .base import BaseEditingAgent, PipelineBlackboard, _build_verified_ssl_context, register_agent
 
 
 # Curated catalog of verified Royalty-Free / CC-BY / Public Domain tracks by universal musical mood profile
@@ -198,7 +198,7 @@ def _try_download_free_bgm(url: str, dest_path: Path, timeout_sec: float = 15.0)
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec, context=_build_verified_ssl_context()) as resp:
             data = resp.read()
             if len(data) > 64_000:
                 dest_path.write_bytes(data)
@@ -226,7 +226,7 @@ def search_online_royalty_free_catalog(
             q_str = urllib.parse.quote(" ".join(kw_lower[:3]))
             url = f"https://pixabay.com/api/audio/?key={pixabay_key}&q={q_str}&per_page={max_results}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout_sec) as r:
+            with urllib.request.urlopen(req, timeout=timeout_sec, context=_build_verified_ssl_context()) as r:
                 data = json.loads(r.read().decode("utf-8"))
                 for hit in data.get("hits", [])[:max_results]:
                     audio_url = hit.get("audio") or hit.get("previewURL") or ""
@@ -253,7 +253,7 @@ def search_online_royalty_free_catalog(
             "https://incompetech.com/music/royalty-free/pieces.json",
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        with urllib.request.urlopen(req, timeout=timeout_sec) as r:
+        with urllib.request.urlopen(req, timeout=timeout_sec, context=_build_verified_ssl_context()) as r:
             catalog = json.loads(r.read().decode("utf-8"))
 
         scored: list[tuple[float, dict[str, Any]]] = []

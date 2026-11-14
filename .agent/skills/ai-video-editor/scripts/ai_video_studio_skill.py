@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -31,6 +32,7 @@ def _resolve_workspace_root() -> Path:
     candidates = [
         Path(__file__).resolve().parents[4],
         Path.cwd(),
+        Path.home() / "Documents" / "projects" / "video-edit-ai",
         Path.home() / "Documents" / "projects" / "video_editing_ai",
     ]
     for root in candidates:
@@ -40,6 +42,12 @@ def _resolve_workspace_root() -> Path:
 
 
 _WORKSPACE_ROOT = _resolve_workspace_root()
+_venv_py = _WORKSPACE_ROOT / ".venv" / "bin" / "python"
+if _venv_py.exists() and Path(sys.executable).resolve() != _venv_py.resolve():
+    try:
+        import pydantic  # noqa: F401
+    except ImportError:
+        os.execv(str(_venv_py), [str(_venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
 _src = _WORKSPACE_ROOT / "src"
 if (_src / "video_editing_ai").exists() and str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
@@ -261,13 +269,20 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    interview_answers = {
-        "narrative_style": args.narrative_style,
-        "photo_mode": args.photo_mode,
-        "bgm_mood": args.bgm_mood,
-        "dialogue_preference": "keep_full_sentences_with_broll_cutaways",
-        "must_include_topics": args.prompt or "",
-    }
+    meta_path = project_dir / "project_meta.json"
+    existing_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    interview_answers = dict(existing_meta.get("interview_answers") or {})
+    interview_answers.update(
+        {
+            "narrative_style": args.narrative_style,
+            "photo_mode": args.photo_mode,
+            "bgm_mood": args.bgm_mood,
+            "dialogue_preference": interview_answers.get(
+                "dialogue_preference", "keep_full_sentences_with_broll_cutaways"
+            ),
+            "must_include_topics": args.prompt or interview_answers.get("must_include_topics", ""),
+        }
+    )
     if args.duration:
         interview_answers["target_duration_sec"] = str(args.duration)
 
@@ -483,11 +498,13 @@ def cmd_apply_story_plan(args: argparse.Namespace) -> int:
             "dialogue_editor",
             "montage_editor",
             "camera_operator",
+            "lead_editor",
             "motion_graphics",
             "vfx_designer",
             "colorist",
             "sound_designer",
             "showrunner",
+            "visual_qc",
             "production_director",
         ]:
             cls = AgentRegistry.get(role_id)
@@ -757,10 +774,13 @@ def cmd_apply_bgm_plan(args: argparse.Namespace) -> int:
     diag = probe_audio_diagnostics(out_mp3)
 
     if tl is not None:
+        non_music = [a for a in tl.audio_tracks if a.role != "music"]
         tl.audio_tracks = [
+            *non_music,
             AudioTrackItem(
                 id="bgm_master_01",
                 source=str(out_mp3.resolve()),
+                role="music",
                 timeline_start=0.0,
                 source_in=0.0,
                 duration=round(tl.total_duration, 2),
@@ -769,7 +789,7 @@ def cmd_apply_bgm_plan(args: argparse.Namespace) -> int:
                 duck_volume=float(args.duck_volume or 0.35),
                 fade_in=1.5,
                 fade_out=3.0,
-            )
+            ),
         ]
         tl.to_yaml(tl_path)
 

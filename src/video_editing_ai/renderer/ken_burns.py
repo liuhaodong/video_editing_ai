@@ -38,9 +38,34 @@ def _ease_out_cubic(t: float) -> float:
     return 1.0 - p * p * p
 
 
-def _load_editorial_font(size: int, bold: bool = True, serif: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _contains_cjk(text: str) -> bool:
+    """Return True when text contains CJK/East Asian ideographs or punctuation."""
+    return any(
+        "\u2e80" <= ch <= "\u9fff"
+        or "\u3000" <= ch <= "\u303f"
+        or "\uf900" <= ch <= "\ufaff"
+        or "\uff00" <= ch <= "\uffef"
+        for ch in (text or "")
+    )
+
+
+def _load_editorial_font(
+    size: int,
+    bold: bool = True,
+    serif: bool = False,
+    text: str = "",
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    has_cjk = _contains_cjk(text)
     if serif:
-        candidates = [
+        cjk_serif = [
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+        ]
+        latin_serif = [
             # Windows
             "C:/Windows/Fonts/georgiab.ttf" if bold else "C:/Windows/Fonts/georgia.ttf",
             # macOS (2019 MacBook Pro & Apple Silicon)
@@ -54,24 +79,35 @@ def _load_editorial_font(size: int, bold: bool = True, serif: bool = False) -> I
             "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
             "/System/Library/Fonts/HelveticaNeue.ttc",
             "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
         ]
+        candidates = (cjk_serif + latin_serif) if has_cjk else latin_serif
     else:
-        candidates = [
+        cjk_sans = [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+        ]
+        latin_sans = [
             # Windows (Microsoft YaHei renders both crisp Segoe-style Latin & full CJK)
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
             "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-            # macOS (2019 MacBook Pro & Apple Silicon — PingFang SC renders both Latin & CJK)
+            # macOS (2019 MacBook Pro & Apple Silicon — PingFang SC / STHeiti render both Latin & CJK)
             "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
             "/System/Library/Fonts/SFNS.ttf",
             "/System/Library/Fonts/HelveticaNeue.ttc",
             "/System/Library/Fonts/Avenir Next.ttc",
-            "/System/Library/Fonts/STHeiti Medium.ttc",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
             # Linux
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
+        candidates = (cjk_sans + latin_sans) if has_cjk else latin_sans
     for path in candidates:
         if os.path.exists(path):
             try:
@@ -223,14 +259,13 @@ def _build_frosted_card_assets(
     Returns (text_fg_rgba, card_mask_l, dark_tint_rgb, card_x, card_y).
     """
     s = width / 1920.0
-    f_badge = _load_editorial_font(int(round(13 * s)), bold=True, serif=False)
-    f_title = _load_editorial_font(int(round(26 * s)), bold=True, serif=True)
-    f_sub = _load_editorial_font(int(round(18 * s)), bold=False, serif=False)
+    badge_str = _clean_editorial_badge(camera_badge)
+    f_badge = _load_editorial_font(int(round(13 * s)), bold=True, serif=False, text=badge_str)
+    f_title = _load_editorial_font(int(round(26 * s)), bold=True, serif=True, text=caption_title)
+    f_sub = _load_editorial_font(int(round(18 * s)), bold=False, serif=False, text=caption_subtitle)
 
     dummy = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
     d_draw = ImageDraw.Draw(dummy)
-
-    badge_str = _clean_editorial_badge(camera_badge)
     sub_lines: list[str] = []
     if caption_subtitle:
         wrapped = textwrap.wrap(caption_subtitle.strip(), width=78)
@@ -449,6 +484,20 @@ def _resolve_kb_endpoints(
 
 _ENCODER_CACHE: dict[bool, str] = {}
 _FILTER_CACHE: dict[str, bool] = {}
+_VT_QSCALE_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def _supports_videotoolbox_qscale(encoder: str, pix_fmt: str) -> bool:
+    """Check whether VideoToolbox accepts -q:v alongside -b:v (Apple Silicon supports it; Intel x86_64 rejects it)."""
+    key = (encoder, pix_fmt)
+    if key not in _VT_QSCALE_CACHE:
+        extra = ["-profile:v", "main10"] if encoder == "hevc_videotoolbox" else []
+        _VT_QSCALE_CACHE[key] = _probe_hw_encoder(
+            encoder,
+            pix_fmt=pix_fmt,
+            extra_args=[*extra, "-q:v", "68", "-b:v", "28M", "-allow_sw", "1"],
+        )
+    return _VT_QSCALE_CACHE[key]
 
 
 def has_ffmpeg_filter(filter_name: str) -> bool:
@@ -619,21 +668,24 @@ def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> li
             "hvc1",
         ]
         if enc == "hevc_videotoolbox":
-            return [
+            args = [
                 "-c:v",
                 "hevc_videotoolbox",
                 "-profile:v",
                 "main10",
                 "-pix_fmt",
                 "p010le",
-                "-q:v",
-                "68",
+            ]
+            if _supports_videotoolbox_qscale("hevc_videotoolbox", "p010le"):
+                args.extend(["-q:v", "68"])
+            args.extend([
                 "-b:v",
                 "28M",
                 "-allow_sw",
                 "1",
                 *hdr_tags,
-            ]
+            ])
+            return args
         if enc == "hevc_nvenc":
             return [
                 "-c:v",
@@ -696,18 +748,21 @@ def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> li
 
     # 8-bit SDR encoders
     if enc == "h264_videotoolbox":
-        return [
+        args = [
             "-c:v",
             "h264_videotoolbox",
-            "-q:v",
-            "68",
+        ]
+        if _supports_videotoolbox_qscale("h264_videotoolbox", "yuv420p"):
+            args.extend(["-q:v", "68"])
+        args.extend([
             "-b:v",
             "16M",
             "-allow_sw",
             "1",
             "-pix_fmt",
             "yuv420p",
-        ]
+        ])
+        return args
     if enc == "h264_nvenc":
         return [
             "-c:v",
@@ -845,8 +900,8 @@ def _build_polaroid_card(
 
     # Editorial stamp in the Polaroid bottom chin
     if stamp_text:
-        f_stamp = _load_editorial_font(int(round(17 * scale_factor)), bold=True, serif=True)
         short_stamp = stamp_text.split("—")[0].split("·")[0].strip()[:42]
+        f_stamp = _load_editorial_font(int(round(17 * scale_factor)), bold=True, serif=True, text=short_stamp)
         tw = p_draw.textbbox((0, 0), short_stamp, font=f_stamp)[2]
         tx = (pw - tw) // 2
         ty = top_pad + fg.height + (bottom_chin - int(round(22 * scale_factor))) // 2
@@ -1021,7 +1076,7 @@ def _build_editorial_magazine_assets(
     # 1. Cleaned Location Overline Badge (only if non-technical location/collection text is present)
     badge_str = _clean_editorial_badge(kb.camera_badge or "")
     if badge_str:
-        f_badge = _load_editorial_font(int(round(14 * scale_factor)), bold=True, serif=False)
+        f_badge = _load_editorial_font(int(round(14 * scale_factor)), bold=True, serif=False, text=badge_str)
         draw.text((pad_x, cur_y), badge_str, font=f_badge, fill=(168, 164, 156))
         cur_y += max(12, int(round(30 * scale_factor)))
 
@@ -1034,7 +1089,7 @@ def _build_editorial_magazine_assets(
 
     # 2. Multi-line Serif Monograph Title in Warm Alabaster
     title_str = (kb.caption_title or "Curated Masterpiece").strip()
-    f_title = _load_editorial_font(int(round(32 * scale_factor)), bold=True, serif=True)
+    f_title = _load_editorial_font(int(round(32 * scale_factor)), bold=True, serif=True, text=title_str)
     for line in textwrap.wrap(title_str, width=22)[:4]:
         draw.text((pad_x, cur_y), line, font=f_title, fill=(248, 246, 240))
         cur_y += max(14, int(round(44 * scale_factor)))
@@ -1044,14 +1099,14 @@ def _build_editorial_magazine_assets(
     # 3. Multi-line Curatorial Essay / Bilingual Subtitle in Soft Pearl Stone
     sub_str = (kb.caption_subtitle or "").strip()
     if sub_str:
-        f_sub = _load_editorial_font(int(round(20 * scale_factor)), bold=False, serif=False)
+        f_sub = _load_editorial_font(int(round(20 * scale_factor)), bold=False, serif=False, text=sub_str)
         for line in textwrap.wrap(sub_str, width=32)[:6]:
             draw.text((pad_x, cur_y), line, font=f_sub, fill=(192, 198, 208))
             cur_y += max(12, int(round(30 * scale_factor)))
 
     # Bottom monograph folio stamp (only rendered if a clean location/folio badge is present)
     if badge_str:
-        f_folio = _load_editorial_font(int(round(13 * scale_factor)), bold=False, serif=True)
+        f_folio = _load_editorial_font(int(round(13 * scale_factor)), bold=False, serif=True, text=badge_str)
         draw.text(
             (pad_x, int(height * 0.89)),
             badge_str,
@@ -2593,9 +2648,15 @@ def render_photo_clip(
                 duration=duration,
                 fps=fps,
             )
-            proc.stdin.write(frame.tobytes())
+            try:
+                proc.stdin.write(frame.tobytes())
+            except (BrokenPipeError, OSError):
+                break
     finally:
-        proc.stdin.close()
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
 
     stderr_bytes = proc.stderr.read() if proc.stderr else b""
     ret = proc.wait()

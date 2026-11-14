@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ...models.schema import (
@@ -14,6 +15,58 @@ from ...models.schema import (
 from ...renderer.subtitles import resolve_subtitle_font_stack
 from ...renderer.titles import HDR_DIFFUSE_WHITE_PEAK_RGB, compute_overlay_bbox_norm
 from ..base import BaseEditingAgent, PipelineBlackboard, register_agent
+
+
+def _format_exif_date(raw_ct: Any) -> str:
+    """Format a datetime/ISO/EXIF creation_time value as YYYY.MM.DD."""
+    if raw_ct is None:
+        return ""
+    if hasattr(raw_ct, "strftime"):
+        return raw_ct.strftime("%Y.%m.%d")
+    match = re.search(r"(\d{4})[-:/](\d{2})[-:/](\d{2})", str(raw_ct).strip())
+    if match:
+        return f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
+    return ""
+
+
+_MINOR_TITLE_WORDS = {"a", "an", "the", "in", "of", "at", "on", "and", "to", "for"}
+
+
+def _smart_title_case(raw: str) -> str:
+    """Title-case words while preserving uppercase acronyms/numerals and lowercasing minor connectors."""
+    tokens = raw.split()
+    if not tokens:
+        return ""
+    out: list[str] = []
+    cap_next = True
+    for i, tok in enumerate(tokens):
+        if tok in {"—", ":", "-", "·", "/"}:
+            out.append(tok)
+            cap_next = tok in {"—", ":", "-"}
+            continue
+        stripped = tok.strip(".,:;!?()[]\"'")
+        is_minor = stripped.lower() in _MINOR_TITLE_WORDS
+        if len(stripped) >= 2 and stripped.isupper() and any(ch.isalpha() for ch in stripped):
+            out.append(tok)
+        elif is_minor and i > 0 and not cap_next:
+            out.append(tok.lower())
+        else:
+            out.append(tok[0].upper() + tok[1:].lower() if len(tok) > 1 else tok.upper())
+        cap_next = tok.endswith((":", "—", "-"))
+    return " ".join(out)
+
+
+def _format_gps_or_camera(
+    lat: float | None,
+    lon: float | None,
+    fallback_cam: str | None = None,
+) -> str:
+    """Format GPS coordinates with N/S and E/W hemispheres, falling back to camera metadata."""
+    if lat is not None and lon is not None:
+        lat_hem = "N" if lat >= 0 else "S"
+        lon_hem = "E" if lon >= 0 else "W"
+        return f"{abs(lat):.2f}{lat_hem}, {abs(lon):.2f}{lon_hem}"
+    return (fallback_cam or "").strip()
 
 
 @register_agent
@@ -50,18 +103,15 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
         gps_assets = 0
         first_exif_stamp_meta: tuple[str, str] | None = None
         if catalog is not None:
-            for p in catalog.photos:
-                if p.gps_lat is not None and p.gps_lon is not None:
+            for asset in (*catalog.photos, *catalog.videos):
+                if asset.gps_lat is not None and asset.gps_lon is not None:
                     gps_assets += 1
-                if first_exif_stamp_meta is None and p.creation_time:
-                    loc_str = f"{p.gps_lat:.2f}N, {p.gps_lon:.2f}E" if (p.gps_lat and p.gps_lon) else (p.camera_model or "")
-                    first_exif_stamp_meta = (p.creation_time.strftime("%Y.%m.%d"), loc_str)
-            for v in catalog.videos:
-                if v.gps_lat is not None and v.gps_lon is not None:
-                    gps_assets += 1
-                if first_exif_stamp_meta is None and v.creation_time:
-                    loc_str = f"{v.gps_lat:.2f}N, {v.gps_lon:.2f}E" if (v.gps_lat and v.gps_lon) else (v.camera_model or "")
-                    first_exif_stamp_meta = (v.creation_time.strftime("%Y.%m.%d"), loc_str)
+                if first_exif_stamp_meta is None and asset.creation_time:
+                    date_str = _format_exif_date(asset.creation_time)
+                    if date_str:
+                        cam = getattr(asset, "camera_make_model", None) or getattr(asset, "camera_model", None)
+                        loc_str = _format_gps_or_camera(asset.gps_lat, asset.gps_lon, cam)
+                        first_exif_stamp_meta = (date_str, loc_str)
 
         # Build chapter route waypoints across the story arc
         chapter_stops: list[dict[str, Any]] = []
@@ -88,9 +138,9 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
 
         clean_proj_title = paper.project_title.replace("_", " ").strip() or "Featured Story"
         if len(clean_proj_title) > 42:
-            clean_proj_title = " ".join(clean_proj_title.split()[:5]).title()
+            clean_proj_title = _smart_title_case(" ".join(clean_proj_title.split()[:5]))
         else:
-            clean_proj_title = clean_proj_title.title()
+            clean_proj_title = _smart_title_case(clean_proj_title)
 
         consolidated_overlays: list[TitleOverlayItem] = [
             TitleOverlayItem(

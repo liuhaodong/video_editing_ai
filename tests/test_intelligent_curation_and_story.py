@@ -147,9 +147,15 @@ def _make_shaky_tail_video(path: Path) -> Path:
             cv2.rectangle(canvas, (gx, gy), (gx + 26, gy + 22), color, -1)
             cv2.rectangle(canvas, (gx, gy), (gx + 26, gy + 22), (242, 240, 235), 1)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(path), fourcc, float(fps), (w, h))
-    assert writer.isOpened(), "OpenCV VideoWriter failed to open synthetic MP4"
+    writer = None
+    for codec in ("mp4v", "avc1"):
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        cand = cv2.VideoWriter(str(path), fourcc, float(fps), (w, h))
+        if cand.isOpened():
+            writer = cand
+            break
+        cand.release()
+    assert writer is not None and writer.isOpened(), "OpenCV VideoWriter failed to open synthetic MP4"
     try:
         for f_idx in range(total_frames):
             t = f_idx / float(fps)
