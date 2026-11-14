@@ -2141,9 +2141,10 @@ def test_gate13_complete_dependency_manifest_and_doctor_cli() -> None:
         "faster_whisper": "faster-whisper",
         "huggingface_hub": "huggingface-hub",
         "python_multipart": "python-multipart",
+        "google": "google-antigravity",
     }
     stdlib_names = set(sys.stdlib_module_names)
-    optional_third_party = {"google"}
+    optional_third_party: set[str] = set()
 
     imported_top_levels: set[str] = set()
     for py_file in (repo_root / "src" / "video_editing_ai").rglob("*.py"):
@@ -2183,4 +2184,126 @@ def test_gate13_complete_dependency_manifest_and_doctor_cli() -> None:
     assert report["heif"]["ok"] is True
     assert report["packages"]
     assert all(pkg["ok"] is True for pkg in report["packages"])
+
+
+def test_gate14_antigravity_primary_workflow_sdk_and_global_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Gate 14: Google Antigravity is the first-class primary workflow (`AGENTS.md`, `SKILL.md`,
+    bundled `google-antigravity` SDK routing, and symlink-safe global skill sync).
+    """
+    import json
+    import types
+
+    import google.antigravity as ga
+    from video_editing_ai.cli import sync_skill_to_global
+
+    repo_root = Path(__file__).resolve().parents[1]
+    agents_md = repo_root / "AGENTS.md"
+    assert agents_md.is_file()
+    agents_text = agents_md.read_text(encoding="utf-8")
+    assert ".agent/skills/ai-video-editor/SKILL.md" in agents_text
+
+    assert hasattr(ga, "Agent")
+    assert hasattr(ga, "LocalAgentConfig")
+    assert hasattr(ga, "CapabilitiesConfig")
+
+    doc_proc = subprocess.run(
+        [sys.executable, "-m", "video_editing_ai.cli", "doctor", "--json"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert doc_proc.returncode == 0, f"doctor failed: {doc_proc.stdout}\n{doc_proc.stderr}"
+    report = json.loads(doc_proc.stdout)
+    assert report["antigravity"]["sdk_ok"] is True
+    assert report["antigravity"]["workspace_skill_ok"] is True
+    assert report["antigravity"]["workspace_rules_ok"] is True
+
+    # Mock Agent async streaming to verify ask_ai_creative_json routes through Antigravity first
+    class _FakeTokenStream:
+        def __aiter__(self):
+            self._chunks = iter(['{"hero_pick": "IMG_0001.jpg", ', '"curatorial_statement": "Antigravity curated"}'])
+            return self
+
+        async def __anext__(self) -> str:
+            try:
+                return next(self._chunks)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _FakeAgent:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        async def __aenter__(self) -> "_FakeAgent":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        async def chat(self, prompt: str) -> _FakeTokenStream:
+            return _FakeTokenStream()
+
+    class _FakeLocalAgentConfig:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class _FakeCapabilitiesConfig:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    fake_ga = types.ModuleType("google.antigravity")
+    fake_ga.Agent = _FakeAgent
+    fake_ga.LocalAgentConfig = _FakeLocalAgentConfig
+    fake_ga.CapabilitiesConfig = _FakeCapabilitiesConfig
+    monkeypatch.setitem(sys.modules, "google.antigravity", fake_ga)
+    monkeypatch.delenv("AI_EDITOR_VLM_PROVIDER", raising=False)
+
+    class _ProbeAntigravityAgent(BaseEditingAgent):
+        role_id = "antigravity_probe"
+        display_name = "Antigravity Probe"
+        stage_order = 99
+        enabled_by_default = False
+
+        def run(self, blackboard: PipelineBlackboard) -> dict:
+            return {}
+
+    proj_dir = tmp_path / "ag_proj"
+    media_dir = tmp_path / "ag_media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    bb = PipelineBlackboard(media_dir=media_dir, project_dir=proj_dir, use_antigravity=True)
+    decision = _ProbeAntigravityAgent().ask_ai_creative_json(
+        bb,
+        "Pick the hero plate",
+        decision_key="probe_antigravity_route",
+    )
+    assert decision == {"hero_pick": "IMG_0001.jpg", "curatorial_statement": "Antigravity curated"}
+    assert (proj_dir / "ai_decisions" / "probe_antigravity_route.json").is_file()
+
+    # Symlink-safe global skill sync + out-of-repo invocation via .workspace_root
+    dest_root = tmp_path / "global_skills"
+    dest_root.mkdir(parents=True, exist_ok=True)
+    pre_symlink = dest_root / "ai-video-editor"
+    pre_symlink.symlink_to(tmp_path / "stale_target")
+
+    installed_skill = sync_skill_to_global(dest_root=dest_root, repo_root=repo_root)
+    assert installed_skill.is_dir() and not installed_skill.is_symlink()
+    marker = installed_skill / ".workspace_root"
+    assert marker.is_file()
+    assert Path(marker.read_text(encoding="utf-8").strip()).resolve() == repo_root.resolve()
+
+    global_script = installed_skill / "scripts" / "ai_video_studio_skill.py"
+    help_proc = subprocess.run(
+        [sys.executable, str(global_script), "--help"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert help_proc.returncode == 0, f"Global skill CLI failed: {help_proc.stderr}"
+
 

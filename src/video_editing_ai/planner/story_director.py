@@ -313,7 +313,16 @@ async def _refine_timeline_with_antigravity_async(
     user_prompt: str,
 ) -> EditTimeline:
     """Use the Google Antigravity SDK Agent to refine the story arc, titles, and narrative notes."""
+    import os
+
     from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig
+
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        and os.environ.get("AI_EDITOR_ALLOW_LIVE_ANTIGRAVITY_IN_TESTS") != "1"
+        and getattr(Agent, "__module__", "").startswith("google.antigravity")
+    ):
+        return baseline
 
     prompt = (
         "You are an award-winning video story director. Given the user's story prompt and our baseline edit plan, "

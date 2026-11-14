@@ -117,8 +117,8 @@ def _ensure_reference_file(ref_dir: Path, cls: type[BaseEditingAgent]) -> tuple[
         f"- **Requires Artifacts**: {req_str}\n"
         f"- **Produces Artifacts**: {prod_str}\n\n"
         f"## Skill CLI Invocation\n"
-        f"```powershell\n"
-        f"python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-stage "
+        f"```bash\n"
+        f".venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-stage "
         f"--stage {cls.role_id} --project-dir \"<project_dir>\" --media-dir \"<media_dir>\"\n"
         f"```\n"
     )

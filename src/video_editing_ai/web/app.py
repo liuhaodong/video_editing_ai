@@ -77,7 +77,7 @@ class MultiAgentRunRequest(BaseModel):
     height: int = 2160
     fps: int = 30
     hdr: bool = True
-    use_antigravity: bool = False
+    use_antigravity: bool = True
     render_video: bool = True
 
 

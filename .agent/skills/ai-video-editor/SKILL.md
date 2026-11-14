@@ -1,25 +1,24 @@
 ---
 name: ai-video-editor
 description: >-
-  End-to-end 21-agent AI photo and video editing skill for family travel, museum trips, vlogs, and unscripted highlights. Use whenever the user asks to edit a video from a folder of clips/photos, run interactive client intake and get the Director's length recommendation (30s-600s), scout/download royalty-free BGM, curate and annotate photos with aesthetic taste and museum plaques, apply 2.5D parallax and diptych photo effects, script documentary voiceover narration, pair vertical 9:16 videos into Live Video+Photo Diptychs, render GPS route progression maps, apply 10-bit DI camera color matching, synthesize spatial soundscapes, supervise editing quality with the Executive Movie Production Director, manage editing projects (create/load/reset), or render 4K 10-bit HLG HDR MP4 videos and NLE timelines (.fcpxml, .edl, .otio).
+  End-to-end 21-agent AI photo and video editing skill for Antigravity covering family travel, museum trips, vlogs, and unscripted highlights. Use whenever the user asks in Antigravity to inspect, curate, edit, revise, or render a folder of clips/photos, run interactive client intake and get the Director's length recommendation (30s-600s), scout/download royalty-free BGM, curate and annotate photos with aesthetic taste and smoked-glass museum plaques, apply 2.5D parallax and diptych photo effects, write editorial on-screen chapter titles (or voiceover narration when explicitly requested), pair vertical 9:16 videos into Live Video+Photo Diptychs, render GPS route progression maps, apply 10-bit DI camera color matching, synthesize spatial soundscapes, supervise editing quality with the Executive Movie Production Director, manage editing projects (create/load/reset), or render 4K 10-bit HLG HDR MP4 videos and NLE timelines (.fcpxml, .edl, .otio).
 ---
 
 # AI Photo & Video Story Studio Skill (`ai-video-editor`)
 
 ## Overview
 
-This skill orchestrates a **21-Agent Big-Budget AI Film & Vlog Post-Production Studio** that transforms raw folders of multi-camera videos (`.MP4`, `.MOV`) and photos (`.JPG`, `.HEIC`, `.PNG`) into a **4K 10-bit HLG HDR Master Video (`final_story.mp4`)** plus professional NLE timelines (`timeline.fcpxml`, `timeline.edl`, `timeline.otio`).
+This skill makes **Google Antigravity** the primary creative director for a **21-Agent AI Film & Vlog Post-Production Studio** that transforms raw folders of multi-camera videos (`.MP4`, `.MOV`) and photos (`.JPG`, `.HEIC`, `.PNG`) into a **4K 10-bit HLG HDR Master Video (`final_story.mp4`)** plus professional NLE timelines (`timeline.fcpxml`, `timeline.edl`, `timeline.otio`).
 
 > **Core Architectural Rule**:
-> - **Anything mechanical** (contact-sheet grid rendering, FFmpeg segment slicing, ripple timecode shifting, LUFS audio ducking, RGB histogram & Kelvin white-balance measurement, EXIF GPS extraction, JSON/YAML contract serialization) is executed **programmatically** via [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py).
-> - **Anything requiring creativity, visual intelligence, or storytelling taste** (inspecting contact sheets to identify artworks/landmarks/expressions, choosing the Cold-Open Teaser Hook, pairing diptychs, scripting voiceover narration, selecting chapter film-stock color looks, scoring spatial soundscapes, and interpreting user revision notes) is **always delegated to the AI Agent** (`read_file` vision inspection or `invoke_subagent`).
+> - **Anything mechanical** (contact-sheet grid rendering, FFmpeg segment slicing, ripple timecode shifting, LUFS audio ducking, RGB histogram & Kelvin white-balance measurement, EXIF GPS extraction, JSON/YAML contract serialization, MPS/OpenCL/VideoToolbox 4K encoding) is executed **programmatically** via [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py).
+> - **Anything requiring creativity, visual intelligence, or storytelling taste** (inspecting contact sheets to identify artworks/landmarks/expressions, choosing the Cold-Open Teaser Hook, pairing diptychs, writing luxury Criterion/museum editorial on-screen typography by default—or narration scripts only if requested—selecting chapter film-stock color looks, scoring spatial soundscapes, and interpreting user revision notes) is **performed by the Antigravity Agent** via `read_file`, `ask_question`, and parallel `invoke_subagent` calls.
 
 All programmatic steps write structured JSON/YAML contracts to disk in `<project_dir>` via the skill's standalone helper CLI:
-- **Helper CLI**: [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py)
-- **One-Command Environment Setup & Verification**: Run `./scripts/setup.sh` (macOS/Linux) or `.\scripts\setup.ps1` (Windows) in a fresh workspace to install `ffmpeg`, `libheif`, and all Python/GPU packages, and verify anytime with `python -m video_editing_ai.cli doctor`.
-- **Python Interpreter**:
-  - **Windows**: `python`
-  - **macOS (2019 MacBook Pro Intel + AMD Radeon Pro / Apple Silicon)**: `python3` (uses `hevc_videotoolbox` hardware encoding, macOS fonts, and native Finder folder picker automatically)
+- **In-Repo Invocation (macOS / Linux)**: `.venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py <subcommand>`
+- **From Any Folder (Global Sync)**: `~/.gemini/config/skills/ai-video-editor/scripts/ai_video_studio_skill.py <subcommand>` (or via `.venv/bin/python`; auto-locates the project's `.venv` via `.workspace_root`)
+- **Windows PowerShell**: `.venv\Scripts\python.exe .agent\skills\ai-video-editor\scripts\ai_video_studio_skill.py <subcommand>`
+- **One-Command Environment Setup & Verification**: Run `./scripts/setup.sh` (macOS/Linux) or `.\scripts\setup.ps1` (Windows) to install `ffmpeg`, `libheif`, all Python/GPU packages, `google-antigravity`, and sync this skill globally; verify anytime with `.venv/bin/python -m video_editing_ai.cli doctor`.
 
 ---
 
@@ -63,52 +62,53 @@ When the user asks you to edit a video from a media folder, follow these 6 phase
 
 ### Phase 1: Project Setup & Media Library Inspection (`inspect-library` & `project`)
 Scan the raw media folder to detect video/photo counts, EXIF camera models, and the **Executive Director's Recommended Video Length (`30s–600s`)**:
-```powershell
-python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py inspect-library --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>"
+```bash
+.venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py inspect-library --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>"
 ```
 - Read `<project_dir>/library_inspection.json` to inspect `director_duration_recommendation` (`director_recommended_duration_sec`, `recommended_photo_plates`, `director_duration_rationale`).
 - To create, load, list, or reset a project workspace:
-  ```powershell
-  python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py project --action create --name "Featured Story" --media-dir "<media_dir>" --project-dir "<project_dir>"
+  ```bash
+  .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py project --action create --name "Featured Story" --media-dir "<media_dir>" --project-dir "<project_dir>"
   ```
 
 ### Phase 2: Interactive Multi-Choice Client Intake & Director Recommendations (`ask_question` & `intake-refine`)
 Read `ask_question_tool_payload` from `<project_dir>/library_inspection.json` and call Antigravity's native `ask_question` tool to present interactive single-choice and **multi-select (`is_multi_select: true`)** questions with `(Recommended)` prefixed on the Director's context-aware recommendations (covering Target Duration `30s–600s`, Multi-Select 10-Mode Photo Effects Suite, Soundtrack Direction, and Multi-Select Must-Include Chapters). Then run `intake-refine` to lock `creative_brief.json`:
-```powershell
-python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,medium_format_slide,floating_tilt_plate,criterion_atelier_split,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain,anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture" --bgm-mood auto_match
+```bash
+.venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,medium_format_slide,floating_tilt_plate,criterion_atelier_split,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain,anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture" --bgm-mood auto_match
 ```
 
-### Phase 3: Run the 21-Agent Pipeline & Delegate Creative Curation to the AI Agent
+### Phase 3: Run the 21-Agent Pipeline & Delegate Creative Curation in Antigravity
+- **Parallel Antigravity Subagent Delegation (`invoke_subagent`)**: For large multi-chapter shoots, Antigravity can launch specialist `research` / `self` subagents in parallel seeded with the matching `.agent/skills/ai-video-editor/references/*.md` playbooks (`PhotoCurator`, `StoryProducer`, `ProductionDirector`), while running deterministic scripts via `.venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py`.
 - **Option A — Full 21-Agent Pipeline + Contact Sheet Generation (`run-pipeline`)**:
-  ```powershell
-  python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-pipeline --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --render
+  ```bash
+  .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-pipeline --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --render
   ```
 - **Option B — Mechanical Contact Sheets → AI Agent Visual Curation → Mechanical Persistence (`render-contact-sheets` & `apply-vision-curation`)**:
   1. **Mechanical Step**: Generate numbered `5x4` photo contact sheets (`contact_sheet_01.jpg`, ...) + video subclips keyframe sheet (`video_subclips_sheet.jpg`) in `<project_dir>/contact_sheets/`:
-     ```powershell
-     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-contact-sheets --project-dir "<project_dir>"
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-contact-sheets --project-dir "<project_dir>"
      ```
   2. **AI Agent Creative Step**: Call `read_file` on `<project_dir>/contact_sheets/contact_sheet_01.jpg` (and `video_subclips_sheet.jpg`) to visually inspect every candidate photo & clip. Identify specific artworks, landmarks, facial expressions, and vertical diptych pairs, and reject blurry/accidental shots.
   3. **Mechanical Persistence Step (`apply-vision-curation` & `apply-video-curation`)**: Write your creative photo & video clip decisions (golden-window `[in_tc, out_tc]`, semantic transitions, video & photo captions, and 16-mode photo effects) into `photo_curation.json`, `media_index.json`, and `timeline.yaml`:
-     ```powershell
-     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-vision-curation --project-dir "<project_dir>" --overrides-json "[{\"tile_id\":\"#01\",\"selected\":true,\"hero_pick\":true,\"recommended_photo_mode\":\"curator_loupe\",\"overlay_fx\":\"museum_spotlight\",\"caption_title\":\"Curated Architectural Detail\",\"caption_subtitle\":\"Gallery Exhibition Study\"}]"
-     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-video-curation --project-dir "<project_dir>" --overrides-json "{\"videos\":{\"vid_broll_01\":{\"in_tc\":1.0,\"out_tc\":7.5,\"recommended_transition\":\"dissolve\",\"annotation_title\":\"Opening Establishing Vista\",\"annotation_subtitle\":\"Panoramic Tracking Shot\"}}}"
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-vision-curation --project-dir "<project_dir>" --overrides-json "[{\"tile_id\":\"#01\",\"selected\":true,\"hero_pick\":true,\"recommended_photo_mode\":\"curator_loupe\",\"overlay_fx\":\"museum_spotlight\",\"caption_title\":\"Curated Architectural Detail\",\"caption_subtitle\":\"Gallery Exhibition Study\"}]"
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-video-curation --project-dir "<project_dir>" --overrides-json "{\"videos\":{\"vid_broll_01\":{\"in_tc\":1.0,\"out_tc\":7.5,\"recommended_transition\":\"dissolve\",\"annotation_title\":\"Opening Establishing Vista\",\"annotation_subtitle\":\"Panoramic Tracking Shot\"}}}"
      ```
 - **Option C — AI-Directed Cold-Open Teaser Hook (`0.0s–3.8s`) & Story Architecture (`apply-story-plan`)**:
   1. Read `<project_dir>/candidate_story_digest.json` and `<project_dir>/contact_sheets/video_subclips_sheet.jpg` to choose the most emotionally magnetic 3.0s–3.8s **Cold-Open Teaser Hook (`clip_000_hook`)** before the Main Title Card (`title_opening`).
   2. Apply your creative story plan overrides and optionally reassemble `timeline.yaml`:
-     ```powershell
-     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-story-plan --project-dir "<project_dir>" --overrides-json "{\"cold_open_subclip_id\":\"vid_broll_01\",\"cold_open_hook_caption\":\"Opening Teaser Hook\"}" --reassemble-timeline
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-story-plan --project-dir "<project_dir>" --overrides-json "{\"cold_open_subclip_id\":\"vid_broll_01\",\"cold_open_hook_caption\":\"Opening Teaser Hook\"}" --reassemble-timeline
      ```
 - **Option D — Dedicated Royalty-Free BGM Scouting & Full-Length Mastering Agent (`scout-bgm` & `apply-bgm-plan`)**:
   1. **Mechanical Step**: Search and download royalty-free candidate tracks from online catalogs (Pixabay Music / Incompetech 1,443-track CC-BY API / Public Domain) and measure each candidate's exact `duration_sec`, `mean_volume_db`, and `tempo_bpm`:
-     ```powershell
-     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py scout-bgm --project-dir "<project_dir>" --keywords "cinematic,chamber,waltz,piano,documentary" --mood-profile classical_chamber_documentary
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py scout-bgm --project-dir "<project_dir>" --keywords "cinematic,chamber,waltz,piano,documentary" --mood-profile classical_chamber_documentary
      ```
   2. **AI Agent Creative Step**: Read `<project_dir>/bgm_candidates.json` (or delegate to a dedicated BGM subagent via `invoke_subagent`) to pick the best single track or **Multi-Chapter BGM Suite** matching the emotional progression of the chapters.
   3. **Mechanical Mastering Step**: Chain/crossfade the selected tracks and master to **100% of `timeline.total_duration`** with broadcast **EBU R128 (`-14.0 LUFS`)** loudness normalization so the music never ends early and sits at a warm, vibrant volume:
-     ```powershell
-     python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-bgm-plan --project-dir "<project_dir>" --tracks "valse_gymnopedie.mp3,evening_debussy_chamber.mp3" --target-lufs -14.0 --bgm-volume 0.90
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-bgm-plan --project-dir "<project_dir>" --tracks "valse_gymnopedie.mp3,evening_debussy_chamber.mp3" --target-lufs -14.0 --bgm-volume 0.90
      ```
 - **Documentary Reading-Paced Scene Durations, 16 Premium Photo Modes & Unified Frosted-Glass Captions**:
   - For annotated educational/travel scenes, give viewers comfortable reading time (`160–180 WPM` + visual appreciation): **`5.5s–6.8s`** per photo plate and **`6.5s–9.0s`** per video clip.
@@ -121,28 +121,28 @@ python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-ref
 When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *"drop clip_005"*, *"change the plaque on clip_003"*, *"lower BGM volume under speech"*), **never re-run the entire 21-agent pipeline**:
 1. **AI Agent Creative Step**: Read `<project_dir>/timeline.yaml` and translate the user's natural-language feedback into surgical operation(s) (`update-plaque`, `trim`, `drop`, `swap`, `move`, `set-cold-open`, `audio-mix`).
 2. **Mechanical Ripple Edit (`edit-cut`)**: Execute the surgical edit with automatic downstream ripple-shifting across V1, V2, V3 titles, VFX, markers, and subtitles:
-   ```powershell
-   python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py edit-cut --project-dir "<project_dir>" --action trim --clip-id clip_001 --delta-sec -1.0
+   ```bash
+   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py edit-cut --project-dir "<project_dir>" --action trim --clip-id clip_001 --delta-sec -1.0
    ```
 3. **Mechanical Fast Segment Render (`render-segment`)**: Render only the affected `[start_sec, end_sec]` window in ~2 seconds (`720p` fast preview or `--full-quality` 4K HLG HDR) and inspect frames via `read_file`:
-   ```powershell
-   python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-segment --project-dir "<project_dir>" --start 0 --end 10 --fast-preview --extract-frames "1,5,8"
+   ```bash
+   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-segment --project-dir "<project_dir>" --start 0 --end 10 --fast-preview --extract-frames "1,5,8"
    ```
 
 ### Phase 5: Executive Movie Production Director Visual Screening (`render-screening-sheet` & `director-audit`) & Full 4K HDR Render (`render-video`)
 1. Render the **4x3 Multimodal Director Screening Sheet** (`<project_dir>/cache/curation/director_screening_sheet.jpg`) and inspect it via `read_file` to verify that every chapter's photo modes, burned-in museum plaques, Track V3 lower-third video captions, and transitions look cohesive:
-   ```powershell
-   python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-screening-sheet --project-dir "<project_dir>"
+   ```bash
+   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-screening-sheet --project-dir "<project_dir>"
    ```
 2. Apply any final transition, duration, or Track V3 lower-third refinements via `apply-timeline-intelligence`, verify `director_review.json` (`overall_quality_score >= 9.0`), and render the full 4K 10-bit HLG HDR master:
-```powershell
-python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-video --project-dir "<project_dir>" --extract-frames "2,6,16,30,52"
+```bash
+.venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-video --project-dir "<project_dir>" --extract-frames "2,6,16,30,52"
 ```
 
 ### Phase 6: Interactive 5-Tab Web Studio (`serve`)
 To let the user interactively manage projects, co-refine intake, watch real-time Agent Doing + Director Thinking streams, or download the newly rendered `.mp4` in their browser:
-```powershell
-python -m video_editing_ai.cli serve --project-dir "<project_dir>" --host 0.0.0.0 --port 8000
+```bash
+.venv/bin/python -m video_editing_ai.cli serve --project-dir "<project_dir>" --host 0.0.0.0 --port 8000
 ```
 
 ---

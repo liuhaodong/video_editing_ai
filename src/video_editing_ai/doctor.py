@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+from pathlib import Path
 import platform
 import shutil
 import subprocess
 import sys
 from typing import Any
 
+from .docs_sync import resolve_repo_root
 from .hardware import get_hardware_profile
 
 
@@ -40,6 +42,7 @@ REQUIRED_DISTRIBUTIONS: tuple[tuple[str, str], ...] = (
     ("python-multipart", "python_multipart"),
     ("typer", "typer"),
     ("rich", "rich"),
+    ("google-antigravity", "google.antigravity"),
 )
 
 
@@ -154,12 +157,15 @@ def collect_environment_diagnostics() -> dict[str, Any]:
         heif_error = f"{type(exc).__name__}: {exc}"
 
     packages = [_check_distribution(dist_name, mod_name) for dist_name, mod_name in REQUIRED_DISTRIBUTIONS]
+    ag_pkg = next((pkg for pkg in packages if pkg["distribution"] == "google-antigravity"), None)
+    ag_version = ag_pkg["version"] if ag_pkg else None
+    ag_sdk_ok = bool(ag_pkg and ag_pkg["ok"])
 
-    optional_antigravity_version = None
-    try:
-        optional_antigravity_version = importlib.metadata.version("google-antigravity")
-    except importlib.metadata.PackageNotFoundError:
-        pass
+    repo_root = resolve_repo_root()
+    workspace_skill_md = repo_root / ".agent" / "skills" / "ai-video-editor" / "SKILL.md"
+    workspace_rules_ok = (repo_root / "AGENTS.md").is_file() or (repo_root / "GEMINI.md").is_file()
+    global_skill_dir = Path.home() / ".gemini" / "config" / "skills" / "ai-video-editor"
+    global_skill_md = global_skill_dir / "SKILL.md"
 
     healthy = bool(
         python_compatible
@@ -182,8 +188,17 @@ def collect_environment_diagnostics() -> dict[str, Any]:
         "ffprobe": ffprobe_info,
         "heif": {"ok": heif_ok, "error": heif_error},
         "hardware": hardware_info,
+        "antigravity": {
+            "sdk_ok": ag_sdk_ok,
+            "sdk_version": ag_version,
+            "workspace_root": str(repo_root),
+            "workspace_skill_ok": workspace_skill_md.is_file(),
+            "workspace_rules_ok": workspace_rules_ok,
+            "global_skill_path": str(global_skill_dir),
+            "global_skill_ok": global_skill_md.is_file(),
+        },
         "packages": packages,
         "optional": {
-            "google-antigravity": optional_antigravity_version,
+            "google-antigravity": ag_version,
         },
     }

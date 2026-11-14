@@ -443,7 +443,16 @@ class BaseEditingAgent(ABC):
         return f"You are {self.display_name} ({self.role_id}). {self.description}"
 
     async def _ask_antigravity_async(self, prompt: str) -> Optional[dict[str, Any]]:
+        import os
+
         from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig
+
+        if (
+            os.environ.get("PYTEST_CURRENT_TEST")
+            and os.environ.get("AI_EDITOR_ALLOW_LIVE_ANTIGRAVITY_IN_TESTS") != "1"
+            and getattr(Agent, "__module__", "").startswith("google.antigravity")
+        ):
+            return None
 
         config = LocalAgentConfig(
             system_instructions=self.load_skill_instructions(),

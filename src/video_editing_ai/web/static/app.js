@@ -1595,7 +1595,7 @@ document.getElementById("btnRunMultiAgent")?.addEventListener("click", async () 
     height: h,
     fps: 30,
     hdr: true,
-    use_antigravity: document.getElementById("useAgStep1")?.checked ?? false,
+    use_antigravity: document.getElementById("useAgStep1")?.checked ?? true,
     render_video: shouldRender,
   };
 

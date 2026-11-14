@@ -12,6 +12,7 @@ param(
     [switch]$Editable,
     [switch]$WithAntigravity,
     [switch]$SyncSkill,
+    [switch]$NoSyncSkill,
     [string]$VenvDir = ".venv"
 )
 
@@ -87,8 +88,8 @@ if ($Editable) {
     & $VenvPy -m pip install $InstallTarget
 }
 
-if ($SyncSkill) {
-    Write-Host "==> Synchronizing ai-video-editor skill globally"
+if ($SyncSkill -or -not $NoSyncSkill) {
+    Write-Host "==> Synchronizing ai-video-editor skill globally (~/.gemini/config/skills)"
     & $VenvPy -m video_editing_ai.cli sync-skill
 }
 
@@ -98,4 +99,6 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "==> Setup complete! Activate with: .\$VenvDir\Scripts\Activate.ps1"
+Write-Host "==> Setup complete!"
+Write-Host "  - Primary Usage (Antigravity): Open Antigravity in this repo (or any folder) and ask to edit any media folder into a 4K HDR film."
+Write-Host "  - Optional CLI / Web Studio: .\$VenvDir\Scripts\Activate.ps1 ; ai-editor --help"

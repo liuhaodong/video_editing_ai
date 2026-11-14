@@ -14,7 +14,7 @@ Raw vacation and event folders suffer from a **10:1 signal-to-noise problem**: s
 - **Real Film Grammar Instead of Cookie-Cutter Templates**: Organizes chapters around real spatio-temporal, GPS, and semantic scene shifts rather than arbitrary time slices, then sequences shots inside each chapter using documentary **Five-Shot Grammar** (*Establishing Wide -> Spoken A-Roll -> Semantic Track V2 Cutaway -> Scale-Alternating Weave -> Resolving Button*).
 - **True 10-bit HLG HDR & Broadcast Audio Finishing**: Maps 8-bit sRGB photos and graphics to ~203-nit HLG diffuse white (~75% signal) so titles and borders never sear on HDR displays, levels quiet voices against loud camera operators toward `-14 LUFS`, and deeply mutes BGM (`<= -28 dB`) during live diegetic performances.
 - **Zero Lock-In — Glass-Box Artifacts & Native NLE Handoff**: Every stage emits human-readable JSON/YAML contracts (`media_index.json`, `paper_edit.json`, `timeline.yaml`) plus frame-accurate **FCPXML 1.11 (`timeline.fcpxml`)**, CMX3600 EDL, and OpenTimelineIO for instant fine-tuning in DaVinci Resolve or Final Cut Pro.
-- **Offline-First with Optional Multimodal VLM Escalation**: Runs 100% locally out of the box (`faster-whisper`, OpenCV optical flow & portrait perception, `all-MiniLM-L6-v2` neural embeddings, FFmpeg) and optionally escalates creative vision/story decisions to **Google Antigravity**, **Gemini Vision**, **OpenAI Vision**, or **Anthropic Claude Vision**.
+- **Antigravity-First Workflow with Optional Multi-VLM Escalation**: Designed primarily for interactive editing inside **Google Antigravity** via always-on workspace rules (`AGENTS.md`), the global/workspace `ai-video-editor` Skill, interactive `ask_question` intake, visual contact-sheet critique, and bundled `google-antigravity` SDK integration—plus offline local fallbacks (`faster-whisper`, OpenCV, `all-MiniLM-L6-v2`, FFmpeg) and optional Gemini / OpenAI / Anthropic VLM escalation.
 
 ---
 
@@ -82,27 +82,23 @@ Every specialist role is registered via `@register_agent` in `AgentRegistry` and
 
 ## Quickstart
 
-### 1. Installation
-
-#### One-Command Setup (Recommended)
+### 1. One-Command Setup
 
 ```bash
 # macOS (Apple Silicon & Intel/AMD Radeon Pro) or Linux
 ./scripts/setup.sh
-source .venv/bin/activate
 ```
 
 ```powershell
 # Windows (PowerShell)
 .\scripts\setup.ps1
-.\.venv\Scripts\Activate.ps1
 ```
 
-Both setup scripts automatically check/install system media prerequisites (`ffmpeg`, `ffprobe`, `libheif`), create `.venv`, install all runtime, PyTorch MPS/GPU, faster-whisper, FastAPI, and dev dependencies, register the `ai-editor` CLI, and run `ai-editor doctor` to verify the environment. Pass `--with-antigravity` / `-WithAntigravity` to include the optional `google-antigravity` SDK.
+Both setup scripts automatically check/install system media prerequisites (`ffmpeg`, `ffprobe`, `libheif`), create `.venv`, install all runtime, PyTorch MPS/GPU, faster-whisper, FastAPI, dev dependencies, and the **`google-antigravity` SDK**, sync the **`ai-video-editor` Antigravity Skill** globally to `~/.gemini/config/skills/ai-video-editor`, and verify everything via `ai-editor doctor`.
 
 #### Manual Setup
 
-> **Intel macOS Note (`darwin` / `x86_64`)**: Use Python **3.10–3.12** (`python@3.12`), which matches `torch==2.2.2` wheels with AMD Radeon Pro MPS GPU acceleration.
+> **Intel macOS Note (`darwin` / `x86_64`)**: Use Python **3.10–3.12** (`python@3.12`), which matches `torch==2.2.2` wheels with AMD Radeon Pro MPS GPU acceleration and prebuilt binary wheels for `google-antigravity`.
 
 ```bash
 # macOS (Apple Silicon or Intel/AMD Radeon Pro)
@@ -110,6 +106,7 @@ brew install ffmpeg libheif python@3.12
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install ".[dev]"           # or: pip install -r requirements-dev.txt
+python -m video_editing_ai.cli sync-skill
 python -m video_editing_ai.cli doctor
 ```
 
@@ -119,44 +116,60 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install --upgrade pip setuptools wheel
 pip install ".[dev]"           # or: pip install -r requirements-dev.txt
+python -m video_editing_ai.cli sync-skill
 python -m video_editing_ai.cli doctor
 ```
 
-### 2. Run the 21-Agent Pipeline from the CLI
+### 2. Primary Usage: Conversational Editing in Google Antigravity
 
-```powershell
+Open **Google Antigravity** in this repository (always-on workspace rules in `AGENTS.md` + `.agent/skills/ai-video-editor/SKILL.md` activate automatically) — **or open Antigravity in any folder on your machine** once setup has synced `~/.gemini/config/skills/ai-video-editor`.
+
+Simply ask Antigravity in natural language:
+
+- *"Edit `/path/to/Photos-and-Videos` into a 4K HDR highlight film with Criterion museum plaques, paired vertical diptychs, and chamber BGM."*
+- *"Inspect `/path/to/my_trip` first, ask me interactive questions about pacing and photo effects, and recommend the best runtime."*
+- *"Trim clip 2 by 1.5 seconds, update the title on the atrium shot, and give me a quick preview before re-rendering."*
+
+Antigravity automatically runs `ai_video_studio_skill.py` in `.venv` to inspect your footage, presents interactive multi-choice questions (`ask_question`), visually reviews contact sheets via `read_file`, coordinates specialist editing passes (`invoke_subagent`), executes 2-second surgical ripple edits (`edit-cut` + `render-segment`), and renders the final hardware-accelerated 4K 10-bit HLG HDR `.mp4` + `timeline.fcpxml`.
+
+### 3. Secondary Usage: Programmatic CLI & Antigravity SDK (`ai-editor`)
+
+```bash
+# Verify environment, Antigravity integration, GPU/VideoToolbox, and all 27 Python packages
+.venv/bin/python -m video_editing_ai.cli doctor
+
 # Inspect all 21 registered agents and their artifact contracts
-python -m video_editing_ai.cli agents-list
+.venv/bin/python -m video_editing_ai.cli agents-list
 
-# Run end-to-end: Ingest -> Curation -> Story -> Assembly -> Color/Mix -> QC -> FCPXML + 4K HLG MP4
-python -m video_editing_ai.cli agents-run "<path_to_raw_media>" `
-  -o ".\family_trip_project" `
-  --bgm "<optional_path_to_bgm.mp3>" `
-  --story-arc-mode chronological_cinema `
-  -p "Create an upbeat 4-act family travel film. Preserve candid Mandarin and English dialogue with semantic B-roll cutaways, pair vertical portraits into harmonious diptychs, and include the evening live performance." `
-  --export-fcpxml `
+# Run end-to-end (--antigravity SDK escalation is enabled by default)
+.venv/bin/python -m video_editing_ai.cli agents-run "/path/to/raw_media" \
+  -o "./family_trip_project" \
+  --bgm "/path/to/optional_bgm.mp3" \
+  --story-arc-mode chronological_cinema \
+  -p "Create an upbeat 4-act family travel film with semantic B-roll cutaways and paired vertical diptychs." \
+  --export-fcpxml \
   --render
 
-# Export FCPXML 1.11 (DaVinci Resolve / Final Cut Pro) from any existing project folder
-python -m video_editing_ai.cli export-fcpxml ".\family_trip_project"
+# Export FCPXML 1.11 (DaVinci Resolve / Final Cut Pro) or re-sync Antigravity skill globally
+.venv/bin/python -m video_editing_ai.cli export-fcpxml "./family_trip_project"
+.venv/bin/python -m video_editing_ai.cli sync-skill
 ```
 
-### 3. Launch the Interactive Local Web Studio
+### 4. Companion Local Web Studio (`serve`)
 
-```powershell
-python -m video_editing_ai.cli serve --port 8000
+```bash
+.venv/bin/python -m video_editing_ai.cli serve --port 8000
 ```
 
 Open `http://127.0.0.1:8000` to run the **Stage 0 Client Intake Interview**, preview 16 photo projection effects, inspect live agent reasoning and `blackboard.json` messages, edit `timeline.yaml`, and trigger hardware-accelerated 4K HDR renders.
 
-### 4. Optional Multimodal VLM Escalation
+### 5. Optional Fallback Multimodal VLM Providers
 
-Out of the box, the pipeline runs 100% locally. To enable cloud VLM visual critique, semantic B-roll captioning, and dramaturgical refinement, set any supported provider key:
+When running outside interactive Antigravity chat without live Antigravity SDK agents, you can optionally configure a fallback VLM API key:
 
-```powershell
-# Choose auto (default), gemini, openai, anthropic, or antigravity
-$env:AI_EDITOR_VLM_PROVIDER = "auto"
-$env:GEMINI_API_KEY = "<your_key>"      # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+```bash
+export AI_EDITOR_VLM_PROVIDER="auto"   # auto (Antigravity first), antigravity, gemini, openai, or anthropic
+export GEMINI_API_KEY="<your_key>"     # or OPENAI_API_KEY / ANTHROPIC_API_KEY
 ```
 
 ---

@@ -172,7 +172,16 @@ async def _run_antigravity_annotation_async(
     timeout_sec: float = 120.0,
 ) -> MediaCatalog:
     """Use the Google Antigravity SDK Agent to inspect contact sheets & keyframes and enrich annotations."""
+    import os
+
     from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig
+
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        and os.environ.get("AI_EDITOR_ALLOW_LIVE_ANTIGRAVITY_IN_TESTS") != "1"
+        and getattr(Agent, "__module__", "").startswith("google.antigravity")
+    ):
+        return catalog
 
     # Prepare a concise summary of assets and contact sheets for the Antigravity agent
     video_briefs = [

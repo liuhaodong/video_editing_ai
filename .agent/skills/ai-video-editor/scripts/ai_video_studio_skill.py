@@ -29,23 +29,40 @@ from typing import Any
 
 # Resolve repository src/ path whether invoked from workspace .agent/skills/ or global ~/.gemini/config/skills/
 def _resolve_workspace_root() -> Path:
-    candidates = [
-        Path(__file__).resolve().parents[4],
-        Path.cwd(),
-        Path.home() / "Documents" / "projects" / "video-edit-ai",
-        Path.home() / "Documents" / "projects" / "video_editing_ai",
-    ]
+    candidates: list[Path] = []
+    env_root = os.environ.get("AI_VIDEO_EDITOR_ROOT", "").strip()
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+
+    marker = Path(__file__).resolve().parents[1] / ".workspace_root"
+    if marker.is_file():
+        marker_text = marker.read_text(encoding="utf-8").strip()
+        if marker_text:
+            candidates.append(Path(marker_text).expanduser())
+
+    candidates.extend(
+        [
+            Path(__file__).resolve().parents[4],
+            Path.cwd(),
+            Path.home() / "Documents" / "projects" / "video-edit-ai",
+            Path.home() / "Documents" / "projects" / "video_editing_ai",
+        ]
+    )
     for root in candidates:
-        if (root / "src" / "video_editing_ai").exists():
-            return root
-    return Path.cwd()
+        if (root / "src" / "video_editing_ai").exists() or (root / ".venv").exists():
+            return root.resolve()
+    return Path.cwd().resolve()
 
 
 _WORKSPACE_ROOT = _resolve_workspace_root()
-_venv_py = _WORKSPACE_ROOT / ".venv" / "bin" / "python"
-if _venv_py.exists() and Path(sys.executable).resolve() != _venv_py.resolve():
+_venv_dir = _WORKSPACE_ROOT / ".venv"
+_venv_py = _venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+if _venv_py.exists() and Path(sys.prefix).resolve() != _venv_dir.resolve():
     try:
-        import pydantic  # noqa: F401
+        import video_editing_ai  # noqa: F401
+        import torch  # noqa: F401
+        import faster_whisper  # noqa: F401
+        import pillow_heif  # noqa: F401
     except ImportError:
         os.execv(str(_venv_py), [str(_venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
 _src = _WORKSPACE_ROOT / "src"
@@ -205,7 +222,7 @@ def cmd_run_stage(args: argparse.Namespace) -> int:
         project_dir=project_dir,
         user_prompt=args.prompt or meta.get("user_prompt") or "",
         interview_answers=meta.get("interview_answers") or {},
-        use_antigravity=False,
+        use_antigravity=bool(getattr(args, "use_antigravity", False)),
     )
     blackboard.load_existing_contracts()
 
@@ -309,7 +326,7 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
         height=args.height,
         fps=args.fps,
         hdr=args.hdr,
-        use_antigravity=False,
+        use_antigravity=bool(getattr(args, "use_antigravity", False)),
         render_video=args.render,
     )
 
@@ -348,7 +365,7 @@ def cmd_director_audit(args: argparse.Namespace) -> int:
     bb = PipelineBlackboard(
         media_dir=Path(media_dir_str).resolve(),
         project_dir=project_dir,
-        use_antigravity=False,
+        use_antigravity=bool(getattr(args, "use_antigravity", False)),
     )
     bb.load_existing_contracts()
     director = ProductionDirectorAgent()
@@ -490,7 +507,7 @@ def cmd_apply_story_plan(args: argparse.Namespace) -> int:
         bb = PipelineBlackboard(
             media_dir=Path(media_dir_str).resolve(),
             project_dir=project_dir,
-            use_antigravity=False,
+            use_antigravity=bool(getattr(args, "use_antigravity", False)),
         )
         bb.load_existing_contracts()
         for role_id in [
@@ -949,6 +966,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_stg.add_argument("--project-dir", required=True, help="Target project workspace directory")
     p_stg.add_argument("--media-dir", default=None, help="Raw media folder path")
     p_stg.add_argument("--prompt", default="", help="Optional story prompt override")
+    p_stg.add_argument("--antigravity-sdk", dest="use_antigravity", action="store_true", default=False, help="Enable nested Google Antigravity SDK escalation during stage runs")
+    p_stg.add_argument("--no-antigravity-sdk", dest="use_antigravity", action="store_false", help="Run deterministic/local stage pass (default when orchestrated interactively by Antigravity)")
     p_stg.add_argument("--output", default=None, help="Output stage report JSON path")
     p_stg.set_defaults(func=cmd_run_stage)
 
@@ -969,6 +988,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--sdr", dest="hdr", action="store_false", help="Render in 8-bit SDR")
     p_pipe.add_argument("--render", dest="render", action="store_true", default=True, help="Render final_story.mp4 (default)")
     p_pipe.add_argument("--no-render", dest="render", action="store_false", help="Skip MP4 render (contracts + timeline only)")
+    p_pipe.add_argument("--antigravity-sdk", dest="use_antigravity", action="store_true", default=False, help="Enable nested Google Antigravity SDK escalation inside sub-agents")
+    p_pipe.add_argument("--no-antigravity-sdk", dest="use_antigravity", action="store_false", help="Skip nested Antigravity SDK calls (default when orchestrated interactively by Antigravity)")
     p_pipe.add_argument("--output", default=None, help="Output summary JSON path")
     p_pipe.set_defaults(func=cmd_run_pipeline)
 
@@ -976,6 +997,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dir = sub.add_parser("director-audit", help="Run Stage 60 Executive Movie Production Director screening")
     p_dir.add_argument("--project-dir", required=True, help="Project workspace directory")
     p_dir.add_argument("--media-dir", default=None, help="Optional media directory")
+    p_dir.add_argument("--antigravity-sdk", dest="use_antigravity", action="store_true", default=False, help="Enable nested Google Antigravity SDK escalation during Director screening")
+    p_dir.add_argument("--no-antigravity-sdk", dest="use_antigravity", action="store_false", help="Run local deterministic Director screening (default)")
     p_dir.add_argument("--output", default=None, help="Output director_review.json path")
     p_dir.set_defaults(func=cmd_director_audit)
 
@@ -1038,6 +1061,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Re-run Picture Editors, VFX, Sound Mixer & Director to rebuild timeline.yaml with new Story Plan",
     )
+    p_sp.add_argument("--antigravity-sdk", dest="use_antigravity", action="store_true", default=False, help="Enable nested Google Antigravity SDK escalation during timeline reassembly")
+    p_sp.add_argument("--no-antigravity-sdk", dest="use_antigravity", action="store_false", help="Run local reassembly pass (default)")
     p_sp.add_argument("--output", default=None, help="Optional output report JSON path")
     p_sp.set_defaults(func=cmd_apply_story_plan)
 
@@ -1140,7 +1165,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 14. apply-bgm-plan
     p_ab = sub.add_parser(
         "apply-bgm-plan",
-        help="Mechanically master the AI BGM Agent's selected track(s) to cover 100% of timeline duration at -14 LUFS",
+        help="Mechanically master the AI BGM Agent's selected track(s) to cover 100%% of timeline duration at -14 LUFS",
     )
     p_ab.add_argument("--project-dir", required=True, help="Project workspace directory")
     p_ab.add_argument("--tracks", required=True, help="Comma-separated track filenames or paths to chain/crossfade")

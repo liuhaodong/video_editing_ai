@@ -390,9 +390,18 @@ def sync_skill_to_global(dest_root: Optional[Path] = None, repo_root: Optional[P
     target_base = dest_root or (Path.home() / ".gemini" / "config" / "skills")
     target_skill_dir = target_base / "ai-video-editor"
     target_base.mkdir(parents=True, exist_ok=True)
-    if target_skill_dir.exists():
+    if (
+        not target_skill_dir.is_symlink()
+        and target_skill_dir.exists()
+        and target_skill_dir.resolve() == src_skill_dir.resolve()
+    ):
+        return target_skill_dir
+    if target_skill_dir.is_symlink() or target_skill_dir.is_file():
+        target_skill_dir.unlink()
+    elif target_skill_dir.exists():
         shutil.rmtree(target_skill_dir)
     shutil.copytree(src_skill_dir, target_skill_dir)
+    (target_skill_dir / ".workspace_root").write_text(str(resolved_root), encoding="utf-8")
     return target_skill_dir
 
 
@@ -435,6 +444,7 @@ def cmd_doctor(
     fp = report["ffprobe"]
     hw = report["hardware"]
     heif = report["heif"]
+    ag = report["antigravity"]
     pkgs = report["packages"]
     failed_pkgs = [p for p in pkgs if not p["ok"]]
 
@@ -442,6 +452,7 @@ def cmd_doctor(
     ff_badge = "[green]OK[/green]" if ff["ok"] else "[red]MISSING[/red]"
     fp_badge = "[green]OK[/green]" if fp["ok"] else "[red]MISSING[/red]"
     heif_badge = "[green]OK[/green]" if heif["ok"] else "[red]FAIL[/red]"
+    ag_badge = "[green]OK[/green]" if ag["sdk_ok"] else "[red]FAIL[/red]"
 
     console.print(
         Panel(
@@ -451,6 +462,10 @@ def cmd_doctor(
             + f"\n  - ffmpeg:    {ff_badge} {ff['version_line'] or ff['path'] or 'Not found on PATH'}"
             + f"\n  - ffprobe:   {fp_badge} {fp['path'] or 'Not found on PATH'}"
             + f"\n  - HEIF/HEIC: {heif_badge} {'pillow-heif registered' if heif['ok'] else heif['error']}"
+            + f"\n  - Antigravity: {ag_badge} sdk={ag['sdk_version'] or 'missing'}, "
+            + f"skill={'OK' if ag['workspace_skill_ok'] else 'missing'}, "
+            + f"rules={'OK' if ag['workspace_rules_ok'] else 'missing'}, "
+            + f"global_skill={'OK' if ag['global_skill_ok'] else 'not synced (run ai-editor sync-skill)'}"
             + f"\n  - GPU/Accel: torch={hw['torch_device']} (mps={hw['has_mps']}), "
             + f"opencl={hw['has_amd_opencl']} ({hw['opencl_device_spec'] or 'default'}), "
             + f"discrete_gpu={hw['discrete_gpu_name'] or 'none'}"
@@ -465,15 +480,10 @@ def cmd_doctor(
         err = f" — [red]{pkg['error']}[/red]" if pkg["error"] else ""
         console.print(f"  - {status} {pkg['distribution']} ({pkg['import_name']}): {ver}{err}")
 
-    opt_ag = report["optional"].get("google-antigravity")
-    console.print(
-        f"  - [dim]Optional google-antigravity SDK: {opt_ag or 'not installed (use pip install \".\\[antigravity]\")'}[/dim]"
-    )
-
     if not report["healthy"]:
         console.print("[bold red][FAIL] Environment check found missing or incompatible components.[/bold red]")
         raise typer.Exit(code=1)
-    console.print("[bold green][OK] Environment ready for 4K 10-bit HLG HDR analysis & rendering![/bold green]")
+    console.print("[bold green][OK] Environment ready for Antigravity + 4K 10-bit HLG HDR analysis & rendering![/bold green]")
 
 
 if __name__ == "__main__":

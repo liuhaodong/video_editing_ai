@@ -9,7 +9,7 @@ SKIP_SYSTEM_DEPS=0
 INSTALL_DEV=1
 EDITABLE=0
 WITH_ANTIGRAVITY=0
-SYNC_SKILL=0
+SYNC_SKILL=1
 VENV_DIR=".venv"
 
 usage() {
@@ -20,8 +20,9 @@ Options:
   --skip-system-deps   Skip Homebrew / apt / dnf / pacman system package checks
   --no-dev             Install runtime dependencies only (skip pytest / dev extras)
   --editable           Install in editable mode (-e); avoid with dot-prefixed .venv on macOS Python 3.12+
-  --with-antigravity   Also install optional [antigravity] SDK extra
-  --sync-skill         Sync .agent/skills/ai-video-editor to ~/.gemini/config/skills
+  --with-antigravity   Retained for compatibility (google-antigravity SDK is now included by default)
+  --sync-skill         Sync .agent/skills/ai-video-editor to ~/.gemini/config/skills (default: on)
+  --no-sync-skill      Skip syncing ai-video-editor to ~/.gemini/config/skills
   --venv <path>        Virtual environment directory (default: .venv)
   -h, --help           Show this help message
 EOF
@@ -47,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --sync-skill)
       SYNC_SKILL=1
+      shift
+      ;;
+    --no-sync-skill)
+      SYNC_SKILL=0
       shift
       ;;
     --venv)
@@ -212,10 +217,12 @@ else
 fi
 
 if [[ "${SYNC_SKILL}" -eq 1 ]]; then
-  echo "==> Synchronizing ai-video-editor skill globally"
+  echo "==> Synchronizing ai-video-editor skill globally (~/.gemini/config/skills)"
   "${VENV_PY}" -m video_editing_ai.cli sync-skill
 fi
 
 echo "==> Verifying environment with ai-editor doctor"
 "${VENV_PY}" -m video_editing_ai.cli doctor
-echo "==> Setup complete! Activate with: source ${VENV_DIR}/bin/activate"
+echo "==> Setup complete!"
+echo "  - Primary Usage (Antigravity): Open Antigravity in this repo (or any folder—skill synced globally to ~/.gemini/config/skills/ai-video-editor) and ask to edit any media folder into a 4K HDR film."
+echo "  - Optional CLI / Web Studio: source ${VENV_DIR}/bin/activate && ai-editor --help"
