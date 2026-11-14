@@ -373,7 +373,7 @@ def cmd_render_video(args: argparse.Namespace) -> int:
 
     timeline = EditTimeline.from_yaml(tl_path)
     out_mp4 = Path(args.output_mp4).resolve() if args.output_mp4 else (project_dir / "final_story.mp4")
-    outputs = render_timeline(timeline, out_mp4)
+    outputs = render_timeline(timeline, out_mp4, work_dir=project_dir / "render_cache")
     export_all_nle_formats(timeline, project_dir)
 
     extracted_frames: list[str] = []

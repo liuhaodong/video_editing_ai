@@ -1052,7 +1052,10 @@ def test_zero_project_specific_hardcodings_and_pure_ai_delegation(tmp_path: Path
 
     nar_report = NarrationScriptReport.from_json_file(proj_dir / "narration_script.json")
     assert nar_report.total_cues >= 1
-    assert Path(nar_report.cues[0].audio_path).exists()
+    assert nar_report.delivery_mode == "visual_editorial_cards"
+    assert nar_report.cues[0].audio_path == ""
+    assert bb.timeline is not None
+    assert all(a.role != "voiceover" for a in bb.timeline.audio_tracks)
 
     cam_report = CinematographyReport.from_json_file(proj_dir / "cinematography_report.json")
     assert len(cam_report.operations) >= 1

@@ -509,22 +509,34 @@ class ProductionDirectorAgent(BaseEditingAgent):
             nar = blackboard.custom_artifacts.get("narration_script.json") or {}
             cues_cnt = int(nar.get("total_cues", 0))
             persona = str(nar.get("voice_persona", "warm_documentary_essayist"))
+            delivery_mode = str(nar.get("delivery_mode", "visual_editorial_cards"))
+            if delivery_mode == "spoken_voiceover":
+                critique_txt = (
+                    f"Voiceover Narrator scripted & synthesized {cues_cnt} documentary voiceover cues "
+                    f"({persona}) at non-dialogue chapter bridges."
+                )
+                obs_txt = f"NarrationScript generated {cues_cnt} 48kHz stereo voiceover cues ({persona})."
+                think_txt = "Verified that narration cues only enter during non-dialogue montage openings/closings and trigger -14dB BGM auto-ducking."
+            else:
+                critique_txt = (
+                    f"Editorial Storyteller scripted {cues_cnt} documentary narrative captions "
+                    f"({persona}, mode={delivery_mode}) for luxury on-screen typography without robotic TTS."
+                )
+                obs_txt = f"NarrationScript generated {cues_cnt} editorial caption cues ({persona}, {delivery_mode})."
+                think_txt = "Verified that chapter narrative cues route cleanly to Track V3 curatorial typography without injecting offline OS TTS or unnecessary BGM dips."
             review = DirectorStageReview(
                 stage_order=agent.stage_order,
                 reviewed_agent_role=rid,
                 status="approved",
                 quality_score=9.5,
-                critique=(
-                    f"Voiceover Narrator scripted & synthesized {cues_cnt} documentary narration cues "
-                    f"({persona}) at non-dialogue chapter bridges."
-                ),
+                critique=critique_txt,
             )
             self._record_thought(
                 blackboard,
                 agent,
                 review,
-                observation=f"NarrationScript generated {cues_cnt} 48kHz stereo voiceover cues ({persona}).",
-                thinking="Verified that narration cues only enter during non-dialogue montage openings/closings and trigger -14dB BGM auto-ducking.",
+                observation=obs_txt,
+                thinking=think_txt,
             )
             return review, False
 

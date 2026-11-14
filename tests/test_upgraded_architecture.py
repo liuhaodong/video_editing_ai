@@ -1887,3 +1887,190 @@ def test_gate11_parallel_dit_ingest_and_catalog_dedup(
     )
     assert probe_calls == {"video": 0, "photo": 1, "audio": 0}
     assert catalog_stale.photos[0].width == 642
+
+
+def test_gate12_visual_editorial_narration_replaces_robotic_tts_by_default(tmp_path: Path) -> None:
+    """
+    Gate 12: By default, documentary storytelling uses visual editorial cards instead of offline OS TTS;
+    explicit voiceover requests still work; and HDR-safe typography clamps strictly within 203-nit ceiling.
+    """
+    import numpy as np
+    from PIL import Image
+
+    from video_editing_ai.agents.base import PipelineBlackboard
+    from video_editing_ai.agents.intake_agent import ClientIntakeAgent
+    from video_editing_ai.agents.plugins.camera_operator_agent import CameraOperatorAgent
+    from video_editing_ai.agents.plugins.motion_graphics_agent import MotionGraphicsTitleAgent
+    from video_editing_ai.agents.plugins.narrator_agent import NarratorVoiceoverAgent
+    from video_editing_ai.agents.visual_qc_agent import ProxyWatchdownQCAgent
+    from video_editing_ai.models.schema import (
+        AudioTrackItem,
+        ChapterPlan,
+        EditTimeline,
+        NarrationScriptReport,
+        PaperEdit,
+        TimelineSettings,
+        TitleOverlayItem,
+        VisualTrackItem,
+    )
+    from video_editing_ai.renderer.titles import HDR_DIFFUSE_WHITE_PEAK_RGB, render_title_png
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    clip_vid = _make_synthetic_video(media_dir / "gallery_01.mp4", duration=6.0, color="darkslategray")
+    clip_photo = _make_portrait_photo_with_top_face(media_dir / "art_01.jpg")
+
+    # 1. Default intake -> visual_editorial_cards (NO robotic OS TTS)
+    proj_default = tmp_path / "proj_default"
+    bb = PipelineBlackboard(
+        media_dir=media_dir,
+        project_dir=proj_default,
+        user_prompt="SFMOMA museum visit with crisp titles and architectural photography",
+    )
+    ClientIntakeAgent().run(bb)
+    assert bb.creative_brief is not None
+    assert bb.creative_brief.narration_delivery_mode == "visual_editorial_cards"
+
+    bb.paper_edit = PaperEdit(
+        project_title="Museum Visit",
+        story_arc_summary="Arrival and modern gallery walk.",
+        chapters=[
+            ChapterPlan(
+                chapter_id="chap_01",
+                title="Act I - Arrival & Architecture",
+                location_tag="Architectural",
+                narrative_goal="Explore modern atrium lines.",
+                selected_subclip_ids=[],
+            )
+        ],
+    )
+    bb.timeline = EditTimeline(
+        project_name="Museum Visit",
+        settings=TimelineSettings(width=1920, height=1080, fps=30, hdr=True),
+        visual_track=[
+            VisualTrackItem(
+                id="clip_001",
+                type="video",
+                roll_type="b_roll",
+                act="Act I - Arrival & Architecture",
+                source=str(clip_vid),
+                duration=6.0,
+                timeline_start=0.0,
+                narrative_note="[B_ROLL] Atrium Architecture",
+            ),
+            VisualTrackItem(
+                id="clip_002",
+                type="photo",
+                roll_type="still",
+                act="Act I - Arrival & Architecture",
+                source=str(clip_photo),
+                duration=6.0,
+                timeline_start=6.0,
+            ),
+        ],
+        # Include a stale voiceover track to confirm CameraOperatorAgent purges it in visual_editorial_cards mode
+        audio_tracks=[
+            AudioTrackItem(
+                id="vo_01",
+                role="voiceover",
+                source=str(tmp_path / "stale_vo_01.wav"),
+                timeline_start=0.5,
+                duration=3.0,
+            )
+        ],
+    )
+
+    NarratorVoiceoverAgent().run(bb)
+    nar_report = NarrationScriptReport.from_json_file(proj_default / "narration_script.json")
+    assert nar_report.delivery_mode == "visual_editorial_cards"
+    assert nar_report.total_cues >= 1
+    assert all(c.audio_path == "" for c in nar_report.cues)
+    assert not list((proj_default / "narration_audio").glob("vo_*.wav")) if (proj_default / "narration_audio").exists() else True
+
+    CameraOperatorAgent().run(bb)
+    assert all(a.role != "voiceover" for a in bb.timeline.audio_tracks)
+
+    MotionGraphicsTitleAgent().run(bb)
+    styles_present = {ov.style for ov in bb.timeline.title_track}
+    assert "editorial_caption" in styles_present
+    assert "opening_card" in styles_present
+    assert "closing_card" in styles_present
+
+    # Waypoint labels must not leak raw internal placeholder tags like "Architectural"
+    for ov in bb.timeline.title_track:
+        if ov.style == "route_map_card":
+            assert all(wp.get("label") != "Architectural" for wp in ov.map_waypoints)
+
+    qc_res = ProxyWatchdownQCAgent().run(bb)
+    assert qc_res["overlay_overlap_count"] == 0
+
+    # 2. Explicit voiceover request still triggers spoken_voiceover synthesis cleanly
+    proj_vo = tmp_path / "proj_vo"
+    bb_vo = PipelineBlackboard(
+        media_dir=media_dir,
+        project_dir=proj_vo,
+        user_prompt="Create a museum documentary and add spoken voiceover narration",
+    )
+    ClientIntakeAgent().run(bb_vo)
+    assert bb_vo.creative_brief is not None
+    assert bb_vo.creative_brief.narration_delivery_mode == "spoken_voiceover"
+    bb_vo.paper_edit = bb.paper_edit
+    NarratorVoiceoverAgent().run(bb_vo)
+    vo_report = NarrationScriptReport.from_json_file(proj_vo / "narration_script.json")
+    assert vo_report.delivery_mode == "spoken_voiceover"
+    assert vo_report.total_cues >= 1
+    assert Path(vo_report.cues[0].audio_path).is_file()
+
+    # 3. Verify luxury styles render crisply within HDR diffuse-white bounds (<= 192 RGB)
+    for idx_s, ov in enumerate(
+        [
+            TitleOverlayItem(
+                id="t_open",
+                style="opening_card",
+                eyebrow="ACT I · OPENING",
+                text="SFMOMA — A Day in Modern Art",
+                subtitle="“Today we're heading to SFMOMA!” · 这次我们去现代艺术博物馆",
+                timeline_start=0.5,
+                duration=3.0,
+                hdr_safe=True,
+            ),
+            TitleOverlayItem(
+                id="t_ed",
+                style="editorial_caption",
+                eyebrow="CURATORIAL NOTE · GRAND ATRIUM",
+                text="Into the Oculus Light",
+                subtitle="Sunlit timber stairs welcome an afternoon of wonder across open galleries.",
+                timeline_start=4.0,
+                duration=3.0,
+                hdr_safe=True,
+            ),
+            TitleOverlayItem(
+                id="t_act",
+                style="act_banner",
+                eyebrow="CHAPTER II",
+                text="Optical Geometry & Harp",
+                subtitle="Light tables & live gallery performance",
+                timeline_start=7.5,
+                duration=3.0,
+                hdr_safe=True,
+            ),
+            TitleOverlayItem(
+                id="t_lt",
+                style="lower_third",
+                eyebrow="FIFTH FLOOR SCULPTURE",
+                text="Louise Bourgeois · Maman",
+                subtitle="Gliding Beneath the Towering Bronze & Steel Spider",
+                timeline_start=11.0,
+                duration=3.0,
+                hdr_safe=True,
+            ),
+        ]
+    ):
+        png_out = tmp_path / f"hdr_title_{idx_s}.png"
+        render_title_png(ov, png_out, width=1920, height=1080, hdr_safe=True)
+        assert png_out.exists()
+        with Image.open(png_out) as im:
+            arr = np.asarray(im.convert("RGBA"), dtype=np.uint8)
+            vis = arr[:, :, 3] > 0
+            assert np.any(vis)
+            assert int(np.max(arr[:, :, :3][vis])) <= HDR_DIFFUSE_WHITE_PEAK_RGB

@@ -704,7 +704,7 @@ def render_timeline(
         active_titles = [
             t
             for t in timeline.title_track
-            if t.timeline_start < total_dur and t.style != "act_banner"
+            if t.timeline_start < total_dur
         ]
         title_pngs_all: list[Path] = []
         for t_idx, t_item in enumerate(active_titles):

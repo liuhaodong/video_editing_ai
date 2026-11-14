@@ -146,7 +146,8 @@ class CameraOperatorAgent(BaseEditingAgent):
             e for e in timeline.effects_track if e.created_by_agent != self.role_id
         ] + stabilize_effects
 
-        # Inject voiceover audio tracks from Stage 25 if present and not yet on timeline.audio_tracks
+        # Inject voiceover audio tracks ONLY when Stage 25 explicitly synthesized spoken voiceover audio;
+        # otherwise purge any stale vo_* voiceover tracks so editorial typography remains clean & silent.
         narration_data = blackboard.custom_artifacts.get("narration_script.json")
         if narration_data is None and (blackboard.project_dir / "narration_script.json").exists():
             try:
@@ -157,14 +158,19 @@ class CameraOperatorAgent(BaseEditingAgent):
                 ).model_dump(mode="json")
             except Exception:
                 narration_data = None
-        if isinstance(narration_data, dict) and isinstance(narration_data.get("cues"), list):
+        delivery_mode = (
+            str(narration_data.get("delivery_mode") or "visual_editorial_cards")
+            if isinstance(narration_data, dict)
+            else "visual_editorial_cards"
+        )
+        if delivery_mode == "spoken_voiceover" and isinstance(narration_data, dict) and isinstance(narration_data.get("cues"), list):
             from ...models.schema import AudioTrackItem
 
             existing_vo_ids = {a.id for a in timeline.audio_tracks if a.role == "voiceover"}
             for cue in narration_data["cues"]:
                 cid = str(cue.get("cue_id") or "")
-                apath = str(cue.get("audio_path") or "")
-                if cid and apath and Path(apath).exists() and cid not in existing_vo_ids:
+                apath = str(cue.get("audio_path") or "").strip()
+                if cid and apath and Path(apath).is_file() and cid not in existing_vo_ids:
                     st_t = min(max(0.0, float(cue.get("target_timeline_sec", 0.0))), max(0.0, timeline.total_duration - 2.0))
                     timeline.audio_tracks.append(
                         AudioTrackItem(
@@ -179,6 +185,11 @@ class CameraOperatorAgent(BaseEditingAgent):
                             fade_out=0.25,
                         )
                     )
+        else:
+            timeline.audio_tracks = [
+                a for a in timeline.audio_tracks
+                if not (a.role == "voiceover" and str(a.id).startswith("vo_"))
+            ]
 
         proj_title = blackboard.creative_brief.project_title if blackboard.creative_brief else timeline.project_name
         report = CinematographyReport(

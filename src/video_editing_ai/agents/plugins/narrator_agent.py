@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -123,15 +124,15 @@ def _synthesize_narration_wav(
 
 @register_agent
 class NarratorVoiceoverAgent(BaseEditingAgent):
-    """Stage 25 Agent: Crafts concise documentary voiceover narration cues at key story turns."""
+    """Stage 25 Agent: Crafts concise documentary story cues as luxury on-screen editorial cards by default (or spoken voiceover when requested)."""
 
     role_id = "narrator_voiceover"
-    display_name = "2b. Documentary Scriptwriter & Voiceover Narrator"
+    display_name = "2b. Documentary Scriptwriter & Editorial Storyteller"
     stage_order = 25
     description = (
-        "Big-budget documentary scriptwriter and voiceover producer that writes brief, evocative "
-        "narration cues at chapter openings and finales (never colliding with live camera speech) "
-        "and synthesizes broadcast voiceover audio tracks."
+        "Big-budget documentary scriptwriter that writes brief, evocative narrative cues at chapter "
+        "openings and finales (never colliding with live camera speech), delivered as luxury on-screen "
+        "editorial typography by default or synthesized voiceover audio when explicitly requested."
     )
     enabled_by_default = True
     requires_artifacts = ["creative_brief.json", "paper_edit.json"]
@@ -145,9 +146,34 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
         if paper is None:
             return {"cues_generated": 0}
 
+        env_tts = os.environ.get("AI_EDITOR_ENABLE_SPOKEN_TTS", "").strip().lower() in ("1", "true", "yes")
+        delivery_mode = (
+            "spoken_voiceover"
+            if env_tts
+            else (getattr(brief, "narration_delivery_mode", "visual_editorial_cards") if brief else "visual_editorial_cards")
+        )
+
         proj_title = (brief.project_title if brief else paper.project_title).replace("_", " ").strip()
         tone = brief.tone if brief else "warm_joyful"
         persona = "warm_documentary_essayist" if tone in ("warm_joyful", "cinematic_nostalgic") else "editorial_storyteller"
+
+        vo_dir = blackboard.project_dir / "narration_audio"
+        if delivery_mode == "none":
+            if vo_dir.exists():
+                for stale_wav in vo_dir.glob("vo_*.wav"):
+                    stale_wav.unlink(missing_ok=True)
+            report = NarrationScriptReport(
+                project_title=proj_title,
+                delivery_mode="none",
+                voice_persona=persona,
+                synthesis_engine="none",
+                total_cues=0,
+                cues=[],
+            )
+            out_path = blackboard.project_dir / "narration_script.json"
+            report.to_json_file(out_path)
+            blackboard.set_custom_artifact("narration_script.json", report.model_dump(mode="json"))
+            return {"total_cues": 0, "delivery_mode": "none", "narration_script_path": str(out_path)}
 
         sc_map = {s.subclip_id: s for s in (mi.subclips if mi else [])}
         cues: list[NarrationCue] = []
@@ -165,28 +191,38 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
                 else:
                     break
             raw_loc = (chap.location_tag or "").strip()
-            loc_label = proj_title if (not raw_loc or raw_loc.lower() in ("living", "scene", "general", "location")) else raw_loc
+            loc_label = proj_title if (not raw_loc or raw_loc.lower() in ("living", "scene", "general", "location", "keepsake", "architectural")) else raw_loc
+            clean_chap_title = re.sub(
+                r"^(?:Act\s+[IVX0-9]+|Chapter\s+\d+)\s*[-–—:]\s*",
+                "",
+                chap.title,
+                flags=re.IGNORECASE,
+            ).strip() or chap.title
 
             if idx == 0 or aroll_count == 0 or idx == len(paper.chapters) - 1:
                 cue_id = f"vo_{len(cues) + 1:02d}"
                 if idx == 0:
+                    headline = clean_chap_title
                     line = f"{proj_title} begins with quiet anticipation as the journey unfolds."
-                    rationale = "Opening chapter voiceover sets the documentary tone and invites the viewer in."
+                    rationale = "Opening chapter reflection sets the documentary tone and invites the viewer in."
                 elif idx == len(paper.chapters) - 1:
+                    headline = clean_chap_title
                     line = f"As the light softens over {loc_label}, the day's small details become lasting memories."
                     rationale = "Closing chapter reflection provides emotional resolution before the final title card."
                 else:
-                    line = f"In {chap.title}, every frame captures the rhythm and texture of {loc_label}."
+                    headline = clean_chap_title
+                    line = f"In {clean_chap_title}, every frame captures the rhythm and texture of {loc_label}."
                     rationale = "Bridges visual montage chapter without live camera dialogue."
 
                 words_cnt = len(line.split())
-                est_dur = round(max(2.6, min(5.2, words_cnt * 0.34)), 2)
+                est_dur = round(max(2.8, min(5.4, words_cnt * 0.36)), 2)
                 cues.append(
                     NarrationCue(
                         cue_id=cue_id,
                         chapter_id=chap.chapter_id,
                         target_timeline_sec=round(cursor_est + leading_aroll_dur + 0.6, 2),
                         duration_sec=est_dur,
+                        headline=headline,
                         spoken_text=line,
                         voice_persona=persona,
                         rationale=rationale,
@@ -198,11 +234,11 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
         ai_resp = self.ask_ai_creative_json(
             blackboard=blackboard,
             prompt=(
-                f"Project '{proj_title}' (tone={tone}) has {len(paper.chapters)} chapters.\n"
-                f"Initial voiceover cues: {[c.model_dump(mode='json') for c in cues]}\n"
+                f"Project '{proj_title}' (tone={tone}, delivery_mode={delivery_mode}) has {len(paper.chapters)} chapters.\n"
+                f"Initial story cues: {[c.model_dump(mode='json') for c in cues]}\n"
                 "Return JSON {\"voice_persona\": \"...\", \"cues\": [{\"cue_id\": \"vo_01\", \"chapter_id\": \"...\", "
-                "\"target_timeline_sec\": 4.5, \"duration_sec\": 3.4, \"spoken_text\": \"...\", "
-                "\"subtitle_translation\": \"...\", \"rationale\": \"...\"}]} to refine documentary narration."
+                "\"target_timeline_sec\": 4.5, \"duration_sec\": 3.6, \"headline\": \"...\", \"spoken_text\": \"...\", "
+                "\"subtitle_translation\": \"...\", \"rationale\": \"...\"}]} to refine documentary storytelling."
             ),
             decision_key=self.role_id,
             timeout_sec=25.0,
@@ -215,41 +251,50 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
                 for idx_c, raw_c in enumerate(ai_resp["cues"], start=1):
                     if isinstance(raw_c, dict) and raw_c.get("spoken_text"):
                         txt = str(raw_c["spoken_text"]).strip()
-                        dur_c = float(raw_c.get("duration_sec") or max(2.6, min(5.5, len(txt.split()) * 0.34)))
+                        dur_c = float(raw_c.get("duration_sec") or max(2.8, min(5.5, len(txt.split()) * 0.36)))
                         parsed_cues.append(
                             NarrationCue(
                                 cue_id=str(raw_c.get("cue_id") or f"vo_{idx_c:02d}"),
                                 chapter_id=str(raw_c.get("chapter_id") or (paper.chapters[0].chapter_id if paper.chapters else "chap_01")),
                                 target_timeline_sec=float(raw_c.get("target_timeline_sec") or (idx_c * 8.0)),
                                 duration_sec=round(dur_c, 2),
+                                headline=str(raw_c.get("headline") or "").strip(),
                                 spoken_text=txt,
                                 subtitle_translation=raw_c.get("subtitle_translation"),
                                 voice_persona=str(raw_c.get("voice_persona") or persona),
-                                rationale=str(raw_c.get("rationale") or "AI-scripted documentary narration cue."),
+                                rationale=str(raw_c.get("rationale") or "AI-scripted documentary storytelling cue."),
                             )
                         )
                 if parsed_cues:
                     cues = parsed_cues
 
-        vo_dir = blackboard.project_dir / "narration_audio"
-        engine_used = "acoustic_cadence_synthesizer"
-        for cue in cues:
-            wav_path = vo_dir / f"{cue.cue_id}.wav"
-            synth_path, engine_used = _synthesize_narration_wav(
-                output_wav=wav_path,
-                spoken_text=cue.spoken_text,
-                duration_sec=cue.duration_sec,
-            )
-            cue.audio_path = str(synth_path.resolve())
-            try:
-                with wave.open(str(synth_path), "rb") as wf:
-                    if wf.getframerate() > 0:
-                        cue.duration_sec = round(wf.getnframes() / float(wf.getframerate()), 2)
-            except Exception:
-                pass
+        if delivery_mode == "spoken_voiceover":
+            engine_used = "acoustic_cadence_synthesizer"
+            for cue in cues:
+                wav_path = vo_dir / f"{cue.cue_id}.wav"
+                synth_path, engine_used = _synthesize_narration_wav(
+                    output_wav=wav_path,
+                    spoken_text=cue.spoken_text,
+                    duration_sec=cue.duration_sec,
+                )
+                cue.audio_path = str(synth_path.resolve())
+                try:
+                    with wave.open(str(synth_path), "rb") as wf:
+                        if wf.getframerate() > 0:
+                            cue.duration_sec = round(wf.getnframes() / float(wf.getframerate()), 2)
+                except Exception:
+                    pass
+        else:
+            engine_used = "visual_editorial_typography"
+            if vo_dir.exists():
+                for stale_wav in vo_dir.glob("vo_*.wav"):
+                    stale_wav.unlink(missing_ok=True)
+            for cue in cues:
+                cue.audio_path = ""
 
         report = NarrationScriptReport(
             project_title=proj_title,
+            delivery_mode=delivery_mode,
             voice_persona=persona,
             synthesis_engine=engine_used,
             total_cues=len(cues),
@@ -259,20 +304,28 @@ class NarratorVoiceoverAgent(BaseEditingAgent):
         report.to_json_file(out_path)
         blackboard.set_custom_artifact("narration_script.json", report.model_dump(mode="json"))
 
-        blackboard.emit_activity(
-            self.role_id,
-            f"Scripted & synthesized {len(cues)} documentary voiceover cues ({persona})",
-            detail=f"Saved narration_script.json and {len(cues)} 48kHz stereo WAV cues in narration_audio/",
-        )
+        if delivery_mode == "spoken_voiceover":
+            blackboard.emit_activity(
+                self.role_id,
+                f"Scripted & synthesized {len(cues)} documentary voiceover cues ({persona})",
+                detail=f"Saved narration_script.json and {len(cues)} 48kHz stereo WAV cues in narration_audio/",
+            )
+        else:
+            blackboard.emit_activity(
+                self.role_id,
+                f"Scripted {len(cues)} editorial story captions for on-screen typography ({persona})",
+                detail="Saved narration_script.json (delivery_mode=visual_editorial_cards; skipped robotic OS TTS)",
+            )
         blackboard.send_message(
             sender_role=self.role_id,
             recipient_role="dialogue_editor",
             message_type="handoff",
-            subject=f"Prepared {len(cues)} documentary voiceover narration cues for timeline integration",
-            payload={"total_cues": len(cues), "narration_script_path": str(out_path)},
+            subject=f"Prepared {len(cues)} documentary narration cues ({delivery_mode}) for timeline integration",
+            payload={"total_cues": len(cues), "delivery_mode": delivery_mode, "narration_script_path": str(out_path)},
         )
         return {
             "total_cues": len(cues),
+            "delivery_mode": delivery_mode,
             "voice_persona": persona,
             "narration_script_path": str(out_path),
         }

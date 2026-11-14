@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from ..analyzer.media_probe import (
     AUDIO_EXTENSIONS,
@@ -521,6 +521,56 @@ def _resolve_photo_suite_answers(
     return enabled_modes, enabled_overlays, default_fx_suite, default_finishers
 
 
+def _detect_narration_delivery_mode(
+    prompt: str = "",
+    interview_answers: Optional[dict[str, Any]] = None,
+) -> Literal["visual_editorial_cards", "spoken_voiceover", "none"]:
+    """
+    Default to luxury visual editorial cards ('visual_editorial_cards') instead of unsolicited
+    offline/robotic OS TTS, enabling 'spoken_voiceover' only when explicitly requested.
+    """
+    answers = interview_answers or {}
+    explicit_ans = str(answers.get("narration_delivery_mode") or "").strip().lower()
+    if explicit_ans in ("visual_editorial_cards", "spoken_voiceover", "none"):
+        return explicit_ans  # type: ignore[return-value]
+
+    low = (prompt or "").lower()
+    if any(k in low for k in ("no captions", "no titles", "no on-screen text", "without titles")):
+        return "none"
+
+    negated = any(
+        k in low
+        for k in (
+            "no voice",
+            "no voiceover",
+            "no narration",
+            "without voice",
+            "no robotic",
+            "instead of voice",
+            "text instead",
+            "titles instead",
+            "captions instead",
+        )
+    )
+    requested = any(
+        k in low
+        for k in (
+            "voiceover",
+            "voice-over",
+            "voice over",
+            "spoken narration",
+            "voice narration",
+            "tts",
+            "narrated audio",
+            "配音",
+            "旁白",
+        )
+    )
+    if requested and not negated:
+        return "spoken_voiceover"
+    return "visual_editorial_cards"
+
+
 def refine_intake_interactively(
     media_dir: str | Path,
     user_message: str = "",
@@ -744,6 +794,7 @@ def refine_intake_interactively(
         max_consecutive_same_subject=3,
         nat_sound_db=-20.0,
         music_duck_db=-14.0,
+        narration_delivery_mode=_detect_narration_delivery_mode(raw_msg, answers),
         director_recommendations=director_recommendations_summary,
     )
 
@@ -941,6 +992,7 @@ class ClientIntakeAgent(BaseEditingAgent):
             enabled_optional_agents=(
                 [a.strip() for a in answers.get("enabled_optional_agents", "").split(",") if a.strip()]
             ),
+            narration_delivery_mode=_detect_narration_delivery_mode(blackboard.user_prompt, answers),
             interview_qa=qa_records,
             director_recommendations=director_recommendations_summary,
         )

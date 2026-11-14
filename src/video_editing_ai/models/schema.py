@@ -323,6 +323,14 @@ class CreativeBrief(BaseModel):
         default=True,
         description="Start film with a 3-4s Cold-Open Teaser Hook before the Main Opening Title Card",
     )
+    narration_delivery_mode: Literal["visual_editorial_cards", "spoken_voiceover", "none"] = Field(
+        default="visual_editorial_cards",
+        description=(
+            "Default 'visual_editorial_cards' renders documentary story turns as luxury on-screen "
+            "editorial typography instead of offline robotic OS TTS; 'spoken_voiceover' synthesizes "
+            "spoken audio only when explicitly requested."
+        ),
+    )
     interview_qa: list[dict[str, Any]] = Field(default_factory=list)
 
     def to_json_file(self, path: str | Path) -> None:
@@ -986,11 +994,16 @@ class TitleOverlayItem(BaseModel):
         "opening_card",
         "act_banner",
         "lower_third",
+        "editorial_caption",
         "dialogue_badge",
         "closing_card",
         "route_map_card",
         "exif_stamp",
     ] = Field(default="lower_third")
+    eyebrow: Optional[str] = Field(
+        default=None,
+        description="Optional tracked uppercase kicker or gallery/chapter label above the headline",
+    )
     text: str = Field(..., description="Primary title or callout headline")
     subtitle: Optional[str] = Field(default=None, description="Secondary line or English/bilingual subtitle")
     timeline_start: float = Field(..., ge=0.0)
@@ -1014,12 +1027,13 @@ class TitleOverlayItem(BaseModel):
 
 
 class NarrationCue(BaseModel):
-    """A single documentary voiceover narration cue produced by Stage 25 NarratorVoiceoverAgent."""
+    """A single documentary narration cue produced by Stage 25 NarratorVoiceoverAgent."""
 
     cue_id: str
     chapter_id: str
     target_timeline_sec: float = Field(default=0.0, ge=0.0)
     duration_sec: float = Field(default=3.2, gt=0.5)
+    headline: str = ""
     spoken_text: str
     subtitle_translation: Optional[str] = None
     voice_persona: str = "warm_documentary_narrator"
@@ -1028,11 +1042,12 @@ class NarrationCue(BaseModel):
 
 
 class NarrationScriptReport(BaseModel):
-    """Stage 25 Output (narration_script.json): Documentary script & synthesized voiceover report."""
+    """Stage 25 Output (narration_script.json): Documentary script & editorial/voiceover report."""
 
     project_title: str
+    delivery_mode: Literal["visual_editorial_cards", "spoken_voiceover", "none"] = "visual_editorial_cards"
     voice_persona: str = "warm_documentary_narrator"
-    synthesis_engine: str = "acoustic_tts"
+    synthesis_engine: str = "visual_editorial_typography"
     total_cues: int = 0
     cues: list[NarrationCue] = Field(default_factory=list)
 
@@ -1575,6 +1590,7 @@ class GraphicsOverlaySpec(BaseModel):
         "opening_card",
         "act_banner",
         "lower_third",
+        "editorial_caption",
         "dialogue_badge",
         "closing_card",
         "route_map_card",
