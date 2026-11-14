@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 from typing import Optional
@@ -13,7 +14,8 @@ import uvicorn
 
 from .agents import AgentRegistry, generate_intake_questions, run_multi_agent_pipeline
 from .analyzer.ag_annotator import analyze_media_directory
-from .docs_sync import sync_agent_documentation
+from .docs_sync import resolve_repo_root, sync_agent_documentation
+from .doctor import collect_environment_diagnostics
 from .exporters.nle_export import export_all_nle_formats, export_fcpxml
 from .models.schema import EditTimeline, MediaCatalog
 from .planner.story_director import generate_edit_plan
@@ -378,10 +380,10 @@ def cmd_serve(
     uvicorn.run(web_app, host=host, port=port)
 
 
-def sync_skill_to_global(dest_root: Optional[Path] = None) -> Path:
+def sync_skill_to_global(dest_root: Optional[Path] = None, repo_root: Optional[Path] = None) -> Path:
     """Synchronize the workspace .agent/skills/ai-video-editor skill to the global Antigravity skills folder."""
-    repo_root = Path(__file__).resolve().parents[2]
-    src_skill_dir = repo_root / ".agent" / "skills" / "ai-video-editor"
+    resolved_root = resolve_repo_root(repo_root)
+    src_skill_dir = resolved_root / ".agent" / "skills" / "ai-video-editor"
     if not src_skill_dir.exists():
         raise FileNotFoundError(f"Workspace skill directory not found: {src_skill_dir}")
 
@@ -403,12 +405,75 @@ def cmd_sync_skill(
     ),
 ) -> None:
     """Install / synchronize the ai-video-editor skill globally for Antigravity (~/.gemini/config/skills/ai-video-editor)."""
-    installed_path = sync_skill_to_global(dest_dir)
+    resolved_root = resolve_repo_root()
+    installed_path = sync_skill_to_global(dest_dir, repo_root=resolved_root)
     console.print(
         f"[bold green][OK] Installed & synchronized Antigravity Skill globally![/bold green]\n"
-        f"  - Workspace Skill: [underline]{Path(__file__).resolve().parents[2] / '.agent/skills/ai-video-editor'}[/underline]\n"
+        f"  - Workspace Skill: [underline]{resolved_root / '.agent/skills/ai-video-editor'}[/underline]\n"
         f"  - Global Skill:    [underline]{installed_path}[/underline]"
     )
+
+
+@app.command("doctor")
+def cmd_doctor(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit machine-readable JSON diagnostics",
+    ),
+) -> None:
+    """Verify Python compatibility, FFmpeg/FFprobe binaries, GPU encoders, and all required dependencies."""
+    report = collect_environment_diagnostics()
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        if not report["healthy"]:
+            raise typer.Exit(code=1)
+        return
+
+    py = report["python"]
+    ff = report["ffmpeg"]
+    fp = report["ffprobe"]
+    hw = report["hardware"]
+    heif = report["heif"]
+    pkgs = report["packages"]
+    failed_pkgs = [p for p in pkgs if not p["ok"]]
+
+    py_badge = "[green]OK[/green]" if py["compatible"] else "[red]FAIL[/red]"
+    ff_badge = "[green]OK[/green]" if ff["ok"] else "[red]MISSING[/red]"
+    fp_badge = "[green]OK[/green]" if fp["ok"] else "[red]MISSING[/red]"
+    heif_badge = "[green]OK[/green]" if heif["ok"] else "[red]FAIL[/red]"
+
+    console.print(
+        Panel(
+            f"[bold cyan]video-editing-ai Environment Doctor[/bold cyan]\n"
+            f"  - Python:    {py_badge} {py['version']} ({py['platform']} / {py['arch']}) — {py['executable']}"
+            + (f"\n    [yellow]Note: {py['note']}[/yellow]" if py["note"] else "")
+            + f"\n  - ffmpeg:    {ff_badge} {ff['version_line'] or ff['path'] or 'Not found on PATH'}"
+            + f"\n  - ffprobe:   {fp_badge} {fp['path'] or 'Not found on PATH'}"
+            + f"\n  - HEIF/HEIC: {heif_badge} {'pillow-heif registered' if heif['ok'] else heif['error']}"
+            + f"\n  - GPU/Accel: torch={hw['torch_device']} (mps={hw['has_mps']}), "
+            + f"opencl={hw['has_amd_opencl']} ({hw['opencl_device_spec'] or 'default'}), "
+            + f"discrete_gpu={hw['discrete_gpu_name'] or 'none'}"
+            + f"\n  - Encoders:  HDR={hw['best_hdr_encoder']}, SDR={hw['best_sdr_encoder']}, "
+            + f"videotoolbox_hw={hw['has_videotoolbox_hwaccel']}, scale_vt={hw['has_scale_vt']}, zscale={hw['has_zscale']}"
+        )
+    )
+    console.print(f"[bold]Python Packages ({len(pkgs) - len(failed_pkgs)}/{len(pkgs)} OK):[/bold]")
+    for pkg in pkgs:
+        status = "[green]OK[/green]" if pkg["ok"] else "[red]FAIL[/red]"
+        ver = pkg["version"] or "not installed"
+        err = f" — [red]{pkg['error']}[/red]" if pkg["error"] else ""
+        console.print(f"  - {status} {pkg['distribution']} ({pkg['import_name']}): {ver}{err}")
+
+    opt_ag = report["optional"].get("google-antigravity")
+    console.print(
+        f"  - [dim]Optional google-antigravity SDK: {opt_ag or 'not installed (use pip install \".\\[antigravity]\")'}[/dim]"
+    )
+
+    if not report["healthy"]:
+        console.print("[bold red][FAIL] Environment check found missing or incompatible components.[/bold red]")
+        raise typer.Exit(code=1)
+    console.print("[bold green][OK] Environment ready for 4K 10-bit HLG HDR analysis & rendering![/bold green]")
 
 
 if __name__ == "__main__":

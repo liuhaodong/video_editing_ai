@@ -431,10 +431,15 @@ class BaseEditingAgent(ABC):
         if not self.skill_reference_file:
             return f"You are {self.display_name} ({self.role_id}). {self.description}"
 
-        repo_root = Path(__file__).resolve().parents[3]
-        ref_path = repo_root / ".agent" / "skills" / "ai-video-editor" / "references" / self.skill_reference_file
-        if ref_path.exists():
-            return ref_path.read_text(encoding="utf-8")
+        for start in (Path.cwd().resolve(), Path(__file__).resolve()):
+            for candidate in (start, *start.parents):
+                if (candidate / "pyproject.toml").is_file():
+                    ref_path = candidate / ".agent" / "skills" / "ai-video-editor" / "references" / self.skill_reference_file
+                    if ref_path.is_file():
+                        return ref_path.read_text(encoding="utf-8")
+        global_ref = Path.home() / ".gemini" / "config" / "skills" / "ai-video-editor" / "references" / self.skill_reference_file
+        if global_ref.is_file():
+            return global_ref.read_text(encoding="utf-8")
         return f"You are {self.display_name} ({self.role_id}). {self.description}"
 
     async def _ask_antigravity_async(self, prompt: str) -> Optional[dict[str, Any]]:

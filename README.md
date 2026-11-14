@@ -84,19 +84,42 @@ Every specialist role is registered via `@register_agent` in `AgentRegistry` and
 
 ### 1. Installation
 
+#### One-Command Setup (Recommended)
+
+```bash
+# macOS (Apple Silicon & Intel/AMD Radeon Pro) or Linux
+./scripts/setup.sh
+source .venv/bin/activate
+```
+
+```powershell
+# Windows (PowerShell)
+.\scripts\setup.ps1
+.\.venv\Scripts\Activate.ps1
+```
+
+Both setup scripts automatically check/install system media prerequisites (`ffmpeg`, `ffprobe`, `libheif`), create `.venv`, install all runtime, PyTorch MPS/GPU, faster-whisper, FastAPI, and dev dependencies, register the `ai-editor` CLI, and run `ai-editor doctor` to verify the environment. Pass `--with-antigravity` / `-WithAntigravity` to include the optional `google-antigravity` SDK.
+
+#### Manual Setup
+
+> **Intel macOS Note (`darwin` / `x86_64`)**: Use Python **3.10–3.12** (`python@3.12`), which matches `torch==2.2.2` wheels with AMD Radeon Pro MPS GPU acceleration.
+
 ```bash
 # macOS (Apple Silicon or Intel/AMD Radeon Pro)
 brew install ffmpeg libheif python@3.12
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install --upgrade pip && pip install -e .
+pip install --upgrade pip setuptools wheel
+pip install ".[dev]"           # or: pip install -r requirements-dev.txt
+python -m video_editing_ai.cli doctor
 ```
 
 ```powershell
-# Windows (PowerShell, Python 3.12 + FFmpeg on PATH)
+# Windows (PowerShell, Python >=3.10 + FFmpeg on PATH)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install --upgrade pip
-pip install -e .
+pip install --upgrade pip setuptools wheel
+pip install ".[dev]"           # or: pip install -r requirements-dev.txt
+python -m video_editing_ai.cli doctor
 ```
 
 ### 2. Run the 21-Agent Pipeline from the CLI

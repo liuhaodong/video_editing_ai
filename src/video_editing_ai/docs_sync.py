@@ -126,12 +126,28 @@ def _ensure_reference_file(ref_dir: Path, cls: type[BaseEditingAgent]) -> tuple[
     return ref_path, True
 
 
+def resolve_repo_root(explicit_root: Optional[Path] = None) -> Path:
+    """Locate the repository root across src-path, editable, and .venv wheel installs."""
+    if explicit_root is not None:
+        return explicit_root.resolve()
+
+    for start in (Path.cwd().resolve(), Path(__file__).resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / "pyproject.toml").is_file() and (
+                (candidate / ".agent" / "skills" / "ai-video-editor").is_dir()
+                or (candidate / "src" / "video_editing_ai").is_dir()
+            ):
+                return candidate
+
+    return Path.cwd().resolve()
+
+
 def sync_agent_documentation(
     repo_root: Optional[Path] = None,
     create_missing_refs: bool = True,
 ) -> dict[str, Any]:
     """Synchronize README.md, SKILL.md, and skill reference files from AgentRegistry."""
-    root = (repo_root or Path(__file__).resolve().parents[2]).resolve()
+    root = resolve_repo_root(repo_root)
     readme_path = root / "README.md"
     skill_dir = root / ".agent" / "skills" / "ai-video-editor"
     skill_md_path = skill_dir / "SKILL.md"

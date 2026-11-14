@@ -2074,3 +2074,113 @@ def test_gate12_visual_editorial_narration_replaces_robotic_tts_by_default(tmp_p
             vis = arr[:, :, 3] > 0
             assert np.any(vis)
             assert int(np.max(arr[:, :, :3][vis])) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+
+
+def test_gate13_complete_dependency_manifest_and_doctor_cli() -> None:
+    """
+    Gate 13: Every third-party import in src/video_editing_ai/ is declared in pyproject.toml
+    and requirements.txt, setup scripts are valid, and `ai-editor doctor --json` passes.
+    """
+    import ast
+    import json
+    import os
+    import re
+    import subprocess
+    import sys
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+    pyproject_path = repo_root / "pyproject.toml"
+    req_path = repo_root / "requirements.txt"
+    req_dev_path = repo_root / "requirements-dev.txt"
+    setup_sh = repo_root / "scripts" / "setup.sh"
+    setup_ps1 = repo_root / "scripts" / "setup.ps1"
+
+    assert pyproject_path.exists()
+    assert req_path.exists()
+    assert req_dev_path.exists()
+    assert setup_sh.exists()
+    assert setup_ps1.exists()
+    assert os.access(setup_sh, os.X_OK), "scripts/setup.sh must be executable"
+
+    bash_check = subprocess.run(
+        ["bash", "-n", str(setup_sh)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bash_check.returncode == 0, f"setup.sh syntax error: {bash_check.stderr}"
+
+    pyproject_doc = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    raw_deps: list[str] = list(pyproject_doc["project"]["dependencies"])
+    declared_pkgs = {
+        re.split(r"[<>=!~;\s\[]", dep.strip(), maxsplit=1)[0].lower()
+        for dep in raw_deps
+    }
+
+    req_lines = [
+        line.strip()
+        for line in req_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    for dep in raw_deps:
+        assert dep in req_lines, f"Dependency missing from requirements.txt: {dep}"
+    assert "." in req_lines
+
+    req_dev_text = req_dev_path.read_text(encoding="utf-8")
+    assert "-r requirements.txt" in req_dev_text
+    assert "pytest" in req_dev_text
+
+    import_to_dist = {
+        "PIL": "pillow",
+        "pillow_heif": "pillow-heif",
+        "cv2": "opencv-python",
+        "yaml": "pyyaml",
+        "sklearn": "scikit-learn",
+        "sentence_transformers": "sentence-transformers",
+        "faster_whisper": "faster-whisper",
+        "huggingface_hub": "huggingface-hub",
+        "python_multipart": "python-multipart",
+    }
+    stdlib_names = set(sys.stdlib_module_names)
+    optional_third_party = {"google"}
+
+    imported_top_levels: set[str] = set()
+    for py_file in (repo_root / "src" / "video_editing_ai").rglob("*.py"):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    if top not in stdlib_names and top != "video_editing_ai":
+                        imported_top_levels.add(top)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                top = node.module.split(".")[0]
+                if top not in stdlib_names and top != "video_editing_ai":
+                    imported_top_levels.add(top)
+
+    for top_mod in sorted(imported_top_levels):
+        if top_mod in optional_third_party:
+            continue
+        dist_name = import_to_dist.get(top_mod, top_mod).lower()
+        assert dist_name in declared_pkgs, (
+            f"Third-party module '{top_mod}' (package '{dist_name}') is imported in src/ "
+            f"but missing from pyproject.toml [project.dependencies]"
+        )
+
+    doc_proc = subprocess.run(
+        [sys.executable, "-m", "video_editing_ai.cli", "doctor", "--json"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert doc_proc.returncode == 0, f"doctor failed: {doc_proc.stdout}\n{doc_proc.stderr}"
+    report = json.loads(doc_proc.stdout)
+    assert report["healthy"] is True
+    assert report["ffmpeg"]["ok"] is True
+    assert report["ffprobe"]["ok"] is True
+    assert report["heif"]["ok"] is True
+    assert report["packages"]
+    assert all(pkg["ok"] is True for pkg in report["packages"])
+

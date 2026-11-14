@@ -16,6 +16,7 @@ This skill orchestrates a **21-Agent Big-Budget AI Film & Vlog Post-Production S
 
 All programmatic steps write structured JSON/YAML contracts to disk in `<project_dir>` via the skill's standalone helper CLI:
 - **Helper CLI**: [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py)
+- **One-Command Environment Setup & Verification**: Run `./scripts/setup.sh` (macOS/Linux) or `.\scripts\setup.ps1` (Windows) in a fresh workspace to install `ffmpeg`, `libheif`, and all Python/GPU packages, and verify anytime with `python -m video_editing_ai.cli doctor`.
 - **Python Interpreter**:
   - **Windows**: `python`
   - **macOS (2019 MacBook Pro Intel + AMD Radeon Pro / Apple Silicon)**: `python3` (uses `hevc_videotoolbox` hardware encoding, macOS fonts, and native Finder folder picker automatically)
