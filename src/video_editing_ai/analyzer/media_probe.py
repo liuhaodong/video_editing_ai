@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import os
@@ -39,8 +40,11 @@ def find_decodable_audio_stream_pos(media_path: Path) -> Optional[int]:
     return int(pos) if pos is not None else None
 
 
+from ..hardware import get_hardware_profile, get_io_worker_count
 from ..models.schema import (
     AudioAsset,
+    DITIngestEntry,
+    DITIngestManifest,
     MediaCatalog,
     PhotoAsset,
     SceneSegment,
@@ -325,20 +329,24 @@ def detect_scenes_and_extract_keyframes(
 
     # Detect scene change timestamps via FFmpeg showinfo
     cut_times: list[float] = [0.0]
+    keyframes_dir.mkdir(parents=True, exist_ok=True)
+    use_vt = get_hardware_profile().has_videotoolbox_hwaccel
+    hw_prefix = ["-hwaccel", "videotoolbox"] if use_vt else []
+
     if duration > 3.5:
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
+        sc_tail = [
             "-i",
             str(video_path),
             "-vf",
-            f"select='gt(scene,{scene_threshold})',showinfo",
+            f"scale=320:-2:flags=fast_bilinear,select='gt(scene,{scene_threshold})',showinfo",
             "-an",
             "-f",
             "null",
             "-",
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        proc = subprocess.run(["ffmpeg", "-hide_banner", *hw_prefix, *sc_tail], capture_output=True, text=True, check=False)
+        if proc.returncode != 0 and hw_prefix:
+            proc = subprocess.run(["ffmpeg", "-hide_banner", *sc_tail], capture_output=True, text=True, check=False)
         pts_pattern = re.compile(r"pts_time:([0-9.]+)")
         for line in proc.stderr.splitlines():
             if "pts_time:" in line:
@@ -363,9 +371,7 @@ def detect_scenes_and_extract_keyframes(
         kf_path = keyframes_dir / f"{stem}_scene{idx + 1:02d}_{int(mid_t * 10):04d}ds.jpg"
 
         if not kf_path.exists():
-            extract_cmd = [
-                "ffmpeg",
-                "-y",
+            extract_tail = [
                 "-ss",
                 str(mid_t),
                 "-i",
@@ -378,7 +384,17 @@ def detect_scenes_and_extract_keyframes(
                 "3",
                 str(kf_path),
             ]
-            subprocess.run(extract_cmd, capture_output=True, check=False)
+            ex_proc = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *hw_prefix, *extract_tail],
+                capture_output=True,
+                check=False,
+            )
+            if (ex_proc.returncode != 0 or not kf_path.exists()) and hw_prefix:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *extract_tail],
+                    capture_output=True,
+                    check=False,
+                )
 
         scenes.append(
             SceneSegment(
@@ -716,6 +732,7 @@ def build_initial_catalog(
     media_dir: str | Path,
     cache_dir: str | Path,
     extra_audio_paths: Optional[list[str | Path]] = None,
+    dit_manifest: Optional[DITIngestManifest] = None,
 ) -> MediaCatalog:
     """Scan media_dir (recursively) for videos, photos, and audio; extract keyframes, previews, and contact sheets."""
     media_root = Path(media_dir).resolve()
@@ -723,24 +740,94 @@ def build_initial_catalog(
     keyframes_dir = cache_root / "keyframes"
     previews_dir = cache_root / "photos"
     sheets_dir = cache_root / "contact_sheets"
+    keyframes_dir.mkdir(parents=True, exist_ok=True)
+    previews_dir.mkdir(parents=True, exist_ok=True)
+    sheets_dir.mkdir(parents=True, exist_ok=True)
+
+    if dit_manifest is None:
+        manifest_candidate = cache_root.parent / "dit_manifest.json"
+        if manifest_candidate.exists():
+            try:
+                loaded_manifest = DITIngestManifest.from_json_file(manifest_candidate)
+                if Path(loaded_manifest.source_directory).resolve() == media_root:
+                    dit_manifest = loaded_manifest
+            except Exception:
+                dit_manifest = None
+
+    dit_by_path: dict[str, DITIngestEntry] = {}
+    if dit_manifest is not None:
+        for ent in dit_manifest.entries:
+            try:
+                dit_by_path[str(Path(ent.source_path).resolve())] = ent
+            except Exception:
+                pass
 
     files = iter_media_files_recursive(media_root)
 
-    videos: list[VideoAsset] = []
-    photos: list[PhotoAsset] = []
-    audio_files: list[AudioAsset] = []
-
-    for f in files:
+    def _build_one(item: tuple[int, Path]) -> Optional[tuple[int, str, object]]:
+        idx, f = item
         ext = f.suffix.lower()
+        if ext not in VIDEO_EXTENSIONS and ext not in PHOTO_EXTENSIONS and ext not in AUDIO_EXTENSIONS:
+            return None
+
+        resolved_str = str(f.resolve())
+        dit_ent = dit_by_path.get(resolved_str)
+        is_fresh = False
+        if dit_ent is not None:
+            try:
+                st = f.stat()
+                is_fresh = (
+                    dit_ent.file_size_bytes == st.st_size
+                    and dit_ent.mtime_ns == int(st.st_mtime_ns)
+                )
+            except OSError:
+                is_fresh = False
+
         if ext in VIDEO_EXTENSIONS:
-            info = probe_video_file(f)
-            _, _, f_hash = compute_file_fingerprint(f)
-            aud_sig = probe_audio_signal_metrics(f) if info["has_audio"] else {
-                "integrated_lufs": -60.0,
-                "snr_db": 20.0,
-                "has_diegetic_music": False,
-            }
-            scenes = detect_scenes_and_extract_keyframes(f, info["duration"], keyframes_dir)
+            if is_fresh and dit_ent is not None and dit_ent.media_type == "video":
+                duration = float(dit_ent.duration)
+                width = int(dit_ent.width)
+                height = int(dit_ent.height)
+                fps = float(dit_ent.fps)
+                codec = dit_ent.codec
+                color_primaries = dit_ent.color_primaries
+                color_transfer = dit_ent.color_trc
+                color_space = dit_ent.color_space
+                pix_fmt = dit_ent.pix_fmt
+                has_audio = bool(dit_ent.has_audio)
+                f_hash = dit_ent.file_hash
+                integrated_lufs = float(dit_ent.integrated_lufs)
+                snr_db = float(dit_ent.snr_db)
+                has_diegetic_music = bool(dit_ent.has_diegetic_music)
+                creation_time = dit_ent.creation_time_raw
+                gps_lat = dit_ent.gps_lat
+                gps_lon = dit_ent.gps_lon
+            else:
+                info = probe_video_file(f)
+                _, _, f_hash = compute_file_fingerprint(f)
+                aud_sig = probe_audio_signal_metrics(f) if info["has_audio"] else {
+                    "integrated_lufs": -60.0,
+                    "snr_db": 20.0,
+                    "has_diegetic_music": False,
+                }
+                duration = float(info["duration"])
+                width = int(info["width"])
+                height = int(info["height"])
+                fps = float(info["fps"])
+                codec = str(info["codec"])
+                color_primaries = str(info["color_primaries"])
+                color_transfer = str(info["color_transfer"])
+                color_space = str(info["color_space"])
+                pix_fmt = str(info["pix_fmt"])
+                has_audio = bool(info["has_audio"])
+                integrated_lufs = float(aud_sig["integrated_lufs"])
+                snr_db = float(aud_sig["snr_db"])
+                has_diegetic_music = bool(aud_sig["has_diegetic_music"])
+                creation_time = info["creation_time"]
+                gps_lat = info["gps_lat"]
+                gps_lon = info["gps_lon"]
+
+            scenes = detect_scenes_and_extract_keyframes(f, duration, keyframes_dir)
             v_color_stats: dict[str, float] = {}
             for sc in scenes:
                 if sc.keyframe_path and Path(sc.keyframe_path).exists():
@@ -750,48 +837,106 @@ def build_initial_catalog(
                         break
                     except Exception:
                         pass
-            videos.append(
+            return (
+                idx,
+                "video",
                 VideoAsset(
                     id=f"vid_{f.stem}",
-                    path=str(f.resolve()),
+                    path=resolved_str,
                     filename=f.name,
-                    duration=info["duration"],
-                    width=info["width"],
-                    height=info["height"],
-                    fps=info["fps"],
-                    codec=info["codec"],
-                    color_primaries=info["color_primaries"],
-                    color_transfer=info["color_transfer"],
-                    color_space=info["color_space"],
-                    pix_fmt=info["pix_fmt"],
-                    has_audio=info["has_audio"],
-                    integrated_lufs=aud_sig["integrated_lufs"],
-                    snr_db=aud_sig["snr_db"],
-                    has_diegetic_music=aud_sig["has_diegetic_music"],
+                    duration=duration,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    codec=codec,
+                    color_primaries=color_primaries,
+                    color_transfer=color_transfer,
+                    color_space=color_space,
+                    pix_fmt=pix_fmt,
+                    has_audio=has_audio,
+                    integrated_lufs=integrated_lufs,
+                    snr_db=snr_db,
+                    has_diegetic_music=has_diegetic_music,
                     file_hash=f_hash,
-                    creation_time=info["creation_time"],
-                    gps_lat=info["gps_lat"],
-                    gps_lon=info["gps_lon"],
+                    creation_time=creation_time,
+                    gps_lat=gps_lat,
+                    gps_lon=gps_lon,
                     color_stats=v_color_stats,
-                    overall_summary=f"Video clip {f.name} ({info['duration']:.1f}s, {info['width']}x{info['height']})",
+                    overall_summary=f"Video clip {f.name} ({duration:.1f}s, {width}x{height})",
                     scenes=scenes,
                     dialogues=[],
-                )
+                ),
             )
         elif ext in PHOTO_EXTENSIONS:
-            photos.append(inspect_photo_file(f, previews_dir))
-        elif ext in AUDIO_EXTENSIONS:
-            dur = probe_audio_file(f)
-            audio_files.append(
+            if (
+                is_fresh
+                and dit_ent is not None
+                and dit_ent.media_type == "photo"
+                and dit_ent.preview_path
+                and Path(dit_ent.preview_path).exists()
+            ):
+                w = int(dit_ent.width)
+                h = int(dit_ent.height)
+                orient = "square" if abs(w - h) <= max(w, h, 1) * 0.05 else ("landscape" if w >= h else "portrait")
+                return (
+                    idx,
+                    "photo",
+                    PhotoAsset(
+                        id=dit_ent.asset_id,
+                        path=resolved_str,
+                        preview_path=dit_ent.preview_path,
+                        filename=f.name,
+                        width=w,
+                        height=h,
+                        orientation=orient,
+                        creation_time=dit_ent.creation_time_raw,
+                        camera_make_model=dit_ent.camera_make_model,
+                        exif_summary=dit_ent.exif_summary,
+                        gps_lat=dit_ent.gps_lat,
+                        gps_lon=dit_ent.gps_lon,
+                        color_stats=dict(dit_ent.color_stats),
+                        focal_point=dit_ent.focal_point,
+                    ),
+                )
+            return idx, "photo", inspect_photo_file(f, previews_dir)
+        else:
+            if is_fresh and dit_ent is not None and dit_ent.media_type == "audio":
+                dur = float(dit_ent.duration)
+            else:
+                dur = probe_audio_file(f)
+            return (
+                idx,
+                "audio",
                 AudioAsset(
                     id=f"aud_{f.stem}",
-                    path=str(f.resolve()),
+                    path=resolved_str,
                     filename=f.name,
                     duration=dur,
                     role="music",
                     description=f"Audio track {f.name} ({dur:.1f}s)",
-                )
+                ),
             )
+
+    videos: list[VideoAsset] = []
+    photos: list[PhotoAsset] = []
+    audio_files: list[AudioAsset] = []
+
+    if files:
+        indexed_files = list(enumerate(files))
+        workers = max(1, min(get_io_worker_count(8), len(indexed_files)))
+        if workers == 1:
+            built_rows = [_build_one(it) for it in indexed_files]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                built_rows = list(pool.map(_build_one, indexed_files))
+        valid_rows = sorted([r for r in built_rows if r is not None], key=lambda r: r[0])
+        for _, kind, asset in valid_rows:
+            if kind == "video":
+                videos.append(asset)  # type: ignore[arg-type]
+            elif kind == "photo":
+                photos.append(asset)  # type: ignore[arg-type]
+            elif kind == "audio":
+                audio_files.append(asset)  # type: ignore[arg-type]
 
     # Also check parent directory or extra_audio_paths for BGM files if none in media_dir
     if extra_audio_paths:

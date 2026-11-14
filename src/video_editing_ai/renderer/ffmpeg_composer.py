@@ -13,9 +13,12 @@ import sys
 from typing import Any, Callable, Optional
 
 from ..analyzer.media_probe import probe_video_file
-from ..models.schema import EditTimeline, EffectTrackItem, VisualTrackItem
+from ..hardware import caffeinate_guard, get_hardware_profile, get_io_worker_count
+from ..models.schema import EditTimeline, EffectTrackItem, TitleOverlayItem, VisualTrackItem
 from .ken_burns import (
     build_hdr_color_filters,
+    build_segment_overlay_filtergraph,
+    build_uniform_mux_args,
     get_video_encoder_args,
     has_hevc_nvenc,
     render_frosted_video_overlay_png,
@@ -135,6 +138,7 @@ def _concat_segments_safe(
             "copy",
             "-metadata:s:v:0",
             "rotate=0",
+            *(["-tag:v", "hvc1"] if hdr else []),
             str(output_mp4),
         ]
         proc = subprocess.run(concat_cmd, capture_output=True, text=True, check=False)
@@ -221,6 +225,21 @@ def _concat_segments_safe(
     return output_mp4
 
 
+def _strip_pix_fmt_args(enc_args: list[str]) -> list[str]:
+    """Strip explicit -pix_fmt pairs for zero-copy hardware surface encoding."""
+    cleaned: list[str] = []
+    skip_next = False
+    for tok in enc_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "-pix_fmt":
+            skip_next = True
+            continue
+        cleaned.append(tok)
+    return cleaned
+
+
 def _render_video_segment(
     item: VisualTrackItem,
     output_mp4: Path,
@@ -229,6 +248,8 @@ def _render_video_segment(
     fps: int,
     hdr: bool = True,
     attached_effects: Optional[list[EffectTrackItem]] = None,
+    segment_broll: Optional[list[tuple[Path, float, float]]] = None,
+    segment_titles: Optional[list[tuple[Path, float, float, float, float]]] = None,
 ) -> Path:
     """Trim, scale/composite (with ambient blurred backdrop for portrait 9:16 videos), overlay documentary card, and encode."""
     info = probe_video_file(Path(item.source))
@@ -237,6 +258,7 @@ def _render_video_segment(
     src_trc = str(info.get("color_transfer") or info.get("color_trc") or "bt709")
     src_prim = str(info.get("color_primaries") or "bt709")
     src_space = str(info.get("color_space") or "bt709")
+    src_pfmt = str(info.get("pix_fmt") or "yuv420p").lower()
     is_log_clip = "log" in src_trc.lower()
     diffuse_nits = 203.0
     for fx in attached_effects or []:
@@ -300,6 +322,27 @@ def _render_video_segment(
                 base_ov.save(card_png, "PNG")
             except Exception:
                 has_paired_photo = False
+
+    hw = get_hardware_profile()
+    same_aspect = abs((src_w / max(1, src_h)) - (width / max(1, height))) < 0.02
+    src_matches_range = (
+        (hdr and src_trc.lower() == "arib-std-b67" and "10" in src_pfmt and not is_log_clip)
+        or (not hdr and "10" not in src_pfmt and not is_log_clip)
+    )
+    can_zero_copy_vt = (
+        hw.has_videotoolbox_hwaccel
+        and hw.has_scale_vt
+        and not is_portrait
+        and same_aspect
+        and card_png is None
+        and not segment_broll
+        and not segment_titles
+        and not attached_effects
+        and item.speed == 1.0
+        and item.transition_in.type in ("none", "cut")
+        and item.transition_out.type in ("none", "cut")
+        and src_matches_range
+    )
 
     post_filters: list[str] = [f"fps={fps}", "setsar=1:1"]
     for fx in attached_effects or []:
@@ -370,8 +413,10 @@ def _render_video_segment(
         )
 
     cur_v = "[vbase]"
-    card_input_idx = 1 if (has_audio and item.volume > 0.0) else 2
+    next_in_idx = 1 if (has_audio and item.volume > 0.0) else 2
     if card_png is not None and card_png.exists():
+        card_input_idx = next_in_idx
+        next_in_idx += 1
         fo_st = max(0.2, dur - 0.45)
         filter_complex_parts.append(
             f"[{card_input_idx}:v]format=rgba,"
@@ -381,9 +426,23 @@ def _render_video_segment(
         )
         cur_v = "[vwithcard]"
 
-    filter_complex_parts.append(f"{cur_v}{','.join(post_filters)}[vout]")
+    has_seg_overlays = bool(segment_broll or segment_titles)
+    extra_ov_inputs: list[str] = []
+    if has_seg_overlays:
+        filter_complex_parts.append(f"{cur_v}{','.join(post_filters)}[vsegbase]")
+        extra_ov_inputs, ov_parts, out_v_label = build_segment_overlay_filtergraph(
+            base_label="[vsegbase]",
+            hdr=hdr,
+            next_input_idx=next_in_idx,
+            segment_broll=segment_broll,
+            segment_titles=segment_titles,
+        )
+        filter_complex_parts.extend(ov_parts)
+    else:
+        out_v_label = "[vout]"
+        filter_complex_parts.append(f"{cur_v}{','.join(post_filters)}{out_v_label}")
 
-    def _build_cmd(force_sw: bool) -> list[str]:
+    def _build_cmd(force_sw: bool, use_zero_copy_vt: bool = False) -> list[str]:
         cmd = [
             "ffmpeg",
             "-y",
@@ -392,13 +451,22 @@ def _render_video_segment(
             "error",
             "-ss",
             f"{src_in:.3f}",
-            "-i",
-            str(item.source),
         ]
+        if not force_sw and hw.has_videotoolbox_hwaccel:
+            cmd.extend(["-hwaccel", "videotoolbox"])
+            if use_zero_copy_vt:
+                cmd.extend(["-hwaccel_output_format", "videotoolbox_vld"])
+        cmd.extend(["-i", str(item.source)])
+
         if not has_audio or item.volume <= 0.0:
             cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
         if card_png is not None and card_png.exists():
             cmd.extend(["-loop", "1", "-t", f"{dur:.3f}", "-i", str(card_png)])
+        if extra_ov_inputs and not use_zero_copy_vt:
+            cmd.extend(extra_ov_inputs)
+
+        fc_str = f"[0:v]scale_vt=w={width}:h={height}[vout]" if use_zero_copy_vt else ";".join(filter_complex_parts)
+        v_map = "[vout]" if use_zero_copy_vt else out_v_label
 
         if not has_audio or item.volume <= 0.0:
             cmd.extend(
@@ -406,9 +474,9 @@ def _render_video_segment(
                     "-t",
                     f"{dur:.3f}",
                     "-filter_complex",
-                    ";".join(filter_complex_parts),
+                    fc_str,
                     "-map",
-                    "[vout]",
+                    v_map,
                     "-map",
                     "1:a:0",
                 ]
@@ -431,23 +499,31 @@ def _render_video_segment(
                     "-t",
                     f"{dur:.3f}",
                     "-filter_complex",
-                    ";".join(filter_complex_parts),
+                    fc_str,
                     "-af",
                     ",".join(af_parts),
                     "-map",
-                    "[vout]",
+                    v_map,
                     "-map",
                     f"0:a:{audio_pos}",
                 ]
             )
 
+        v_enc = _video_encoder_args(hdr, force_software=force_sw)
+        if use_zero_copy_vt:
+            v_enc = _strip_pix_fmt_args(v_enc) + [
+                "-fps_mode",
+                "cfr",
+                "-color_range",
+                "tv",
+                "-aspect",
+                f"{width}:{height}",
+            ]
+
         cmd.extend(
             [
-                *_video_encoder_args(hdr, force_software=force_sw),
-                "-metadata:s:v:0",
-                "rotate=0",
-                "-video_track_timescale",
-                "30000",
+                *v_enc,
+                *build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=v_enc),
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -458,10 +534,16 @@ def _render_video_segment(
         )
         return cmd
 
-    proc = subprocess.run(_build_cmd(force_sw=False), capture_output=True, text=True, check=False)
+    from ..hardware import videotoolbox_hdr_encode_guard
+
+    hw_enc_args = _video_encoder_args(hdr, force_software=False)
+    with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
+        proc = subprocess.run(_build_cmd(force_sw=False, use_zero_copy_vt=can_zero_copy_vt), capture_output=True, text=True, check=False)
+        if proc.returncode != 0 and can_zero_copy_vt:
+            proc = subprocess.run(_build_cmd(force_sw=False, use_zero_copy_vt=False), capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        # Automatic retry with software libx265 if NVENC session limit was reached
-        proc = subprocess.run(_build_cmd(force_sw=True), capture_output=True, text=True, check=False)
+        # Automatic retry with software libx265 if hardware encoder session limit was reached
+        proc = subprocess.run(_build_cmd(force_sw=True, use_zero_copy_vt=False), capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             raise RuntimeError(f"FFmpeg video segment render failed for {item.source}: {proc.stderr}")
     return output_mp4
@@ -553,118 +635,58 @@ def render_timeline(
     hdr = timeline.settings.hdr
     total_dur = timeline.total_duration
 
-    # 1. Export .srt and .ass subtitle files alongside the output video
-    srt_path = out_path.with_suffix(".srt")
-    ass_path = out_path.with_suffix(".ass")
-    export_srt_subtitles(timeline, srt_path)
-    export_ass_subtitles(timeline, ass_path, hdr=hdr)
+    with caffeinate_guard():
+        # 1. Export .srt and .ass subtitle files alongside the output video
+        srt_path = out_path.with_suffix(".srt")
+        ass_path = out_path.with_suffix(".ass")
+        export_srt_subtitles(timeline, srt_path)
+        export_ass_subtitles(timeline, ass_path, hdr=hdr)
 
-    effects_by_clip: dict[str, list[EffectTrackItem]] = {}
-    for fx in timeline.effects_track:
-        if fx.target_clip_id:
-            effects_by_clip.setdefault(fx.target_clip_id, []).append(fx)
+        effects_by_clip: dict[str, list[EffectTrackItem]] = {}
+        for fx in timeline.effects_track:
+            if fx.target_clip_id:
+                effects_by_clip.setdefault(fx.target_clip_id, []).append(fx)
 
-    # 2. Render Track V1 visual clips in parallel across workers (RTX 4080 SUPER NVENC + 32-Thread CPU)
-    num_clips = len(timeline.visual_track)
-    segment_files: list[Path] = [Path()] * num_clips
-    tasks_to_run: list[tuple[int, VisualTrackItem, Path, list[EffectTrackItem]]] = []
-
-    for idx, item in enumerate(timeline.visual_track):
-        clip_fxs = effects_by_clip.get(item.id, [])
-        sig_payload = json.dumps(
-            {
-                "v": 3,
-                "item": item.model_dump(mode="json"),
-                "fx": [f.model_dump(mode="json") for f in clip_fxs],
-                "w": width,
-                "h": height,
-                "fps": fps,
-                "hdr": hdr,
-            },
-            sort_keys=True,
-        )
-        sig_hash = hashlib.sha1(sig_payload.encode("utf-8")).hexdigest()[:8]
-        seg_mp4 = seg_dir / f"seg_{idx + 1:03d}_{item.id}_{sig_hash}.mp4"
-        segment_files[idx] = seg_mp4
-        if not seg_mp4.exists() or seg_mp4.stat().st_size < 1024:
-            tasks_to_run.append((idx, item, seg_mp4, clip_fxs))
-
-    def _render_one_v1(task_tuple: tuple[int, VisualTrackItem, Path, list[EffectTrackItem]]) -> tuple[int, Path]:
-        t_idx, t_item, t_mp4, t_fxs = task_tuple
-        if t_item.type == "photo":
-            render_photo_clip(
-                photo_path=t_item.source,
-                output_mp4=t_mp4,
-                duration=t_item.duration,
-                width=width,
-                height=height,
-                fps=fps,
-                hdr=hdr,
-                ken_burns=t_item.ken_burns,
-                transition_in=t_item.transition_in,
-                transition_out=t_item.transition_out,
+        # 2a. Prepare Track V2 B-Roll cutaways and Track V3 title plates BEFORE Track V1 so segment-scoped
+        #     overlays bake directly into V1 segments and Step 4 final mux uses -c:v copy.
+        active_broll = [b for b in timeline.broll_track if b.timeline_start < total_dur]
+        broll_files_all: list[Path] = [Path()] * len(active_broll)
+        broll_tasks: list[tuple[int, VisualTrackItem, Path]] = []
+        for b_idx, b_item in enumerate(active_broll):
+            sig_payload = json.dumps(
+                {
+                    "v": 4,
+                    "b_item": b_item.model_dump(mode="json"),
+                    "w": width,
+                    "h": height,
+                    "fps": fps,
+                    "hdr": hdr,
+                },
+                sort_keys=True,
             )
-        else:
-            _render_video_segment(
-                item=t_item,
-                output_mp4=t_mp4,
-                width=width,
-                height=height,
-                fps=fps,
-                hdr=hdr,
-                attached_effects=t_fxs,
-            )
-        return t_idx, t_mp4
+            sig_hash = hashlib.sha1(sig_payload.encode("utf-8")).hexdigest()[:8]
+            b_mp4 = seg_dir / f"broll_{b_idx + 1:03d}_{b_item.id}_{sig_hash}.mp4"
+            broll_files_all[b_idx] = b_mp4
+            if not b_mp4.exists() or b_mp4.stat().st_size < 1024:
+                broll_tasks.append((b_idx, b_item, b_mp4))
 
-    if tasks_to_run:
-        # 5 concurrent workers stays within consumer NVIDIA GeForce NVENC session limits; 4 on macOS keeps 2019 Intel MacBook Pro thermally balanced
-        worker_cap = 4 if sys.platform == "darwin" else 5
-        max_workers = min(worker_cap, max(1, (os.cpu_count() or 8) // 4), len(tasks_to_run))
-        completed_count = num_clips - len(tasks_to_run)
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(_render_one_v1, t): t for t in tasks_to_run}
-            for fut in as_completed(futures):
-                done_idx, _ = fut.result()
-                completed_count += 1
-                if progress_callback:
-                    progress_callback(
-                        f"Rendered V1 clip {completed_count}/{num_clips} ({Path(timeline.visual_track[done_idx].source).name})",
-                        (completed_count / max(1, num_clips)) * 0.68,
+        if broll_tasks:
+            def _render_broll_one(bt: tuple[int, VisualTrackItem, Path]) -> Path:
+                _, b_item, b_mp4 = bt
+                if b_item.type == "photo":
+                    return render_photo_clip(
+                        photo_path=b_item.source,
+                        output_mp4=b_mp4,
+                        duration=b_item.duration,
+                        width=width,
+                        height=height,
+                        fps=fps,
+                        hdr=hdr,
+                        ken_burns=b_item.ken_burns,
+                        transition_in=b_item.transition_in,
+                        transition_out=b_item.transition_out,
                     )
-
-    # 2b. Render Track V2 B-Roll Cutaway segments
-    active_broll = [b for b in timeline.broll_track if b.timeline_start < total_dur]
-    broll_files: list[Path] = []
-    for b_idx, b_item in enumerate(active_broll):
-        sig_payload = json.dumps(
-            {
-                "v": 3,
-                "b_item": b_item.model_dump(mode="json"),
-                "w": width,
-                "h": height,
-                "fps": fps,
-                "hdr": hdr,
-            },
-            sort_keys=True,
-        )
-        sig_hash = hashlib.sha1(sig_payload.encode("utf-8")).hexdigest()[:8]
-        b_mp4 = seg_dir / f"broll_{b_idx + 1:03d}_{b_item.id}_{sig_hash}.mp4"
-        if not b_mp4.exists() or b_mp4.stat().st_size < 1024:
-            if b_item.type == "photo":
-                render_photo_clip(
-                    photo_path=b_item.source,
-                    output_mp4=b_mp4,
-                    duration=b_item.duration,
-                    width=width,
-                    height=height,
-                    fps=fps,
-                    hdr=hdr,
-                    ken_burns=b_item.ken_burns,
-                    transition_in=b_item.transition_in,
-                    transition_out=b_item.transition_out,
-                )
-            else:
-                _render_video_segment(
+                return _render_video_segment(
                     item=b_item,
                     output_mp4=b_mp4,
                     width=width,
@@ -672,226 +694,373 @@ def render_timeline(
                     fps=fps,
                     hdr=hdr,
                 )
-        broll_files.append(b_mp4)
 
-    # 3. Concatenate normalized V1 segments into base visual + camera audio stream
-    if progress_callback:
-        progress_callback("Concatenating Track V1 storyline segments...", 0.75)
+            b_cap = 4 if sys.platform == "darwin" else 5
+            b_workers = max(1, min(b_cap, get_io_worker_count(default_cap=b_cap), len(broll_tasks)))
+            with ThreadPoolExecutor(max_workers=b_workers) as pool:
+                for fut in as_completed([pool.submit(_render_broll_one, bt) for bt in broll_tasks]):
+                    fut.result()
 
-    base_concat_mp4 = w_dir / "base_concat.mp4"
-    _concat_segments_safe(
-        segment_files=segment_files,
-        output_mp4=base_concat_mp4,
-        w_dir=w_dir,
-        fps=fps,
-        hdr=hdr,
-    )
+        active_titles = [
+            t
+            for t in timeline.title_track
+            if t.timeline_start < total_dur and t.style != "act_banner"
+        ]
+        title_pngs_all: list[Path] = []
+        for t_idx, t_item in enumerate(active_titles):
+            png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.png"
+            render_title_png(t_item, png_path, width=width, height=height, hdr_safe=hdr)
+            title_pngs_all.append(png_path)
 
-    # 4. Render RGBA PNG plates for title_track and composite V2 B-Roll + V3 Titles + Full-Length BGM
-    if progress_callback:
-        progress_callback("Compositing Track V2 B-Roll cutaways, Track V3 titles, and mastered BGM...", 0.85)
+        num_clips = len(timeline.visual_track)
+        v1_broll_entries: list[list[tuple[VisualTrackItem, Path, float, float]]] = [[] for _ in range(num_clips)]
+        v1_title_entries: list[list[tuple[TitleOverlayItem, Path, float, float]]] = [[] for _ in range(num_clips)]
+        step4_broll_pairs: list[tuple[VisualTrackItem, Path]] = []
+        step4_title_pairs: list[tuple[TitleOverlayItem, Path]] = []
 
-    active_titles = [
-        t
-        for t in timeline.title_track
-        if t.timeline_start < total_dur and t.style != "act_banner"
-    ]
-    title_pngs: list[Path] = []
-    for t_idx, t_item in enumerate(active_titles):
-        png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.png"
-        render_title_png(t_item, png_path, width=width, height=height, hdr_safe=hdr)
-        title_pngs.append(png_path)
+        def _find_containing_segment(ov_start: float, ov_end: float) -> Optional[int]:
+            for idx, v_item in enumerate(timeline.visual_track):
+                c_st = v_item.timeline_start
+                c_en = c_st + v_item.duration
+                if ov_start >= c_st - 0.02 and ov_end <= c_en + 0.02:
+                    return idx
+            return None
 
-    diegetic_windows: list[tuple[float, float]] = []
-    mix_manifest_path = out_path.parent / "audio_mix_manifest.json"
-    if mix_manifest_path.exists():
-        try:
-            mix_raw = json.loads(mix_manifest_path.read_text(encoding="utf-8"))
-            for seg in mix_raw.get("ducking_envelope", []) or []:
-                if isinstance(seg, dict) and seg.get("mode") == "diegetic_music_mute":
-                    diegetic_windows.append((float(seg.get("start_sec", 0.0)), float(seg.get("end_sec", 0.0))))
-        except Exception:
-            pass
+        for b_item, b_mp4 in zip(active_broll, broll_files_all):
+            seg_idx = _find_containing_segment(b_item.timeline_start, b_item.timeline_start + b_item.duration)
+            if seg_idx is not None:
+                v_item = timeline.visual_track[seg_idx]
+                local_st = max(0.0, round(b_item.timeline_start - v_item.timeline_start, 3))
+                local_dur = round(max(0.1, min(v_item.duration - local_st, b_item.duration)), 3)
+                v1_broll_entries[seg_idx].append((b_item, b_mp4, local_st, local_dur))
+            else:
+                step4_broll_pairs.append((b_item, b_mp4))
 
-    active_bgm = [a for a in timeline.audio_tracks if Path(a.source).exists()]
+        for t_item, png_path in zip(active_titles, title_pngs_all):
+            seg_idx = _find_containing_segment(t_item.timeline_start, t_item.timeline_start + t_item.duration)
+            if seg_idx is not None:
+                v_item = timeline.visual_track[seg_idx]
+                local_st = max(0.0, round(t_item.timeline_start - v_item.timeline_start, 3))
+                local_dur = round(max(0.1, min(v_item.duration - local_st, t_item.duration)), 3)
+                v1_title_entries[seg_idx].append((t_item, png_path, local_st, local_dur))
+            else:
+                step4_title_pairs.append((t_item, png_path))
 
-    if not active_broll and not active_titles and not active_bgm:
-        out_path.write_bytes(base_concat_mp4.read_bytes())
+        # 2b. Render Track V1 visual clips in parallel (MPS photo synthesis + Apple T2 VideoToolbox)
+        segment_files: list[Path] = [Path()] * num_clips
+        tasks_to_run: list[
+            tuple[
+                int,
+                VisualTrackItem,
+                Path,
+                list[EffectTrackItem],
+                list[tuple[Path, float, float]],
+                list[tuple[Path, float, float, float, float]],
+            ]
+        ] = []
+
+        for idx, item in enumerate(timeline.visual_track):
+            clip_fxs = effects_by_clip.get(item.id, [])
+            b_assigned = v1_broll_entries[idx]
+            t_assigned = v1_title_entries[idx]
+            sig_payload = json.dumps(
+                {
+                    "v": 4,
+                    "item": item.model_dump(mode="json"),
+                    "fx": [f.model_dump(mode="json") for f in clip_fxs],
+                    "seg_broll": [
+                        {"item": bi.model_dump(mode="json"), "st": lst, "dur": ldur}
+                        for bi, _, lst, ldur in b_assigned
+                    ],
+                    "seg_titles": [
+                        {"item": ti.model_dump(mode="json"), "st": lst, "dur": ldur}
+                        for ti, _, lst, ldur in t_assigned
+                    ],
+                    "w": width,
+                    "h": height,
+                    "fps": fps,
+                    "hdr": hdr,
+                },
+                sort_keys=True,
+            )
+            sig_hash = hashlib.sha1(sig_payload.encode("utf-8")).hexdigest()[:8]
+            seg_mp4 = seg_dir / f"seg_{idx + 1:03d}_{item.id}_{sig_hash}.mp4"
+            segment_files[idx] = seg_mp4
+            if not seg_mp4.exists() or seg_mp4.stat().st_size < 1024:
+                seg_b_args = [(mp4, lst, ldur) for _, mp4, lst, ldur in b_assigned]
+                seg_t_args = [(png, lst, ldur, ti.fade_in, ti.fade_out) for ti, png, lst, ldur in t_assigned]
+                tasks_to_run.append((idx, item, seg_mp4, clip_fxs, seg_b_args, seg_t_args))
+
+        def _render_one_v1(
+            task_tuple: tuple[
+                int,
+                VisualTrackItem,
+                Path,
+                list[EffectTrackItem],
+                list[tuple[Path, float, float]],
+                list[tuple[Path, float, float, float, float]],
+            ],
+        ) -> tuple[int, Path]:
+            t_idx, t_item, t_mp4, t_fxs, t_broll, t_titles = task_tuple
+            if t_item.type == "photo":
+                render_photo_clip(
+                    photo_path=t_item.source,
+                    output_mp4=t_mp4,
+                    duration=t_item.duration,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    hdr=hdr,
+                    ken_burns=t_item.ken_burns,
+                    transition_in=t_item.transition_in,
+                    transition_out=t_item.transition_out,
+                    segment_broll=t_broll or None,
+                    segment_titles=t_titles or None,
+                )
+            else:
+                _render_video_segment(
+                    item=t_item,
+                    output_mp4=t_mp4,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    hdr=hdr,
+                    attached_effects=t_fxs,
+                    segment_broll=t_broll or None,
+                    segment_titles=t_titles or None,
+                )
+            return t_idx, t_mp4
+
+        if tasks_to_run:
+            # 5 concurrent workers stays within consumer NVIDIA GeForce NVENC session limits; 4 on macOS keeps VideoToolbox + MPS balanced
+            worker_cap = min(4, get_io_worker_count(default_cap=4)) if sys.platform == "darwin" else min(5, max(1, (os.cpu_count() or 8) // 4))
+            max_workers = max(1, min(worker_cap, len(tasks_to_run)))
+            completed_count = num_clips - len(tasks_to_run)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_render_one_v1, t): t for t in tasks_to_run}
+                for fut in as_completed(futures):
+                    done_idx, _ = fut.result()
+                    completed_count += 1
+                    if progress_callback:
+                        progress_callback(
+                            f"Rendered V1 clip {completed_count}/{num_clips} ({Path(timeline.visual_track[done_idx].source).name})",
+                            (completed_count / max(1, num_clips)) * 0.68,
+                        )
+
+        # 3. Concatenate normalized V1 segments into base visual + camera audio stream
+        if progress_callback:
+            progress_callback("Concatenating Track V1 storyline segments...", 0.75)
+
+        base_concat_mp4 = w_dir / "base_concat.mp4"
+        _concat_segments_safe(
+            segment_files=segment_files,
+            output_mp4=base_concat_mp4,
+            w_dir=w_dir,
+            fps=fps,
+            hdr=hdr,
+        )
+
+        # 4. Composite any cross-cut V2/V3 overlays + mix mastered BGM (using -c:v copy when V2/V3 already baked)
+        if progress_callback:
+            progress_callback("Compositing final timeline and mastered audio mix...", 0.85)
+
+        step4_broll = [p[0] for p in step4_broll_pairs]
+        broll_files = [p[1] for p in step4_broll_pairs]
+        step4_titles = [p[0] for p in step4_title_pairs]
+        title_pngs = [p[1] for p in step4_title_pairs]
+
+        diegetic_windows: list[tuple[float, float]] = []
+        mix_manifest_path = out_path.parent / "audio_mix_manifest.json"
+        if mix_manifest_path.exists():
+            try:
+                mix_raw = json.loads(mix_manifest_path.read_text(encoding="utf-8"))
+                for seg in mix_raw.get("ducking_envelope", []) or []:
+                    if isinstance(seg, dict) and seg.get("mode") == "diegetic_music_mute":
+                        diegetic_windows.append((float(seg.get("start_sec", 0.0)), float(seg.get("end_sec", 0.0))))
+            except Exception:
+                pass
+
+        active_bgm = [a for a in timeline.audio_tracks if Path(a.source).exists()]
+        has_step4_video_ops = bool(step4_broll or step4_titles)
+
+        if not has_step4_video_ops and not active_bgm:
+            shutil.copy2(base_concat_mp4, out_path)
+            if progress_callback:
+                progress_callback("Render complete!", 1.0)
+            return {"video": out_path, "srt": srt_path, "ass": ass_path}
+
+        def _build_final_cmd(force_sw: bool) -> list[str]:
+            final_cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(base_concat_mp4),
+            ]
+
+            for b_mp4 in broll_files:
+                final_cmd.extend(["-i", str(b_mp4)])
+
+            title_input_start_idx = 1 + len(step4_broll)
+            for t_item, png_path in zip(step4_titles, title_pngs):
+                final_cmd.extend(["-loop", "1", "-t", f"{t_item.duration:.3f}", "-i", str(png_path)])
+
+            bgm_input_start_idx = title_input_start_idx + len(step4_titles)
+            for a_item in active_bgm:
+                if a_item.role == "music":
+                    # Enable -stream_loop -1 on BGM music tracks so they cover the full video runtime
+                    final_cmd.extend(["-stream_loop", "-1", "-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
+                else:
+                    final_cmd.extend(["-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
+
+            filter_parts: list[str] = []
+            cur_v = "[0:v]"
+            ov_fmt = "yuv420p10" if hdr else "auto"
+
+            # Composite cross-segment Track V2 B-Roll Cutaways over Track V1
+            for b_idx, b_item in enumerate(step4_broll):
+                in_idx = 1 + b_idx
+                st = b_item.timeline_start
+                dur = b_item.duration
+                end_t = st + dur
+                bv_label = f"[bv{b_idx}]"
+                next_v = f"[vb{b_idx + 1}]"
+                filter_parts.append(f"[{in_idx}:v]setpts=PTS+{st:.3f}/TB{bv_label}")
+                filter_parts.append(
+                    f"{cur_v}{bv_label}overlay=0:0:format={ov_fmt}:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
+                )
+                cur_v = next_v
+
+            # Composite cross-segment Track V3 RGBA Title Overlays
+            for idx, t_item in enumerate(step4_titles):
+                in_idx = title_input_start_idx + idx
+                st = t_item.timeline_start
+                dur = t_item.duration
+                end_t = st + dur
+                fi = min(dur * 0.4, t_item.fade_in)
+                fo = min(dur * 0.4, t_item.fade_out)
+                fo_st = max(0.0, dur - fo)
+                ov_label = f"[ov{idx}]"
+                next_v = f"[vt{idx + 1}]"
+                filter_parts.append(
+                    f"[{in_idx}:v]format=rgba,"
+                    f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
+                    f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
+                    f"setpts=PTS+{st:.3f}/TB{ov_label}"
+                )
+                filter_parts.append(
+                    f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
+                )
+                cur_v = next_v
+
+            if hdr and has_step4_video_ops:
+                filter_parts.append(
+                    f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc[vhdr]"
+                )
+                cur_v = "[vhdr]"
+
+            # Audio mixing & smart auto-ducking
+            if active_bgm:
+                mix_inputs = ["[0:a]"]
+                for a_idx, a_item in enumerate(active_bgm):
+                    in_idx = bgm_input_start_idx + a_idx
+                    # Ensure primary BGM covers 100% of total_dur when starting at 0.0, while voiceover/sfx play their exact duration
+                    if a_item.role == "music" and a_item.timeline_start <= 0.1:
+                        a_dur = total_dur
+                    else:
+                        a_dur = min(max(0.2, total_dur - a_item.timeline_start), a_item.duration or total_dur)
+                    vol_expr = (
+                        _build_ducking_volume_expr(
+                            timeline,
+                            a_item.volume,
+                            a_item.duck_volume,
+                            diegetic_windows=diegetic_windows,
+                        )
+                        if a_item.duck_under_dialogue
+                        else f"{a_item.volume:.3f}"
+                    )
+                    af_chain = [
+                        f"atrim=0:{a_dur:.3f}",
+                        "asetpts=PTS-STARTPTS",
+                        "aresample=48000",
+                        "aformat=sample_fmts=fltp:channel_layouts=stereo",
+                        f"volume='{vol_expr}':eval=frame",
+                    ]
+                    if a_item.fade_in > 0:
+                        af_chain.append(f"afade=t=in:st=0:d={min(a_dur * 0.4, a_item.fade_in):.3f}")
+                    if a_item.fade_out > 0:
+                        fo = min(a_dur * 0.4, a_item.fade_out)
+                        af_chain.append(f"afade=t=out:st={max(0.0, a_dur - fo):.3f}:d={fo:.3f}")
+                    if a_item.timeline_start > 0:
+                        delay_ms = int(round(a_item.timeline_start * 1000))
+                        af_chain.append(f"adelay={delay_ms}|{delay_ms}")
+
+                    lbl = f"[bgm{a_idx}]"
+                    filter_parts.append(f"[{in_idx}:a]{','.join(af_chain)}{lbl}")
+                    mix_inputs.append(lbl)
+
+                filter_parts.append(
+                    f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=2:normalize=0[aout]"
+                )
+                final_audio_map = "[aout]"
+            else:
+                final_audio_map = "0:a:0"
+
+            if has_step4_video_ops:
+                final_cmd.extend(
+                    [
+                        "-filter_complex",
+                        ";".join(filter_parts),
+                        "-map",
+                        cur_v,
+                        "-map",
+                        final_audio_map,
+                        "-t",
+                        f"{total_dur:.3f}",
+                        *_video_encoder_args(hdr, force_software=force_sw),
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "320k" if hdr else "192k",
+                        str(out_path),
+                    ]
+                )
+            else:
+                # Fast stream-copy video when V2/V3 overlays are already baked per segment!
+                final_cmd.extend(
+                    [
+                        "-filter_complex",
+                        ";".join(filter_parts),
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        final_audio_map,
+                        "-t",
+                        f"{total_dur:.3f}",
+                        "-c:v",
+                        "copy",
+                        *(["-tag:v", "hvc1"] if hdr else []),
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "320k" if hdr else "192k",
+                        str(out_path),
+                    ]
+                )
+            return final_cmd
+
+        proc = subprocess.run(_build_final_cmd(force_sw=False), capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            proc = subprocess.run(_build_final_cmd(force_sw=True), capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                raise RuntimeError(f"FFmpeg final composite failed: {proc.stderr}")
+
         if progress_callback:
             progress_callback("Render complete!", 1.0)
+
         return {"video": out_path, "srt": srt_path, "ass": ass_path}
-
-    def _build_final_cmd(force_sw: bool) -> list[str]:
-        final_cmd = [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(base_concat_mp4),
-        ]
-
-        for b_mp4 in broll_files:
-            final_cmd.extend(["-i", str(b_mp4)])
-
-        title_input_start_idx = 1 + len(active_broll)
-        for t_item, png_path in zip(active_titles, title_pngs):
-            final_cmd.extend(["-loop", "1", "-t", f"{t_item.duration:.3f}", "-i", str(png_path)])
-
-        bgm_input_start_idx = title_input_start_idx + len(active_titles)
-        for a_item in active_bgm:
-            if a_item.role == "music":
-                # Enable -stream_loop -1 on BGM music tracks so they cover the full video runtime
-                final_cmd.extend(["-stream_loop", "-1", "-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
-            else:
-                final_cmd.extend(["-ss", f"{a_item.source_in:.3f}", "-i", str(a_item.source)])
-
-        filter_parts: list[str] = []
-        cur_v = "[0:v]"
-        ov_fmt = "yuv420p10" if hdr else "auto"
-
-        # Composite Track V2 B-Roll Cutaways over Track V1
-        for b_idx, b_item in enumerate(active_broll):
-            in_idx = 1 + b_idx
-            st = b_item.timeline_start
-            dur = b_item.duration
-            end_t = st + dur
-            bv_label = f"[bv{b_idx}]"
-            next_v = f"[vb{b_idx + 1}]"
-            filter_parts.append(f"[{in_idx}:v]setpts=PTS+{st:.3f}/TB{bv_label}")
-            filter_parts.append(
-                f"{cur_v}{bv_label}overlay=0:0:format={ov_fmt}:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
-            )
-            cur_v = next_v
-
-        # Composite Track V3 RGBA Title Overlays
-        for idx, t_item in enumerate(active_titles):
-            in_idx = title_input_start_idx + idx
-            st = t_item.timeline_start
-            dur = t_item.duration
-            end_t = st + dur
-            fi = min(dur * 0.4, t_item.fade_in)
-            fo = min(dur * 0.4, t_item.fade_out)
-            fo_st = max(0.0, dur - fo)
-            ov_label = f"[ov{idx}]"
-            next_v = f"[vt{idx + 1}]"
-            filter_parts.append(
-                f"[{in_idx}:v]format=rgba,"
-                f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
-                f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
-                f"setpts=PTS+{st:.3f}/TB{ov_label}"
-            )
-            filter_parts.append(
-                f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
-            )
-            cur_v = next_v
-
-        if hdr and (active_broll or active_titles):
-            filter_parts.append(
-                f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc[vhdr]"
-            )
-            cur_v = "[vhdr]"
-
-        # Audio mixing & smart auto-ducking
-        if active_bgm:
-            mix_inputs = ["[0:a]"]
-            for a_idx, a_item in enumerate(active_bgm):
-                in_idx = bgm_input_start_idx + a_idx
-                # Ensure primary BGM covers 100% of total_dur when starting at 0.0, while voiceover/sfx play their exact duration
-                if a_item.role == "music" and a_item.timeline_start <= 0.1:
-                    a_dur = total_dur
-                else:
-                    a_dur = min(max(0.2, total_dur - a_item.timeline_start), a_item.duration or total_dur)
-                vol_expr = (
-                    _build_ducking_volume_expr(
-                        timeline,
-                        a_item.volume,
-                        a_item.duck_volume,
-                        diegetic_windows=diegetic_windows,
-                    )
-                    if a_item.duck_under_dialogue
-                    else f"{a_item.volume:.3f}"
-                )
-                af_chain = [
-                    f"atrim=0:{a_dur:.3f}",
-                    "asetpts=PTS-STARTPTS",
-                    "aresample=48000",
-                    "aformat=sample_fmts=fltp:channel_layouts=stereo",
-                    f"volume='{vol_expr}':eval=frame",
-                ]
-                if a_item.fade_in > 0:
-                    af_chain.append(f"afade=t=in:st=0:d={min(a_dur * 0.4, a_item.fade_in):.3f}")
-                if a_item.fade_out > 0:
-                    fo = min(a_dur * 0.4, a_item.fade_out)
-                    af_chain.append(f"afade=t=out:st={max(0.0, a_dur - fo):.3f}:d={fo:.3f}")
-                if a_item.timeline_start > 0:
-                    delay_ms = int(round(a_item.timeline_start * 1000))
-                    af_chain.append(f"adelay={delay_ms}|{delay_ms}")
-
-                lbl = f"[bgm{a_idx}]"
-                filter_parts.append(f"[{in_idx}:a]{','.join(af_chain)}{lbl}")
-                mix_inputs.append(lbl)
-
-            filter_parts.append(
-                f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=2:normalize=0[aout]"
-            )
-            final_audio_map = "[aout]"
-        else:
-            final_audio_map = "0:a:0"
-
-        if active_broll or active_titles:
-            final_cmd.extend(
-                [
-                    "-filter_complex",
-                    ";".join(filter_parts),
-                    "-map",
-                    cur_v,
-                    "-map",
-                    final_audio_map,
-                    "-t",
-                    f"{total_dur:.3f}",
-                    *_video_encoder_args(hdr, force_software=force_sw),
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "320k" if hdr else "192k",
-                    str(out_path),
-                ]
-            )
-        else:
-            # Fast stream-copy video when only BGM audio is being mixed!
-            final_cmd.extend(
-                [
-                    "-filter_complex",
-                    ";".join(filter_parts),
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    final_audio_map,
-                    "-t",
-                    f"{total_dur:.3f}",
-                    "-c:v",
-                    "copy",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "320k" if hdr else "192k",
-                    str(out_path),
-                ]
-            )
-        return final_cmd
-
-    proc = subprocess.run(_build_final_cmd(force_sw=False), capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        proc = subprocess.run(_build_final_cmd(force_sw=True), capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(f"FFmpeg final composite failed: {proc.stderr}")
-
-    if progress_callback:
-        progress_callback("Render complete!", 1.0)
-
-    return {"video": out_path, "srt": srt_path, "ass": ass_path}
 
 
 def build_segment_subtimeline(

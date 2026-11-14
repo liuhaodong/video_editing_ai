@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from ..analyzer.ag_annotator import analyze_media_directory
+from ..hardware import get_io_worker_count
 from ..analyzer.media_probe import _get_cjk_font
 from ..analyzer.semantic_intelligence import (
     SemanticEmbeddingEngine,
@@ -454,6 +456,7 @@ class CullerAgent(BaseEditingAgent):
                         use_antigravity=blackboard.use_antigravity,
                         user_hint=blackboard.user_prompt,
                         extra_audio_paths=blackboard.extra_audio_paths,
+                        dit_manifest=blackboard.dit_manifest,
                     )
             except Exception:
                 catalog = analyze_media_directory(
@@ -463,6 +466,7 @@ class CullerAgent(BaseEditingAgent):
                     use_antigravity=blackboard.use_antigravity,
                     user_hint=blackboard.user_prompt,
                     extra_audio_paths=blackboard.extra_audio_paths,
+                    dit_manifest=blackboard.dit_manifest,
                 )
         else:
             catalog = analyze_media_directory(
@@ -472,6 +476,7 @@ class CullerAgent(BaseEditingAgent):
                 use_antigravity=blackboard.use_antigravity,
                 user_hint=blackboard.user_prompt,
                 extra_audio_paths=blackboard.extra_audio_paths,
+                dit_manifest=blackboard.dit_manifest,
             )
 
         blackboard.catalog = catalog
@@ -492,6 +497,7 @@ class CullerAgent(BaseEditingAgent):
         subclips: list[CulledSubClip] = []
         discarded_count = 0
         moments_cache_dir = blackboard.project_dir / "cache" / "moments"
+        moments_cache_dir.mkdir(parents=True, exist_ok=True)
 
         blackboard.emit_activity(
             self.role_id,
@@ -503,25 +509,45 @@ class CullerAgent(BaseEditingAgent):
         sorted_videos: list[VideoAsset] = sorted(
             catalog.videos, key=lambda v: (v.creation_time or "", v.filename)
         )
-        for v_idx, vid in enumerate(sorted_videos, start=1):
+
+        def _precompute_vid(vid: VideoAsset) -> tuple[str, list[str], Optional[dict[str, Any]], dict[str, Any]]:
             kf_paths = [sc.keyframe_path for sc in vid.scenes if sc.keyframe_path and Path(sc.keyframe_path).exists()]
+            kf_perc = (
+                analyze_human_and_aesthetic_perception(kf_paths[len(kf_paths) // 2], vid.filename)
+                if kf_paths
+                else None
+            )
+            telemetry = analyze_video_temporal_telemetry(
+                Path(vid.path),
+                duration=max(0.5, vid.duration),
+                cache_dir=moments_cache_dir,
+            )
+            return vid.id, kf_paths, kf_perc, telemetry
+
+        precomputed_vid_map: dict[str, tuple[list[str], Optional[dict[str, Any]], dict[str, Any]]] = {}
+        if sorted_videos:
+            vid_workers = max(1, min(4, get_io_worker_count(8), len(sorted_videos)))
+            if vid_workers == 1:
+                vid_rows = [_precompute_vid(v) for v in sorted_videos]
+            else:
+                with ThreadPoolExecutor(max_workers=vid_workers) as pool:
+                    vid_rows = list(pool.map(_precompute_vid, sorted_videos))
+            for vid_id, kf_paths, kf_perc, tel in vid_rows:
+                precomputed_vid_map[vid_id] = (kf_paths, kf_perc, tel)
+
+        for v_idx, vid in enumerate(sorted_videos, start=1):
+            kf_paths, kf_perc, telemetry = precomputed_vid_map[vid.id]
             shot_scale, fallback_motion = _estimate_shot_scale_and_motion(kf_paths, vid.overall_summary)
 
             # Perceptual portrait/focus check on representative keyframe
             focal_pt: tuple[float, float] = (0.5, 0.5)
             eye_open_val = 1.0
             expr_val = 0.5
-            if kf_paths:
-                kf_perc = analyze_human_and_aesthetic_perception(kf_paths[len(kf_paths) // 2], vid.filename)
+            if kf_perc is not None:
                 focal_pt = kf_perc["focal_point"]
                 eye_open_val = float(kf_perc["eye_open_score"])
                 expr_val = round(min(1.0, 0.35 + float(kf_perc["smile_score"]) * 0.65), 3)
 
-            telemetry = analyze_video_temporal_telemetry(
-                Path(vid.path),
-                duration=max(0.5, vid.duration),
-                cache_dir=moments_cache_dir,
-            )
             cam_motion: Literal["static", "pan_left", "pan_right", "tilt_up", "walk_forward"] = (
                 telemetry.get("camera_movement") or fallback_motion
             )

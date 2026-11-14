@@ -137,11 +137,25 @@ class SemanticEmbeddingEngine:
         allow_download = os.environ.get("AI_EDITOR_ALLOW_HF_DOWNLOAD", "0").strip() == "1"
         try:
             from sentence_transformers import SentenceTransformer
+            from ..hardware import configure_opencv_amd_opencl, select_torch_device
 
-            self._st_model = SentenceTransformer(
-                "all-MiniLM-L6-v2",
-                local_files_only=not allow_download,
-            )
+            configure_opencv_amd_opencl()
+            device = select_torch_device()
+            try:
+                self._st_model = SentenceTransformer(
+                    "all-MiniLM-L6-v2",
+                    device=device,
+                    local_files_only=not allow_download,
+                )
+            except Exception:
+                if device != "cpu":
+                    self._st_model = SentenceTransformer(
+                        "all-MiniLM-L6-v2",
+                        device="cpu",
+                        local_files_only=not allow_download,
+                    )
+                else:
+                    raise
         except Exception:
             self._st_model = None
         return self._st_model
@@ -171,6 +185,7 @@ class SemanticEmbeddingEngine:
                 try:
                     encoded = model.encode(
                         missing_texts,
+                        batch_size=64,
                         normalize_embeddings=True,
                         show_progress_bar=False,
                     )
@@ -218,6 +233,9 @@ def _compute_region_signature_128d(bgr_img: np.ndarray) -> np.ndarray:
     - 72-D 3x3 Spatial Pyramid 8-bin Sobel Edge-Orientation Histogram
     - 8-D global luminance/chromaticity/contrast moments
     """
+    from ..hardware import configure_opencv_amd_opencl
+
+    configure_opencv_amd_opencl()
     resized = cv2.resize(bgr_img, (192, 192), interpolation=cv2.INTER_AREA)
     lab = cv2.cvtColor(resized, cv2.COLOR_BGR2LAB)
     gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY).astype(np.float32)

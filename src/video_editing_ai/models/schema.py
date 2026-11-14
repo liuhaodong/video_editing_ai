@@ -1329,6 +1329,8 @@ class DITIngestEntry(BaseModel):
     gps_lon: Optional[float] = None
     camera_make_model: Optional[str] = None
     exif_summary: Optional[str] = None
+    preview_path: Optional[str] = None
+    focal_point: tuple[float, float] = (0.5, 0.5)
     color_stats: dict[str, float] = Field(default_factory=dict)
 
 

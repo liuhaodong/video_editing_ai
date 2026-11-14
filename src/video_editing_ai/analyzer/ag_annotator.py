@@ -66,11 +66,38 @@ def _compute_visual_metrics(img_path: str | Path) -> dict[str, float | str]:
 
 def apply_local_visual_enrichment(catalog: MediaCatalog) -> MediaCatalog:
     """Enrich scenes and photos with local visual quality scores, lighting tags, and dialogue context."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ..hardware import get_io_worker_count
+
     total_vids = len(catalog.videos)
+    metric_targets: list[str] = []
+    seen_targets: set[str] = set()
+    for video in catalog.videos:
+        for sc in video.scenes:
+            if sc.keyframe_path and Path(sc.keyframe_path).exists() and sc.keyframe_path not in seen_targets:
+                seen_targets.add(sc.keyframe_path)
+                metric_targets.append(sc.keyframe_path)
+    for photo in catalog.photos:
+        img_target = photo.preview_path if photo.preview_path and Path(photo.preview_path).exists() else photo.path
+        if img_target not in seen_targets:
+            seen_targets.add(img_target)
+            metric_targets.append(img_target)
+
+    metrics_by_path: dict[str, dict[str, Any]] = {}
+    if metric_targets:
+        workers = max(1, min(get_io_worker_count(8), len(metric_targets)))
+        if workers == 1:
+            metrics_list = [_compute_visual_metrics(p) for p in metric_targets]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                metrics_list = list(pool.map(_compute_visual_metrics, metric_targets))
+        metrics_by_path = dict(zip(metric_targets, metrics_list))
+
     for v_idx, video in enumerate(catalog.videos):
         for sc in video.scenes:
-            if sc.keyframe_path and Path(sc.keyframe_path).exists():
-                metrics = _compute_visual_metrics(sc.keyframe_path)
+            if sc.keyframe_path and sc.keyframe_path in metrics_by_path:
+                metrics = metrics_by_path[sc.keyframe_path]
                 sc.quality_score = float(metrics["quality_score"])
                 lighting = str(metrics["lighting"])
                 if lighting not in sc.visual_tags:
@@ -104,7 +131,7 @@ def apply_local_visual_enrichment(catalog: MediaCatalog) -> MediaCatalog:
 
     for p_idx, photo in enumerate(catalog.photos):
         img_target = photo.preview_path if photo.preview_path and Path(photo.preview_path).exists() else photo.path
-        metrics = _compute_visual_metrics(img_target)
+        metrics = metrics_by_path.get(img_target) or _compute_visual_metrics(img_target)
         photo.quality_score = float(metrics["quality_score"])
         lighting = str(metrics["lighting"])
         if lighting not in photo.subjects:
@@ -284,6 +311,9 @@ def enrich_catalog_with_antigravity(
         return catalog
 
 
+from ..models.schema import DITIngestManifest
+
+
 def analyze_media_directory(
     media_dir: str | Path,
     project_dir: str | Path,
@@ -292,6 +322,7 @@ def analyze_media_directory(
     use_antigravity: bool = True,
     user_hint: str = "",
     extra_audio_paths: Optional[list[str | Path]] = None,
+    dit_manifest: Optional[DITIngestManifest] = None,
 ) -> MediaCatalog:
     """Full Step 1 pipeline: probe media, extract keyframes & previews, transcribe dialogues, and annotate."""
     proj_path = Path(project_dir).resolve()
@@ -300,6 +331,7 @@ def analyze_media_directory(
         media_dir=media_dir,
         cache_dir=cache_dir,
         extra_audio_paths=extra_audio_paths,
+        dit_manifest=dit_manifest,
     )
     catalog = transcribe_catalog_videos(
         catalog,

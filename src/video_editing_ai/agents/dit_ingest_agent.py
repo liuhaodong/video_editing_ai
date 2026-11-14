@@ -101,10 +101,15 @@ class DITIngestAgent(BaseEditingAgent):
     skill_reference_file = "01a_dit_ingest_agent.md"
 
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from ..hardware import get_io_worker_count
+
         cache_dir = blackboard.project_dir / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / "dit_ingest_cache.json"
         previews_dir = cache_dir / "photos"
+        previews_dir.mkdir(parents=True, exist_ok=True)
 
         disk_cache: dict[str, dict[str, Any]] = {}
         if cache_file.exists():
@@ -116,15 +121,17 @@ class DITIngestAgent(BaseEditingAgent):
                 disk_cache = {}
 
         files = iter_media_files_recursive(blackboard.media_dir)
-        entries: list[DITIngestEntry] = []
-        cache_hits = 0
-        cache_misses = 0
+        supported_items: list[tuple[int, Path]] = [
+            (idx, f)
+            for idx, f in enumerate(files, start=1)
+            if f.suffix.lower() in VIDEO_EXTENSIONS
+            or f.suffix.lower() in PHOTO_EXTENSIONS
+            or f.suffix.lower() in AUDIO_EXTENSIONS
+        ]
 
-        for idx, f in enumerate(files, start=1):
+        def _ingest_one(item: tuple[int, Path]) -> tuple[int, bool, str, DITIngestEntry]:
+            idx, f = item
             ext = f.suffix.lower()
-            if ext not in VIDEO_EXTENSIONS and ext not in PHOTO_EXTENSIONS and ext not in AUDIO_EXTENSIONS:
-                continue
-
             resolved_str = str(f.resolve())
             size_b, mtime_ns, f_hash = compute_file_fingerprint(f)
             cache_key = f"{resolved_str}|{size_b}|{mtime_ns}|{f_hash}"
@@ -133,13 +140,15 @@ class DITIngestAgent(BaseEditingAgent):
             if isinstance(cached_payload, dict):
                 try:
                     ent = DITIngestEntry.model_validate({**cached_payload, "cache_hit": True})
-                    entries.append(ent)
-                    cache_hits += 1
-                    continue
+                    photo_ok = (
+                        ent.media_type != "photo"
+                        or (bool(ent.preview_path) and Path(ent.preview_path).exists())
+                    )
+                    if photo_ok:
+                        return idx, True, cache_key, ent
                 except Exception:
                     pass
 
-            cache_misses += 1
             if ext in VIDEO_EXTENSIONS:
                 v_info = probe_video_file(f)
                 aud_sig = (
@@ -219,6 +228,8 @@ class DITIngestAgent(BaseEditingAgent):
                     gps_lon=ph.gps_lon,
                     camera_make_model=ph.camera_make_model,
                     exif_summary=ph.exif_summary,
+                    preview_path=ph.preview_path,
+                    focal_point=ph.focal_point,
                     color_stats=ph.color_stats,
                 )
             else:
@@ -250,9 +261,26 @@ class DITIngestAgent(BaseEditingAgent):
                     snr_db=float(aud_sig["snr_db"]),
                     has_diegetic_music=True,
                 )
+            return idx, False, cache_key, ent
 
-            disk_cache[cache_key] = ent.model_dump(mode="json")
-            entries.append(ent)
+        entries: list[DITIngestEntry] = []
+        cache_hits = 0
+        cache_misses = 0
+        if supported_items:
+            workers = max(1, min(get_io_worker_count(8), len(supported_items)))
+            if workers == 1:
+                results = [_ingest_one(item) for item in supported_items]
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    results = list(pool.map(_ingest_one, supported_items))
+            results.sort(key=lambda row: row[0])
+            for _, is_hit, cache_key, ent in results:
+                entries.append(ent)
+                if is_hit:
+                    cache_hits += 1
+                else:
+                    cache_misses += 1
+                    disk_cache[cache_key] = ent.model_dump(mode="json")
 
         # Normalize multi-camera DateTimeOriginal clock drift
         clock_offsets = _compute_multicam_clock_offsets(entries)

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import textwrap
 from typing import Any, Optional
 
@@ -20,6 +21,14 @@ try:
 except ImportError:
     pass
 
+from ..hardware import (
+    detect_best_video_encoder as _hw_detect_best_video_encoder,
+    get_hardware_profile,
+    has_ffmpeg_bsf,
+    has_ffmpeg_filter as _hw_has_ffmpeg_filter,
+    probe_hw_encoder as _hw_probe_hw_encoder,
+    supports_videotoolbox_qscale as _hw_supports_videotoolbox_qscale,
+)
 from ..models.schema import KenBurnsConfig, TransitionConfig
 
 
@@ -482,61 +491,19 @@ def _resolve_kb_endpoints(
     return (kb.start_zoom, kb.end_zoom, kb.start_center, kb.end_center)
 
 
-_ENCODER_CACHE: dict[bool, str] = {}
-_FILTER_CACHE: dict[str, bool] = {}
-_VT_QSCALE_CACHE: dict[tuple[str, str], bool] = {}
-
-
 def _supports_videotoolbox_qscale(encoder: str, pix_fmt: str) -> bool:
     """Check whether VideoToolbox accepts -q:v alongside -b:v (Apple Silicon supports it; Intel x86_64 rejects it)."""
-    key = (encoder, pix_fmt)
-    if key not in _VT_QSCALE_CACHE:
-        extra = ["-profile:v", "main10"] if encoder == "hevc_videotoolbox" else []
-        _VT_QSCALE_CACHE[key] = _probe_hw_encoder(
-            encoder,
-            pix_fmt=pix_fmt,
-            extra_args=[*extra, "-q:v", "68", "-b:v", "28M", "-allow_sw", "1"],
-        )
-    return _VT_QSCALE_CACHE[key]
+    return _hw_supports_videotoolbox_qscale(encoder, pix_fmt)
 
 
 def has_ffmpeg_filter(filter_name: str) -> bool:
     """Check once whether a specific FFmpeg filter (e.g. 'zscale') is compiled into the local ffmpeg binary."""
-    if filter_name not in _FILTER_CACHE:
-        proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        _FILTER_CACHE[filter_name] = any(
-            f" {filter_name} " in line for line in (proc.stdout or "").splitlines()
-        )
-    return _FILTER_CACHE[filter_name]
+    return _hw_has_ffmpeg_filter(filter_name)
 
 
 def _probe_hw_encoder(encoder: str, pix_fmt: str = "yuv420p", extra_args: Optional[list[str]] = None) -> bool:
     """Test whether a specific hardware encoder is functional on the current machine/GPU."""
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "nullsrc=s=256x256:d=0.1",
-        "-c:v",
-        encoder,
-        "-pix_fmt",
-        pix_fmt,
-        *(extra_args or []),
-        "-f",
-        "null",
-        "-",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, check=False)
-    return proc.returncode == 0
+    return _hw_probe_hw_encoder(encoder, pix_fmt=pix_fmt, extra_args=extra_args)
 
 
 def detect_best_video_encoder(hdr: bool = True) -> str:
@@ -548,33 +515,7 @@ def detect_best_video_encoder(hdr: bool = True) -> str:
     - Intel QuickSync iGPU: hevc_qsv / h264_qsv
     - Software fallback: libx265 / libx264
     """
-    if hdr in _ENCODER_CACHE:
-        return _ENCODER_CACHE[hdr]
-
-    if hdr:
-        candidates = [
-            ("hevc_videotoolbox", "p010le", ["-profile:v", "main10", "-allow_sw", "1"]),
-            ("hevc_nvenc", "p010le", []),
-            ("hevc_amf", "p010le", []),
-            ("hevc_qsv", "p010le", []),
-        ]
-        fallback = "libx265"
-    else:
-        candidates = [
-            ("h264_videotoolbox", "yuv420p", ["-allow_sw", "1"]),
-            ("h264_nvenc", "yuv420p", []),
-            ("h264_amf", "yuv420p", []),
-            ("h264_qsv", "yuv420p", []),
-        ]
-        fallback = "libx264"
-
-    for enc_name, p_fmt, ex in candidates:
-        if _probe_hw_encoder(enc_name, pix_fmt=p_fmt, extra_args=ex):
-            _ENCODER_CACHE[hdr] = enc_name
-            return enc_name
-
-    _ENCODER_CACHE[hdr] = fallback
-    return fallback
+    return _hw_detect_best_video_encoder(hdr=hdr)
 
 
 def has_hevc_nvenc() -> bool:
@@ -2548,6 +2489,81 @@ def _render_photo_frame_from_context(
     return frame
 
 
+def build_uniform_mux_args(fps: int, hdr: bool, v_enc_args: list[str]) -> list[str]:
+    """Return uniform container metadata, CFR rate, timescale, and HEVC SEI flags for -c copy concat."""
+    args = [
+        "-map_metadata",
+        "-1",
+        "-metadata:s:v:0",
+        "rotate=0",
+        "-r",
+        str(fps),
+        "-video_track_timescale",
+        "30000",
+    ]
+    is_hevc = any(tok in str(arg).lower() for arg in v_enc_args for tok in ("hevc", "libx265"))
+    if hdr and is_hevc and has_ffmpeg_bsf("filter_units"):
+        args.extend(["-bsf:v", "filter_units=remove_types=39-40"])
+    return args
+
+
+def build_segment_overlay_filtergraph(
+    base_label: str,
+    hdr: bool,
+    next_input_idx: int,
+    segment_broll: Optional[list[tuple[Path, float, float]]] = None,
+    segment_titles: Optional[list[tuple[Path, float, float, float, float]]] = None,
+) -> tuple[list[str], list[str], str]:
+    """Build extra FFmpeg -i inputs & filter_complex stages for segment-scoped Track V2/V3 overlays."""
+    extra_inputs: list[str] = []
+    filter_parts: list[str] = []
+    cur_v = base_label
+    in_idx = next_input_idx
+    ov_fmt = "yuv420p10" if hdr else "auto"
+
+    for b_idx, (b_mp4, local_st, b_dur) in enumerate(segment_broll or []):
+        extra_inputs.extend(["-i", str(b_mp4)])
+        end_t = local_st + b_dur
+        bv_label = f"[sbv{b_idx}]"
+        next_v = f"[svb{b_idx + 1}]"
+        filter_parts.append(f"[{in_idx}:v]setpts=PTS+{local_st:.3f}/TB{bv_label}")
+        filter_parts.append(
+            f"{cur_v}{bv_label}overlay=0:0:format={ov_fmt}:eof_action=pass:"
+            f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
+        )
+        cur_v = next_v
+        in_idx += 1
+
+    for t_idx, (t_png, local_st, t_dur, fade_in, fade_out) in enumerate(segment_titles or []):
+        extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(t_png)])
+        end_t = local_st + t_dur
+        fi = min(t_dur * 0.4, fade_in)
+        fo = min(t_dur * 0.4, fade_out)
+        fo_st = max(0.0, t_dur - fo)
+        ov_label = f"[sov{t_idx}]"
+        next_v = f"[svt{t_idx + 1}]"
+        filter_parts.append(
+            f"[{in_idx}:v]format=rgba,"
+            f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
+            f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
+            f"setpts=PTS+{local_st:.3f}/TB{ov_label}"
+        )
+        filter_parts.append(
+            f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:"
+            f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
+        )
+        cur_v = next_v
+        in_idx += 1
+
+    if hdr and (segment_broll or segment_titles):
+        filter_parts.append(
+            f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc[svhdr]"
+        )
+        cur_v = "[svhdr]"
+
+    return extra_inputs, filter_parts, cur_v
+
+
 def render_photo_clip(
     photo_path: str | Path,
     output_mp4: str | Path,
@@ -2559,8 +2575,10 @@ def render_photo_clip(
     ken_burns: Optional[KenBurnsConfig] = None,
     transition_in: Optional[TransitionConfig] = None,
     transition_out: Optional[TransitionConfig] = None,
+    segment_broll: Optional[list[tuple[Path, float, float]]] = None,
+    segment_titles: Optional[list[tuple[Path, float, float, float, float]]] = None,
 ) -> Path:
-    """Render a photo into a 4K HDR MP4 video clip using any of the 10 Premium Photo Modes + 4 Atmospheric Finishers."""
+    """Render a photo into a 4K HDR MP4 video clip using any of the 16 Premium Photo Modes + 8 Atmospheric Finishers."""
     kb = ken_burns or KenBurnsConfig()
     out_path = Path(output_mp4)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2599,7 +2617,9 @@ def render_photo_clip(
     else:
         vf_filters.append("format=yuv420p")
     v_enc = get_video_encoder_args(hdr=hdr, force_software=False)
+    mux_args = build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=v_enc)
 
+    has_seg_overlays = bool(segment_broll or segment_titles)
     cmd = [
         "ffmpeg",
         "-y",
@@ -2620,46 +2640,116 @@ def render_photo_clip(
         "lavfi",
         "-i",
         "anullsrc=channel_layout=stereo:sample_rate=48000",
-        "-t",
-        f"{duration:.3f}",
-        "-vf",
-        ",".join(vf_filters),
-        *v_enc,
-        "-video_track_timescale",
-        "30000",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "256k",
-        "-shortest",
-        str(out_path),
     ]
 
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdin is not None
+    if has_seg_overlays:
+        extra_inputs, ov_parts, out_v_label = build_segment_overlay_filtergraph(
+            base_label="[vbase]",
+            hdr=hdr,
+            next_input_idx=2,
+            segment_broll=segment_broll,
+            segment_titles=segment_titles,
+        )
+        fc_parts = [f"[0:v]{','.join(vf_filters)}[vbase]", *ov_parts]
+        cmd.extend(extra_inputs)
+        cmd.extend(
+            [
+                "-t",
+                f"{duration:.3f}",
+                "-filter_complex",
+                ";".join(fc_parts),
+                "-map",
+                out_v_label,
+                "-map",
+                "1:a:0",
+            ]
+        )
+    else:
+        cmd.extend(
+            [
+                "-t",
+                f"{duration:.3f}",
+                "-vf",
+                ",".join(vf_filters),
+            ]
+        )
 
-    try:
-        for f_idx in range(total_frames):
-            t_norm = f_idx / max(1, total_frames - 1)
-            frame = _render_photo_frame_from_context(
-                ctx=ctx,
-                t_norm=t_norm,
-                f_idx=f_idx,
-                duration=duration,
-                fps=fps,
-            )
-            try:
-                proc.stdin.write(frame.tobytes())
-            except (BrokenPipeError, OSError):
-                break
-    finally:
+    cmd.extend(
+        [
+            *v_enc,
+            *mux_args,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "256k",
+            "-shortest",
+            str(out_path),
+        ]
+    )
+
+    from ..hardware import videotoolbox_hdr_encode_guard
+
+    hw = get_hardware_profile()
+    wrote_bytes = False
+    used_mps = False
+
+    class _TrackedStdin:
+        def __init__(self, raw_pipe: Any) -> None:
+            self._pipe = raw_pipe
+
+        def write(self, data: Any) -> Any:
+            nonlocal wrote_bytes
+            res = self._pipe.write(data)
+            wrote_bytes = True
+            return res
+
+        def flush(self) -> None:
+            self._pipe.flush()
+
+    with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=v_enc):
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.stdin is not None
         try:
-            proc.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass
+            if hw.has_mps:
+                try:
+                    from .mps_photo_compositor import stream_photo_frames_to_pipe
 
-    stderr_bytes = proc.stderr.read() if proc.stderr else b""
-    ret = proc.wait()
+                    stream_photo_frames_to_pipe(
+                        ctx=ctx,
+                        total_frames=total_frames,
+                        duration=duration,
+                        fps=fps,
+                        pipe_stdin=_TrackedStdin(proc.stdin),
+                        batch_size=8,
+                    )
+                    used_mps = True
+                except Exception as exc:
+                    if wrote_bytes:
+                        raise
+                    print(f"[ken_burns] MPS photo compositor fallback to CPU Pillow: {exc}", file=sys.stderr)
+
+            if not used_mps:
+                for f_idx in range(total_frames):
+                    t_norm = f_idx / max(1, total_frames - 1)
+                    frame = _render_photo_frame_from_context(
+                        ctx=ctx,
+                        t_norm=t_norm,
+                        f_idx=f_idx,
+                        duration=duration,
+                        fps=fps,
+                    )
+                    try:
+                        proc.stdin.write(frame.tobytes())
+                    except (BrokenPipeError, OSError):
+                        break
+        finally:
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+        stderr_bytes = proc.stderr.read() if proc.stderr else b""
+        ret = proc.wait()
     if ret != 0:
         err_msg = stderr_bytes.decode("utf-8", errors="replace")
         raise RuntimeError(f"FFmpeg photo clip render failed (code {ret}): {err_msg}")

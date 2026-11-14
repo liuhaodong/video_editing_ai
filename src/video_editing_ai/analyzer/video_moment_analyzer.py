@@ -12,6 +12,7 @@ from typing import Any, Literal, Optional
 import cv2
 import numpy as np
 
+from ..hardware import configure_opencv_amd_opencl, get_hardware_profile
 from ..models.schema import DialogueSegment, VideoAsset
 from .media_probe import compute_file_fingerprint, find_decodable_audio_stream_pos
 
@@ -49,11 +50,7 @@ def _decode_lowres_gray_frames(
     if not video_path.exists():
         return np.zeros((0, height, width), dtype=np.uint8)
 
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
+    base_args = [
         "-t",
         f"{max_duration:.2f}",
         "-i",
@@ -69,8 +66,13 @@ def _decode_lowres_gray_frames(
         "rawvideo",
         "pipe:1",
     ]
+    hw_prefix = ["-hwaccel", "videotoolbox"] if get_hardware_profile().has_videotoolbox_hwaccel else []
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *hw_prefix, *base_args]
     proc = subprocess.run(cmd, capture_output=True, check=False)
     frame_bytes = width * height
+    if (proc.returncode != 0 or len(proc.stdout) < frame_bytes) and hw_prefix:
+        cmd_sw = ["ffmpeg", "-hide_banner", "-loglevel", "error", *base_args]
+        proc = subprocess.run(cmd_sw, capture_output=True, check=False)
     if proc.returncode != 0 or len(proc.stdout) < frame_bytes:
         return np.zeros((0, height, width), dtype=np.uint8)
     n_frames = len(proc.stdout) // frame_bytes
@@ -198,9 +200,23 @@ def analyze_video_temporal_telemetry(
     div_curve = np.zeros(n_steps, dtype=np.float32)
 
     if len(frames) >= 2:
+        use_ocl = configure_opencv_amd_opencl()
+        umat_frames = None
+        if use_ocl:
+            try:
+                umat_frames = [cv2.UMat(frames[i]) for i in range(n_steps)]
+            except Exception:
+                umat_frames = None
+
         raw_sharp = np.zeros(n_steps, dtype=np.float32)
         for i in range(n_steps):
-            lap = cv2.Laplacian(frames[i], cv2.CV_32F)
+            if umat_frames is not None:
+                try:
+                    lap = cv2.Laplacian(umat_frames[i], cv2.CV_32F).get()
+                except Exception:
+                    lap = cv2.Laplacian(frames[i], cv2.CV_32F)
+            else:
+                lap = cv2.Laplacian(frames[i], cv2.CV_32F)
             raw_sharp[i] = float(np.percentile(np.abs(lap), 85))
         med_sharp = max(8.0, float(np.median(raw_sharp)))
         sharpness_curve = np.clip(raw_sharp / (med_sharp * 1.25), 0.10, 1.0).astype(np.float32)
@@ -218,18 +234,37 @@ def analyze_video_temporal_telemetry(
         ry /= r_norm
 
         for i in range(1, n_steps):
-            flow = cv2.calcOpticalFlowFarneback(
-                frames[i - 1],
-                frames[i],
-                None,
-                0.5,
-                3,
-                15,
-                3,
-                5,
-                1.2,
-                0,
-            )
+            flow = None
+            if umat_frames is not None:
+                try:
+                    flow_umat = cv2.calcOpticalFlowFarneback(
+                        umat_frames[i - 1],
+                        umat_frames[i],
+                        None,
+                        0.5,
+                        3,
+                        15,
+                        3,
+                        5,
+                        1.2,
+                        0,
+                    )
+                    flow = flow_umat.get()
+                except Exception:
+                    flow = None
+            if flow is None:
+                flow = cv2.calcOpticalFlowFarneback(
+                    frames[i - 1],
+                    frames[i],
+                    None,
+                    0.5,
+                    3,
+                    15,
+                    3,
+                    5,
+                    1.2,
+                    0,
+                )
             u = flow[:, :, 0]
             v = flow[:, :, 1]
             u_mean = float(np.mean(u))

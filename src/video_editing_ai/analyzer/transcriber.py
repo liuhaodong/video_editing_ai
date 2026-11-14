@@ -88,14 +88,24 @@ def _decode_audio_pcm_16k(video_path: Path):
 def _get_whisper_model(model_size: str = "small"):
     if model_size not in _WHISPER_MODEL_CACHE:
         from faster_whisper import WhisperModel
+        from ..hardware import get_io_worker_count
 
+        cpu_threads = max(2, min(8, get_io_worker_count(8)))
         for compute_type in ("int8", "default", "float32"):
             try:
-                _WHISPER_MODEL_CACHE[model_size] = WhisperModel(
-                    model_size,
-                    device="cpu",
-                    compute_type=compute_type,
-                )
+                try:
+                    _WHISPER_MODEL_CACHE[model_size] = WhisperModel(
+                        model_size,
+                        device="cpu",
+                        compute_type=compute_type,
+                        cpu_threads=cpu_threads,
+                    )
+                except TypeError:
+                    _WHISPER_MODEL_CACHE[model_size] = WhisperModel(
+                        model_size,
+                        device="cpu",
+                        compute_type=compute_type,
+                    )
                 break
             except Exception:
                 if compute_type == "float32":
@@ -103,18 +113,16 @@ def _get_whisper_model(model_size: str = "small"):
     return _WHISPER_MODEL_CACHE[model_size]
 
 
-def _transcribe_file_raw(
-    video_path: Path,
+def _transcribe_pcm_raw(
+    pcm: Optional[np.ndarray],
+    video_name: str,
     model_size: str = "small",
     language: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Run faster-whisper in-process and return plain dict records (safe for isolated worker)."""
-    if not video_path.exists():
+    """Run faster-whisper over a pre-decoded 16 kHz mono float32 PCM buffer."""
+    if pcm is None or pcm.size < 1600:
         return []
     try:
-        pcm = _decode_audio_pcm_16k(video_path)
-        if pcm is None or pcm.size < 1600:
-            return []
         model = _get_whisper_model(model_size)
         segments, info = model.transcribe(
             pcm,
@@ -142,8 +150,24 @@ def _transcribe_file_raw(
             )
         return results
     except Exception as exc:
+        print(f"[transcriber] Warning: failed to transcribe {video_name}: {exc}", file=sys.stderr)
+        return []
+
+
+def _transcribe_file_raw(
+    video_path: Path,
+    model_size: str = "small",
+    language: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Run faster-whisper in-process and return plain dict records (safe for isolated worker)."""
+    if not video_path.exists():
+        return []
+    try:
+        pcm = _decode_audio_pcm_16k(video_path)
+    except Exception as exc:
         print(f"[transcriber] Warning: failed to transcribe {video_path.name}: {exc}", file=sys.stderr)
         return []
+    return _transcribe_pcm_raw(pcm, video_name=video_path.name, model_size=model_size, language=language)
 
 
 def _transcribe_videos_in_subprocess(
@@ -166,9 +190,11 @@ def _transcribe_videos_in_subprocess(
             json.dumps({"videos": existing, "model_size": model_size, "language": language}),
             encoding="utf-8",
         )
+        from ..hardware import get_io_worker_count
+
         env = os.environ.copy()
         env["_VIDEO_EDITING_AI_WHISPER_WORKER"] = "1"
-        env.setdefault("OMP_NUM_THREADS", "2")
+        env.setdefault("OMP_NUM_THREADS", str(max(2, min(8, get_io_worker_count(8)))))
         proc = subprocess.run(
             [
                 sys.executable,
@@ -260,6 +286,10 @@ def transcribe_catalog_videos(
 
 
 def _run_worker_cli() -> int:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ..hardware import get_io_worker_count
+
     parser = argparse.ArgumentParser(description="Isolated faster-whisper transcription worker")
     parser.add_argument("--worker-input", required=True)
     parser.add_argument("--worker-output", required=True)
@@ -268,9 +298,36 @@ def _run_worker_cli() -> int:
     req = json.loads(Path(args.worker_input).read_text(encoding="utf-8"))
     model_size = str(req.get("model_size") or "small")
     language = req.get("language")
+    video_paths = [Path(vp) for vp in req.get("videos", [])]
+
+    decoded_pcm: dict[str, Optional[np.ndarray]] = {}
+    if video_paths:
+        dec_workers = max(1, min(4, get_io_worker_count(4), len(video_paths)))
+        with ThreadPoolExecutor(max_workers=dec_workers) as pool:
+            pcm_futures = {
+                str(vp): pool.submit(_decode_audio_pcm_16k, vp)
+                for vp in video_paths
+                if vp.exists()
+            }
+            try:
+                _get_whisper_model(model_size)
+            except Exception:
+                pass
+            for vp_str, fut in pcm_futures.items():
+                try:
+                    decoded_pcm[vp_str] = fut.result()
+                except Exception:
+                    decoded_pcm[vp_str] = None
+
     out: dict[str, list[dict[str, Any]]] = {}
-    for vp in req.get("videos", []):
-        out[str(vp)] = _transcribe_file_raw(Path(vp), model_size=model_size, language=language)
+    for vp in video_paths:
+        vp_str = str(vp)
+        out[vp_str] = _transcribe_pcm_raw(
+            decoded_pcm.get(vp_str),
+            video_name=vp.name,
+            model_size=model_size,
+            language=language,
+        )
     Path(args.worker_output).write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
     return 0
 

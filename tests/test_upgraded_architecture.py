@@ -1455,3 +1455,435 @@ def test_mixed_hevc_extradata_concat_preserves_all_frames(tmp_path: Path) -> Non
     assert probe_proc.returncode == 0, probe_proc.stderr
     nb_read = int(probe_proc.stdout.strip())
     assert nb_read >= 29 and nb_read <= 30, f"Expected ~30 frames, got {nb_read}"
+
+
+def test_gate8_hardware_profile_accel_policy_and_amd_opencl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate 8: Unified HardwareProfile caching, AI_EDITOR_ACCEL policies, AMD OpenCL Apple:GPU:N binding, sleep guard."""
+    import os
+    import sys
+    import cv2
+
+    from video_editing_ai import hardware
+
+    try:
+        # 1. CPU override forces all GPU paths off cleanly
+        monkeypatch.setenv("AI_EDITOR_ACCEL", "cpu")
+        monkeypatch.setenv("AI_EDITOR_MAX_WORKERS", "3")
+        hardware.reset_hardware_cache()
+        cpu_prof = hardware.get_hardware_profile()
+        assert cpu_prof.accel_policy == "cpu"
+        assert cpu_prof.has_mps is False
+        assert cpu_prof.torch_device == "cpu"
+        assert cpu_prof.has_amd_opencl is False
+        assert cpu_prof.has_videotoolbox_hwaccel is False
+        assert cpu_prof.best_hdr_encoder == "libx265"
+        assert cpu_prof.best_sdr_encoder == "libx264"
+        assert cpu_prof.vt_supports_qscale_hdr is False
+        assert cpu_prof.vt_supports_qscale_sdr is False
+        assert hardware.get_io_worker_count(8) == 3
+
+        # 2. MPS-only policy keeps OpenCV OpenCL off orthogonally
+        monkeypatch.setenv("AI_EDITOR_ACCEL", "mps")
+        hardware.reset_hardware_cache()
+        assert hardware.configure_opencv_amd_opencl() is False
+
+        # 3. Mocked dual-GPU macOS system_profiler selects Apple:GPU:1 (never "AMD:GPU:")
+        monkeypatch.setenv("AI_EDITOR_ACCEL", "opencl")
+        monkeypatch.delenv("OPENCV_OPENCL_DEVICE", raising=False)
+        hardware.reset_hardware_cache()
+        monkeypatch.setattr(
+            hardware,
+            "_detect_macos_gpus",
+            lambda: [
+                {"name": "Intel UHD Graphics 630", "vendor": "0x8086", "vram": "1536 MB"},
+                {"name": "AMD Radeon Pro 5500M", "vendor": "0x1002", "vram": "8176 MB"},
+            ],
+        )
+        monkeypatch.setattr(hardware.sys, "platform", "darwin")
+        idx, name = hardware._find_amd_gpu_index_and_name(hardware._detect_macos_gpus())
+        assert idx == 1 and "AMD" in name
+        if cv2.ocl.haveOpenCL():
+            assert hardware.configure_opencv_amd_opencl() is True
+            assert os.environ.get("OPENCV_OPENCL_DEVICE") == "Apple:GPU:1"
+
+        # 4. Caffeinate guard runs safely without raising on any platform
+        with hardware.caffeinate_guard():
+            pass
+    finally:
+        monkeypatch.undo()
+        hardware.reset_hardware_cache()
+
+    # 5. Live auto-profile sanity check on Apple Mac hardware
+    if sys.platform == "darwin":
+        auto_prof = hardware.get_hardware_profile()
+        assert auto_prof.has_videotoolbox_hwaccel is True
+        assert auto_prof.best_hdr_encoder == "hevc_videotoolbox"
+        assert auto_prof.has_mps is True
+        assert auto_prof.torch_device == "mps"
+
+
+def test_gate9_mps_photo_compositor_parity_clamping_and_broken_pipe(tmp_path: Path) -> None:
+    """Gate 9: MPSPhotoCompositor parity (<6.0 MAE vs CPU Pillow), edge clamping, and BrokenPipeError shutdown."""
+    import time
+    from PIL import Image, ImageDraw
+
+    from video_editing_ai.models.schema import KenBurnsConfig
+    from video_editing_ai.renderer.ken_burns import _prepare_photo_scene_context, _render_photo_frame_from_context
+    from video_editing_ai.renderer.mps_photo_compositor import MPSPhotoCompositor, stream_photo_frames_to_pipe
+
+    photo_path = tmp_path / "gallery_sample.jpg"
+    img = Image.new("RGB", (960, 720), (36, 48, 72))
+    draw = ImageDraw.Draw(img)
+    for y in range(0, 720, 4):
+        c = int(40 + 170 * (y / 720.0))
+        draw.line([(0, y), (960, y)], fill=(c, 80 + c // 3, 180 - c // 3), width=4)
+    draw.rectangle([220, 140, 740, 560], fill=(215, 198, 172), outline=(45, 38, 30), width=8)
+    draw.ellipse([370, 210, 590, 430], fill=(195, 76, 62))
+    img.save(photo_path, quality=95)
+
+    configs = [
+        KenBurnsConfig(
+            mode="parallax_gallery",
+            start_zoom=1.0,
+            end_zoom=1.18,
+            focal_x=0.52,
+            focal_y=0.45,
+            overlay_fx="museum_spotlight",
+            caption_title="SFMOMA Gallery",
+            caption_subtitle="Fourth Floor Terrace",
+            date_badge="2026-10-18",
+        ),
+        KenBurnsConfig(
+            mode="full_bleed",
+            start_zoom=1.0,
+            end_zoom=1.35,
+            focal_x=0.99,
+            focal_y=0.99,
+            overlay_fx="golden_light_leak",
+        ),
+    ]
+
+    for kb in configs:
+        ctx = _prepare_photo_scene_context(photo_path=photo_path, width=640, height=360, kb=kb)
+        total_frames = 16
+        f_idx = 6
+        duration = 2.0
+        fps = 8
+        t_norm = f_idx / (total_frames - 1)
+
+        cpu_frame = _render_photo_frame_from_context(
+            ctx=ctx, t_norm=t_norm, f_idx=f_idx, duration=duration, fps=fps
+        )
+        # Test both auto device (MPS on Mac) and explicit CPU PyTorch fallback
+        for dev_ovr in (None, "cpu"):
+            comp = MPSPhotoCompositor(ctx=ctx, device_override=dev_ovr)
+            try:
+                batch = comp.render_batch_rgb(
+                    frame_indices=[f_idx],
+                    total_frames=total_frames,
+                    duration=duration,
+                    fps=fps,
+                )
+            finally:
+                comp.close()
+            assert batch.shape == (1, 360, 640, 3)
+            mps_frame = batch[0].numpy()
+            cpu_arr = np.asarray(cpu_frame, dtype=np.float32)
+            mae = float(np.mean(np.abs(mps_frame.astype(np.float32) - cpu_arr)))
+            assert mae < 6.0, f"Parity MAE too high ({mae:.2f}) for mode={kb.mode}, fx={kb.overlay_fx}, dev={dev_ovr}"
+
+    # Verify BrokenPipeError tears down async pipe queue cleanly without deadlocking
+    class _BrokenPipe:
+        def write(self, data: object) -> int:
+            raise BrokenPipeError("simulated downstream ffmpeg exit")
+
+    ctx_pipe = _prepare_photo_scene_context(photo_path=photo_path, width=320, height=180, kb=configs[1])
+    t0 = time.monotonic()
+    stream_photo_frames_to_pipe(
+        ctx=ctx_pipe,
+        total_frames=16,
+        duration=2.0,
+        fps=8,
+        pipe_stdin=_BrokenPipe(),  # type: ignore[arg-type]
+        batch_size=4,
+    )
+    assert (time.monotonic() - t0) < 5.0
+
+
+def test_gate10_uniform_sei_stripping_segment_baking_and_stream_copy_mux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate 10: Uniform SEI stripping, segment overlay baking filtergraph, Step 3 -c copy & Step 4 -c:v copy."""
+    import subprocess
+    from PIL import Image
+
+    from video_editing_ai import hardware
+    from video_editing_ai.models.schema import (
+        AudioTrackItem,
+        EditTimeline,
+        KenBurnsConfig,
+        TimelineSettings,
+        TitleOverlayItem,
+        TransitionConfig,
+        VisualTrackItem,
+    )
+    from video_editing_ai.renderer import ffmpeg_composer
+    from video_editing_ai.renderer.ken_burns import build_segment_overlay_filtergraph, build_uniform_mux_args
+
+    mux_args = build_uniform_mux_args(fps=30, hdr=True, v_enc_args=["-c:v", "hevc_videotoolbox"])
+    assert "-map_metadata" in mux_args and "-1" in mux_args
+    assert "-r" in mux_args and "30" in mux_args
+    if hardware.has_ffmpeg_bsf("filter_units"):
+        assert "-bsf:v" in mux_args and "filter_units=remove_types=39-40" in mux_args
+
+    b_dummy = tmp_path / "b.mp4"
+    t_dummy = tmp_path / "t.png"
+    extra_in, f_parts, out_lbl = build_segment_overlay_filtergraph(
+        base_label="[vbase]",
+        hdr=True,
+        next_input_idx=2,
+        segment_broll=[(b_dummy, 0.25, 0.75)],
+        segment_titles=[(t_dummy, 0.5, 1.0, 0.15, 0.15)],
+    )
+    assert extra_in[:2] == ["-i", str(b_dummy)]
+    assert "-loop" in extra_in and str(t_dummy) in extra_in
+    joined_fc = ";".join(f_parts)
+    assert "overlay=0:0:format=yuv420p10" in joined_fc
+    assert "between(t,0.250,1.000)" in joined_fc
+    assert "between(t,0.500,1.500)" in joined_fc
+    assert out_lbl == "[svhdr]"
+
+    # Create real micro assets: 2s H.264 clip, photo, broll photo, BGM wav
+    vid_src = tmp_path / "clip1.mov"
+    broll_src = tmp_path / "broll_card.jpg"
+    photo_src = tmp_path / "photo2.jpg"
+    bgm_src = tmp_path / "bgm.wav"
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=s=640x360:r=24:d=2.0",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2.0",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(vid_src),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=4.0",
+            "-ac", "2", str(bgm_src),
+        ],
+        check=True,
+    )
+    Image.new("RGB", (640, 360), (24, 90, 140)).save(photo_src, quality=92)
+    Image.new("RGB", (640, 360), (140, 60, 40)).save(broll_src, quality=92)
+
+    real_run = subprocess.run
+    captured_cmds: list[list[str]] = []
+
+    def _spy_run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(cmd, list) and cmd and str(cmd[0]) == "ffmpeg":
+            captured_cmds.append([str(c) for c in cmd])
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(ffmpeg_composer.subprocess, "run", _spy_run)
+
+    for hdr_flag in (False, True):
+        captured_cmds.clear()
+        out_mp4 = tmp_path / f"final_baked_{'hdr' if hdr_flag else 'sdr'}.mp4"
+        timeline = EditTimeline(
+            project_name=f"Gate10 Baked Overlays ({'HDR' if hdr_flag else 'SDR'})",
+            settings=TimelineSettings(width=640, height=360, fps=24, hdr=hdr_flag),
+            visual_track=[
+                VisualTrackItem(
+                    id="v1_01",
+                    track="V1",
+                    type="video",
+                    asset_id="vid_clip1",
+                    source=str(vid_src),
+                    source_in=0.0,
+                    source_out=1.5,
+                    timeline_start=0.0,
+                    duration=1.5,
+                    transition_out=TransitionConfig(type="none", duration=0.0),
+                ),
+                VisualTrackItem(
+                    id="v1_02",
+                    track="V1",
+                    type="photo",
+                    asset_id="img_photo2",
+                    source=str(photo_src),
+                    timeline_start=1.5,
+                    duration=1.5,
+                    ken_burns=KenBurnsConfig(mode="gallery_frame", start_zoom=1.0, end_zoom=1.08),
+                    transition_in=TransitionConfig(type="none", duration=0.0),
+                    transition_out=TransitionConfig(type="none", duration=0.0),
+                ),
+            ],
+            broll_track=[
+                VisualTrackItem(
+                    id="v2_01",
+                    track="V2",
+                    type="photo",
+                    asset_id="img_broll",
+                    source=str(broll_src),
+                    timeline_start=0.25,
+                    duration=0.75,
+                    ken_burns=KenBurnsConfig(mode="full_bleed"),
+                    transition_in=TransitionConfig(type="none", duration=0.0),
+                    transition_out=TransitionConfig(type="none", duration=0.0),
+                )
+            ],
+            title_track=[
+                TitleOverlayItem(
+                    id="t3_01",
+                    text="Baked Photo Title",
+                    style="lower_third",
+                    timeline_start=1.6,
+                    duration=1.2,
+                    fade_in=0.15,
+                    fade_out=0.15,
+                )
+            ],
+            audio_tracks=[
+                AudioTrackItem(
+                    id="bgm_01",
+                    role="music",
+                    source=str(bgm_src),
+                    timeline_start=0.0,
+                    duration=3.0,
+                    volume=0.35,
+                    duck_under_dialogue=False,
+                )
+            ],
+        )
+
+        rendered = ffmpeg_composer.render_timeline(
+            timeline=timeline,
+            output_mp4=out_mp4,
+            work_dir=tmp_path / f"work_{'hdr' if hdr_flag else 'sdr'}",
+        )
+        assert rendered["video"].exists() and rendered["video"].stat().st_size > 2048
+
+        concat_cmds = [c for c in captured_cmds if "-f" in c and "concat" in c]
+        assert concat_cmds and "-c" in concat_cmds[0] and "copy" in concat_cmds[0], (
+            f"Expected Step 3 stream-copy concat (hdr={hdr_flag}), got {concat_cmds}"
+        )
+        final_cmds = [c for c in captured_cmds if str(out_mp4.resolve()) in c]
+        assert final_cmds and "-c:v" in final_cmds[-1] and "copy" in final_cmds[-1], (
+            f"Expected Step 4 -c:v copy mux (hdr={hdr_flag}), got {final_cmds}"
+        )
+        if hdr_flag:
+            assert "-tag:v" in final_cmds[-1] and "hvc1" in final_cmds[-1]
+
+        err_check = real_run(
+            ["ffmpeg", "-v", "error", "-i", str(out_mp4), "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert err_check.returncode == 0
+        assert err_check.stderr.strip() == "", f"FFmpeg decode errors on final output (hdr={hdr_flag}): {err_check.stderr}"
+
+
+def test_gate11_parallel_dit_ingest_and_catalog_dedup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate 11: Parallel DITIngestAgent ordering, preview caching, and 0-reprobe catalog deduplication."""
+    import subprocess
+    from PIL import Image
+
+    from video_editing_ai.agents.base import PipelineBlackboard
+    from video_editing_ai.agents.dit_ingest_agent import DITIngestAgent
+    from video_editing_ai.analyzer import media_probe
+
+    media_dir = tmp_path / "media"
+    proj_dir = tmp_path / "proj"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    proj_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create deterministically named files: a_vid, b_photo, c_vid, d_photo, e_audio
+    for v_name in ("a_vid.mov", "c_vid.mov"):
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=24:d=0.6",
+                "-f", "lavfi", "-i", "sine=frequency=520:sample_rate=48000:duration=0.6",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                str(media_dir / v_name),
+            ],
+            check=True,
+        )
+    Image.new("RGB", (640, 480), (200, 140, 90)).save(media_dir / "b_photo.jpg", quality=90)
+    Image.new("RGB", (480, 640), (70, 120, 175)).save(media_dir / "d_photo.jpg", quality=90)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=1.0",
+            "-ac", "2", str(media_dir / "e_audio.wav"),
+        ],
+        check=True,
+    )
+
+    bb = PipelineBlackboard(media_dir=media_dir, project_dir=proj_dir)
+    res1 = DITIngestAgent().run(bb)
+    assert bb.dit_manifest is not None
+    assert [e.filename for e in bb.dit_manifest.entries] == [
+        "a_vid.mov",
+        "b_photo.jpg",
+        "c_vid.mov",
+        "d_photo.jpg",
+        "e_audio.wav",
+    ]
+    assert res1["cache_hits_count"] == 0 and res1["cache_misses_count"] == 5
+    photo_entries = [e for e in bb.dit_manifest.entries if e.media_type == "photo"]
+    assert all(pe.preview_path and Path(pe.preview_path).exists() for pe in photo_entries)
+
+    # Second run hits cache across all 5 files including photos
+    bb2 = PipelineBlackboard(media_dir=media_dir, project_dir=proj_dir)
+    res2 = DITIngestAgent().run(bb2)
+    assert res2["cache_hits_count"] == 5 and res2["cache_misses_count"] == 0
+
+    # Zero-reprobe verification in build_initial_catalog when dit_manifest is fresh
+    probe_calls = {"video": 0, "photo": 0, "audio": 0}
+    real_pv = media_probe.probe_video_file
+    real_ip = media_probe.inspect_photo_file
+    real_pa = media_probe.probe_audio_file
+
+    def _spy_pv(*args: Any, **kwargs: Any) -> Any:
+        probe_calls["video"] += 1
+        return real_pv(*args, **kwargs)
+
+    def _spy_ip(*args: Any, **kwargs: Any) -> Any:
+        probe_calls["photo"] += 1
+        return real_ip(*args, **kwargs)
+
+    def _spy_pa(*args: Any, **kwargs: Any) -> Any:
+        probe_calls["audio"] += 1
+        return real_pa(*args, **kwargs)
+
+    monkeypatch.setattr(media_probe, "probe_video_file", _spy_pv)
+    monkeypatch.setattr(media_probe, "inspect_photo_file", _spy_ip)
+    monkeypatch.setattr(media_probe, "probe_audio_file", _spy_pa)
+
+    catalog = media_probe.build_initial_catalog(
+        media_dir=media_dir,
+        cache_dir=proj_dir / "cache",
+        dit_manifest=bb2.dit_manifest,
+    )
+    assert probe_calls == {"video": 0, "photo": 0, "audio": 0}, f"Redundant probes occurred: {probe_calls}"
+    assert [v.filename for v in catalog.videos] == ["a_vid.mov", "c_vid.mov"]
+    assert [p.filename for p in catalog.photos] == ["b_photo.jpg", "d_photo.jpg"]
+    assert [a.filename for a in catalog.audio_files] == ["e_audio.wav"]
+    assert all(p.preview_path and Path(p.preview_path).exists() for p in catalog.photos)
+
+    # Stale photo triggers re-inspection ONLY for that modified file
+    Image.new("RGB", (642, 480), (10, 200, 120)).save(media_dir / "b_photo.jpg", quality=92)
+    catalog_stale = media_probe.build_initial_catalog(
+        media_dir=media_dir,
+        cache_dir=proj_dir / "cache",
+        dit_manifest=bb2.dit_manifest,
+    )
+    assert probe_calls == {"video": 0, "photo": 1, "audio": 0}
+    assert catalog_stale.photos[0].width == 642
