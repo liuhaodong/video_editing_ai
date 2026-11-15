@@ -477,6 +477,7 @@ class CullerAgent(BaseEditingAgent):
                 user_hint=blackboard.user_prompt,
                 extra_audio_paths=blackboard.extra_audio_paths,
                 dit_manifest=blackboard.dit_manifest,
+                skip_whisper=blackboard.skip_whisper,
             )
 
         blackboard.catalog = catalog
@@ -506,8 +507,17 @@ class CullerAgent(BaseEditingAgent):
         )
 
         # 1. Process Videos -> Multi-Moment A-Roll Quotes & B-Roll Golden Windows with Optical-Flow Stability
+        dit_ts_by_path: dict[str, str] = {}
+        if blackboard.dit_manifest is not None:
+            for de in blackboard.dit_manifest.entries:
+                if de.normalized_timestamp and de.source_path:
+                    dit_ts_by_path[str(Path(de.source_path).resolve())] = de.normalized_timestamp
         sorted_videos: list[VideoAsset] = sorted(
-            catalog.videos, key=lambda v: (v.creation_time or "", v.filename)
+            catalog.videos,
+            key=lambda v: (
+                dit_ts_by_path.get(str(Path(v.path).resolve())) or v.creation_time or "",
+                v.filename,
+            ),
         )
 
         def _precompute_vid(vid: VideoAsset) -> tuple[str, list[str], Optional[dict[str, Any]], dict[str, Any]]:

@@ -83,6 +83,7 @@ Read `ask_question_tool_payload` from `<project_dir>/library_inspection.json` an
   ```bash
   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-pipeline --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --render
   ```
+  (Pass `--no-render --fast-prep`—or `--skip-whisper` / `--skip-auto-bgm`—when preparing contracts first for interactive Antigravity curation & BGM scouting.)
 - **Option B — Mechanical Contact Sheets → AI Agent Visual Curation → Mechanical Persistence (`render-contact-sheets` & `apply-vision-curation`)**:
   1. **Mechanical Step**: Generate numbered `5x4` photo contact sheets (`contact_sheet_01.jpg`, ...) + video subclips keyframe sheet (`video_subclips_sheet.jpg`) in `<project_dir>/contact_sheets/`:
      ```bash
@@ -130,7 +131,7 @@ When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *
    ```
 
 ### Phase 5: Executive Movie Production Director Visual Screening (`render-screening-sheet` & `director-audit`) & Full 4K HDR Render (`render-video`)
-1. Render the **4x3 Multimodal Director Screening Sheet** (`<project_dir>/cache/curation/director_screening_sheet.jpg`) and inspect it via `read_file` to verify that every chapter's photo modes, burned-in museum plaques, Track V3 lower-third video captions, and transitions look cohesive:
+1. Render the **4x3 Multimodal Director Screening Sheet** (`<project_dir>/cache/curation/director_screening_sheet.jpg`) and inspect it via `read_file` to verify that every chapter's photo modes, burned-in museum plaques, Track V3 lower-third video captions, and transitions look cohesive (auto-cached by `timeline.yaml` SHA-1 unless `--force` is passed):
    ```bash
    .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-screening-sheet --project-dir "<project_dir>"
    ```

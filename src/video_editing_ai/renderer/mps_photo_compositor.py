@@ -132,7 +132,12 @@ class MPSPhotoCompositor:
             t["polaroid_2"] = self._up(ctx["polaroid_2"], "RGBA") if ctx.get("polaroid_2") is not None else None
         elif mode == "cinematic_depth_3d":
             t["depth_bg_sharp"] = self._up(ctx["depth_bg_sharp"], "RGB")
-            t["depth_bg_bokeh"] = self._up(ctx["depth_bg_bokeh"], "RGB")
+            bokeh_img = ctx["depth_bg_bokeh"]
+            bw_q = max(32, bokeh_img.width // 4)
+            bh_q = max(32, bokeh_img.height // 4)
+            t["depth_bg_bokeh_small"] = self._up(
+                bokeh_img.resize((bw_q, bh_q), Image.Resampling.BILINEAR), "RGB"
+            )
             t["depth_fg_rgba"] = self._up(ctx["depth_fg_rgba"], "RGBA")
         elif mode == "curator_loupe":
             t["loupe_dimmed"] = self._up(ctx["loupe_dimmed"], "RGB")
@@ -162,7 +167,14 @@ class MPSPhotoCompositor:
             t["mf_slide_card"] = self._up(ctx["mf_slide_card"], "RGBA")
         elif mode == "floating_tilt_plate":
             t["tilt_framed_rgba"] = self._up(ctx["tilt_framed_rgba"], "RGBA")
-            t["tilt_shadow_rgba"] = self._up(ctx["tilt_shadow_rgba"], "RGBA")
+            sh_alpha = ctx["tilt_shadow_rgba"].getchannel("A")
+            sh_orig_w, sh_orig_h = sh_alpha.size
+            sh_q_w = max(16, sh_orig_w // 4)
+            sh_q_h = max(16, sh_orig_h // 4)
+            t["tilt_shadow_orig_size"] = (sh_orig_w, sh_orig_h)
+            t["tilt_shadow_alpha_q"] = (
+                self._up(sh_alpha.resize((sh_q_w, sh_q_h), Image.Resampling.BILINEAR), "L") / 255.0
+            )
         elif mode == "criterion_atelier_split":
             at = ctx["atelier"]
             t["at_left"] = self._up(at["left_over"], "RGB")
@@ -352,6 +364,51 @@ class MPSPhotoCompositor:
         warped = warped * in_bounds.unsqueeze(0).unsqueeze(0)
         return warped.to(dtype=self.work_dtype)
 
+    def _warp_perspective_batch(
+        self,
+        src_t: torch.Tensor,
+        out_w: int,
+        out_h: int,
+        coeffs_list: list[tuple[float, ...]],
+    ) -> torch.Tensor:
+        """Vectorized batched projective homography `(1, C, H, W)` -> `(B, C, out_h, out_w)`."""
+        batch_n = len(coeffs_list)
+        if batch_n == 0:
+            return torch.empty((0, int(src_t.shape[1]), out_h, out_w), device=self.device, dtype=self.work_dtype)
+
+        _, _, src_h, src_w = src_t.shape
+        ox = (torch.arange(out_w, device=self.device, dtype=torch.float32) + 0.5).view(1, 1, out_w)
+        oy = (torch.arange(out_h, device=self.device, dtype=torch.float32) + 0.5).view(1, out_h, 1)
+
+        coeff_t = torch.tensor(coeffs_list, device=self.device, dtype=torch.float32)
+        a = coeff_t[:, 0].view(batch_n, 1, 1)
+        b = coeff_t[:, 1].view(batch_n, 1, 1)
+        c = coeff_t[:, 2].view(batch_n, 1, 1)
+        d = coeff_t[:, 3].view(batch_n, 1, 1)
+        e = coeff_t[:, 4].view(batch_n, 1, 1)
+        f = coeff_t[:, 5].view(batch_n, 1, 1)
+        g = coeff_t[:, 6].view(batch_n, 1, 1)
+        h = coeff_t[:, 7].view(batch_n, 1, 1)
+
+        denom = g * ox + h * oy + 1.0
+        denom = torch.where(denom.abs() < 1e-6, torch.full_like(denom, 1e-6), denom)
+        u = (a * ox + b * oy + c) / denom
+        v = (d * ox + e * oy + f) / denom
+
+        in_bounds = ((u >= 0.0) & (u <= float(src_w)) & (v >= 0.0) & (v <= float(src_h))).to(dtype=self.work_dtype).unsqueeze(1)
+        gx = ((2.0 / max(1, src_w)) * u - 1.0).clamp(-1.0, 1.0)
+        gy = ((2.0 / max(1, src_h)) * v - 1.0).clamp(-1.0, 1.0)
+        grid = torch.stack((gx, gy), dim=-1)
+
+        warped = F.grid_sample(
+            src_t.float().expand(batch_n, -1, -1, -1),
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        )
+        return warped.to(dtype=self.work_dtype) * in_bounds
+
     def _synthesize_base_modes(
         self,
         t_norms: list[float],
@@ -436,7 +493,11 @@ class MPSPhotoCompositor:
             bg_cxs = [0.5 - (ex - sx) * e * 0.45 for e in eased_list]
             bg_cys = [0.5 - (ey - sy) * e * 0.45 for e in eased_list]
             sharp_c = self._crop_plane_batch(tex["depth_bg_sharp"], (w, h), bg_zooms, bg_cxs, bg_cys)
-            bokeh_c = self._crop_plane_batch(tex["depth_bg_bokeh"], (w, h), bg_zooms, bg_cxs, bg_cys)
+            qw, qh = max(16, w // 4), max(16, h // 4)
+            bokeh_q = self._crop_plane_batch(tex["depth_bg_bokeh_small"], (qw, qh), bg_zooms, bg_cxs, bg_cys)
+            bokeh_c = F.interpolate(bokeh_q.float(), size=(h, w), mode="bilinear", align_corners=False).to(
+                dtype=self.work_dtype
+            )
             mix_t = torch.tensor(
                 [min(0.88, 0.30 + 0.58 * e) for e in eased_list], device=self.device, dtype=self.work_dtype
             ).view(batch_n, 1, 1, 1)
@@ -608,15 +669,18 @@ class MPSPhotoCompositor:
             cxs = [0.52 - 0.04 * e for e in eased_list]
             canvas = self._crop_plane_batch(tex["bg_plane"], (w, h), zooms, cxs, [0.50] * batch_n)
             framed_t = tex["tilt_framed_rgba"]
-            shadow_t = tex["tilt_shadow_rgba"]
+            shadow_q = tex["tilt_shadow_alpha_q"]
             fh, fw = int(framed_t.shape[2]), int(framed_t.shape[3])
-            sh_sh, sw_sh = int(shadow_t.shape[2]), int(shadow_t.shape[3])
+            sw_sh, sh_sh = tex["tilt_shadow_orig_size"]
+            sh_q_h, sh_q_w = int(shadow_q.shape[2]), int(shadow_q.shape[3])
             sh_ratio_w = sw_sh / max(1.0, float(fw))
             sh_ratio_h = sh_sh / max(1.0, float(fh))
             fg_src = [(0.0, 0.0), (float(fw), 0.0), (float(fw), float(fh)), (0.0, float(fh))]
-            sh_src = [(0.0, 0.0), (float(sw_sh), 0.0), (float(sw_sh), float(sh_sh)), (0.0, float(sh_sh))]
+            sh_src_q = [(0.0, 0.0), (float(sh_q_w), 0.0), (float(sh_q_w), float(sh_q_h)), (0.0, float(sh_q_h))]
 
-            for b, eased in enumerate(eased_list):
+            sh_geom: list[tuple[float, float, float, float, float, int, int, int, int]] = []
+            fg_geom: list[tuple[float, float, float, float, float, int, int, int, int]] = []
+            for eased in eased_list:
                 yaw_norm = 0.095 * (1.0 - 0.85 * eased)
                 s_out = 0.95 + 0.045 * eased
                 half_w = fw * s_out * (1.0 - 0.14 * abs(yaw_norm)) * 0.5
@@ -634,35 +698,75 @@ class MPSPhotoCompositor:
                 sb1 = min(w, int(math.ceil(sh_cx + sh_hw)) + 2)
                 st0 = max(0, int(math.floor(sh_cy - max(sh_hhl, sh_hhr))) - 2)
                 st1 = min(h, int(math.ceil(sh_cy + max(sh_hhl, sh_hhr))) + 2)
-                if sb1 > sb0 + 4 and st1 > st0 + 4:
-                    sh_dst = [
-                        (sh_cx - sh_hw - sb0, sh_cy - sh_hhl - st0),
-                        (sh_cx + sh_hw - sb0, sh_cy - sh_hhr - st0),
-                        (sh_cx + sh_hw - sb0, sh_cy + sh_hhr - st0),
-                        (sh_cx - sh_hw - sb0, sh_cy + sh_hhl - st0),
-                    ]
-                    sh_coeffs = _solve_perspective_coeffs(sh_dst, sh_src)
-                    sh_warped = self._warp_perspective_patch(shadow_t, sb1 - sb0, st1 - st0, sh_coeffs)
-                    a = sh_warped[:, 3:4] / 255.0
-                    roi = canvas[b : b + 1, :, st0:st1, sb0:sb1]
-                    canvas[b : b + 1, :, st0:st1, sb0:sb1] = roi * (1.0 - a) + sh_warped[:, :3] * a
+                sh_geom.append((sh_cx, sh_cy, sh_hw, sh_hhl, sh_hhr, sb0, sb1, st0, st1))
 
                 bx0 = max(0, int(math.floor(cx_out - half_w)) - 2)
                 bx1 = min(w, int(math.ceil(cx_out + half_w)) + 2)
                 by0 = max(0, int(math.floor(cy_out - max(half_h_l, half_h_r))) - 2)
                 by1 = min(h, int(math.ceil(cy_out + max(half_h_l, half_h_r))) + 2)
-                if bx1 > bx0 + 4 and by1 > by0 + 4:
-                    fg_dst = [
-                        (cx_out - half_w - bx0, cy_out - half_h_l - by0),
-                        (cx_out + half_w - bx0, cy_out - half_h_r - by0),
-                        (cx_out + half_w - bx0, cy_out + half_h_r - by0),
-                        (cx_out - half_w - bx0, cy_out + half_h_l - by0),
-                    ]
-                    fg_coeffs = _solve_perspective_coeffs(fg_dst, fg_src)
-                    fg_warped = self._warp_perspective_patch(framed_t, bx1 - bx0, by1 - by0, fg_coeffs)
+                fg_geom.append((cx_out, cy_out, half_w, half_h_l, half_h_r, bx0, bx1, by0, by1))
+
+            valid_sh = [b_i for b_i, g in enumerate(sh_geom) if g[6] > g[5] + 4 and g[8] > g[7] + 4]
+            if valid_sh:
+                s_ux0 = min(sh_geom[b_i][5] for b_i in valid_sh)
+                s_ux1 = max(sh_geom[b_i][6] for b_i in valid_sh)
+                s_uy0 = min(sh_geom[b_i][7] for b_i in valid_sh)
+                s_uy1 = max(sh_geom[b_i][8] for b_i in valid_sh)
+                s_uw, s_uh = s_ux1 - s_ux0, s_uy1 - s_uy0
+                if s_uw > 4 and s_uh > 4:
+                    qs_w, qs_h = max(8, s_uw // 4), max(8, s_uh // 4)
+                    sx_q, sy_q = qs_w / float(s_uw), qs_h / float(s_uh)
+                    sh_coeffs_list: list[tuple[float, ...]] = []
+                    for b_i in valid_sh:
+                        sh_cx, sh_cy, sh_hw, sh_hhl, sh_hhr, _, _, _, _ = sh_geom[b_i]
+                        sh_dst_q = [
+                            ((sh_cx - sh_hw - s_ux0) * sx_q, (sh_cy - sh_hhl - s_uy0) * sy_q),
+                            ((sh_cx + sh_hw - s_ux0) * sx_q, (sh_cy - sh_hhr - s_uy0) * sy_q),
+                            ((sh_cx + sh_hw - s_ux0) * sx_q, (sh_cy + sh_hhr - s_uy0) * sy_q),
+                            ((sh_cx - sh_hw - s_ux0) * sx_q, (sh_cy + sh_hhl - s_uy0) * sy_q),
+                        ]
+                        sh_coeffs_list.append(_solve_perspective_coeffs(sh_dst_q, sh_src_q))
+                    sh_warped_q = self._warp_perspective_batch(shadow_q, qs_w, qs_h, sh_coeffs_list)
+                    sh_alpha = F.interpolate(
+                        sh_warped_q.float(), size=(s_uh, s_uw), mode="bilinear", align_corners=False
+                    ).to(dtype=self.work_dtype)
+                    if len(valid_sh) == batch_n:
+                        canvas[:, :, s_uy0:s_uy1, s_ux0:s_ux1] = (
+                            canvas[:, :, s_uy0:s_uy1, s_ux0:s_ux1] * (1.0 - sh_alpha)
+                        )
+                    else:
+                        idx_t = torch.tensor(valid_sh, device=self.device, dtype=torch.long)
+                        canvas[idx_t, :, s_uy0:s_uy1, s_ux0:s_ux1] = (
+                            canvas[idx_t, :, s_uy0:s_uy1, s_ux0:s_ux1] * (1.0 - sh_alpha)
+                        )
+
+            valid_fg = [b_i for b_i, g in enumerate(fg_geom) if g[6] > g[5] + 4 and g[8] > g[7] + 4]
+            if valid_fg:
+                f_ux0 = min(fg_geom[b_i][5] for b_i in valid_fg)
+                f_ux1 = max(fg_geom[b_i][6] for b_i in valid_fg)
+                f_uy0 = min(fg_geom[b_i][7] for b_i in valid_fg)
+                f_uy1 = max(fg_geom[b_i][8] for b_i in valid_fg)
+                f_uw, f_uh = f_ux1 - f_ux0, f_uy1 - f_uy0
+                if f_uw > 4 and f_uh > 4:
+                    fg_coeffs_list: list[tuple[float, ...]] = []
+                    for b_i in valid_fg:
+                        cx_out, cy_out, half_w, half_h_l, half_h_r, _, _, _, _ = fg_geom[b_i]
+                        fg_dst = [
+                            (cx_out - half_w - f_ux0, cy_out - half_h_l - f_uy0),
+                            (cx_out + half_w - f_ux0, cy_out - half_h_r - f_uy0),
+                            (cx_out + half_w - f_ux0, cy_out + half_h_r - f_uy0),
+                            (cx_out - half_w - f_ux0, cy_out + half_h_l - f_uy0),
+                        ]
+                        fg_coeffs_list.append(_solve_perspective_coeffs(fg_dst, fg_src))
+                    fg_warped = self._warp_perspective_batch(framed_t, f_uw, f_uh, fg_coeffs_list)
                     a = fg_warped[:, 3:4] / 255.0
-                    roi = canvas[b : b + 1, :, by0:by1, bx0:bx1]
-                    canvas[b : b + 1, :, by0:by1, bx0:bx1] = roi * (1.0 - a) + fg_warped[:, :3] * a
+                    if len(valid_fg) == batch_n:
+                        roi = canvas[:, :, f_uy0:f_uy1, f_ux0:f_ux1]
+                        canvas[:, :, f_uy0:f_uy1, f_ux0:f_ux1] = roi * (1.0 - a) + fg_warped[:, :3] * a
+                    else:
+                        idx_t = torch.tensor(valid_fg, device=self.device, dtype=torch.long)
+                        roi = canvas[idx_t, :, f_uy0:f_uy1, f_ux0:f_ux1]
+                        canvas[idx_t, :, f_uy0:f_uy1, f_ux0:f_ux1] = roi * (1.0 - a) + fg_warped[:, :3] * a
             return canvas
 
         if mode == "criterion_atelier_split":
@@ -846,6 +950,7 @@ class MPSPhotoCompositor:
         small_w = max(16, pw // 4)
         small_h = max(16, ph // 4)
 
+        active: list[tuple[int, int, int, float]] = []
         for b, f_idx in enumerate(frame_indices):
             t_sec = f_idx / max(1.0, float(fps))
             rem_sec = max(0.0, duration - t_sec)
@@ -858,9 +963,26 @@ class MPSPhotoCompositor:
             slide_y = int(round((1.0 - entry_prog) * 16.0 * self.scale_factor))
             dst_x = max(0, min(self.width - pw, card_x))
             dst_y = max(0, min(self.height - ph, card_y + slide_y))
+            active.append((b, dst_x, dst_y, alpha_mult))
 
-            patch = canvas[b : b + 1, :, dst_y : dst_y + ph, dst_x : dst_x + pw]
-            small = F.interpolate(patch.float(), size=(small_h, small_w), mode="bilinear", align_corners=False)
+        idx = 0
+        n_active = len(active)
+        while idx < n_active:
+            b_start, dst_x, dst_y, _ = active[idx]
+            end_idx = idx + 1
+            while (
+                end_idx < n_active
+                and active[end_idx][0] == active[end_idx - 1][0] + 1
+                and active[end_idx][1] == dst_x
+                and active[end_idx][2] == dst_y
+            ):
+                end_idx += 1
+            b_end = active[end_idx - 1][0] + 1
+            alphas = [active[j][3] for j in range(idx, end_idx)]
+            k = b_end - b_start
+
+            patches = canvas[b_start:b_end, :, dst_y : dst_y + ph, dst_x : dst_x + pw]
+            small = F.interpolate(patches.float(), size=(small_h, small_w), mode="bilinear", align_corners=False)
             blurred_small = self._gaussian_blur_2d(small.to(dtype=self.work_dtype), sigma=5.0)
             blurred = F.interpolate(
                 blurred_small.float(), size=(ph, pw), mode="bilinear", align_corners=False
@@ -869,8 +991,19 @@ class MPSPhotoCompositor:
             frosted = blurred * 0.42 + dark_tint * 0.58
             frosted = frosted * fg_inv_a + fg_premul
 
-            eff_mask = card_mask if alpha_mult >= 0.98 else (card_mask * alpha_mult)
-            canvas[b : b + 1, :, dst_y : dst_y + ph, dst_x : dst_x + pw] = patch * (1.0 - eff_mask) + frosted * eff_mask
+            if all(am >= 0.98 for am in alphas):
+                eff_mask: torch.Tensor = card_mask
+            else:
+                am_t = torch.tensor(
+                    [1.0 if am >= 0.98 else am for am in alphas],
+                    device=self.device,
+                    dtype=self.work_dtype,
+                ).view(k, 1, 1, 1)
+                eff_mask = card_mask * am_t
+            canvas[b_start:b_end, :, dst_y : dst_y + ph, dst_x : dst_x + pw] = (
+                patches * (1.0 - eff_mask) + frosted * eff_mask
+            )
+            idx = end_idx
 
         return canvas
 
@@ -964,10 +1097,15 @@ def stream_photo_frames_to_pipe(
     writer.start()
 
     try:
-        for start_idx in range(0, total_frames, max(1, batch_size)):
+        eff_batch = (
+            min(batch_size, 4)
+            if int(ctx.get("width", 0)) >= 3840 and batch_size >= 8
+            else max(1, batch_size)
+        )
+        for start_idx in range(0, total_frames, eff_batch):
             if stop_event.is_set():
                 break
-            batch_indices = list(range(start_idx, min(total_frames, start_idx + max(1, batch_size))))
+            batch_indices = list(range(start_idx, min(total_frames, start_idx + eff_batch)))
             batch_u8 = comp.render_batch_rgb(
                 frame_indices=batch_indices,
                 total_frames=total_frames,

@@ -20,12 +20,14 @@ workflow:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any
+import time
+from typing import Any, Optional
 
 # Resolve repository src/ path whether invoked from workspace .agent/skills/ or global ~/.gemini/config/skills/
 def _resolve_workspace_root() -> Path:
@@ -315,6 +317,9 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
         },
     )
 
+    skip_whisper = bool(getattr(args, "skip_whisper", False) or getattr(args, "fast_prep", False))
+    skip_auto_bgm = bool(getattr(args, "skip_auto_bgm", False) or getattr(args, "fast_prep", False))
+
     bb = run_multi_agent_pipeline(
         media_dir=media_dir,
         project_dir=project_dir,
@@ -328,6 +333,8 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
         hdr=args.hdr,
         use_antigravity=bool(getattr(args, "use_antigravity", False)),
         render_video=args.render,
+        skip_whisper=skip_whisper,
+        skip_auto_bgm=skip_auto_bgm,
     )
 
     dr = bb.director_review
@@ -373,10 +380,12 @@ def cmd_director_audit(args: argparse.Namespace) -> int:
     bb.save_snapshot()
 
     out_path = Path(args.output).resolve() if args.output else (project_dir / "director_review.json")
+    sheet_path = project_dir / "cache" / "curation" / "director_screening_sheet.jpg"
+    sheet_line = f"\nScreening sheet: {sheet_path}" if sheet_path.exists() else ""
     print(
         f"Success! Executive Director Audit Complete: Grade {result.get('quality_grade')} "
         f"({result.get('overall_quality_score')}/10).\n"
-        f"Report written to: {out_path}"
+        f"Report written to: {out_path}{sheet_line}"
     )
     return 0
 
@@ -390,42 +399,65 @@ def cmd_render_video(args: argparse.Namespace) -> int:
 
     timeline = EditTimeline.from_yaml(tl_path)
     out_mp4 = Path(args.output_mp4).resolve() if args.output_mp4 else (project_dir / "final_story.mp4")
-    outputs = render_timeline(timeline, out_mp4, work_dir=project_dir / "render_cache")
+    last_cb: list[tuple[str, int]] = [("", -1)]
+
+    def _live_progress(msg: str, frac: float) -> None:
+        pct = max(0, min(100, int(round(float(frac) * 100.0))))
+        if (msg, pct) != last_cb[0]:
+            last_cb[0] = (msg, pct)
+            print(f"[{time.strftime('%H:%M:%S')}] [{pct:3d}%] {msg}", flush=True)
+
+    outputs = render_timeline(
+        timeline,
+        out_mp4,
+        work_dir=project_dir / "render_cache",
+        progress_callback=_live_progress,
+    )
     export_all_nle_formats(timeline, project_dir)
 
     extracted_frames: list[str] = []
     if args.extract_frames and out_mp4.exists():
         frames_dir = project_dir / "verification_frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
+        ts_list: list[float] = []
         for raw_ts in args.extract_frames.split(","):
             raw_ts = raw_ts.strip()
             if not raw_ts:
                 continue
             try:
-                ts = float(raw_ts)
-                jpg_path = frames_dir / f"verify_{int(ts):03d}s.jpg"
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-ss",
-                        str(ts),
-                        "-i",
-                        str(out_mp4),
-                        "-frames:v",
-                        "1",
-                        "-q:v",
-                        "2",
-                        str(jpg_path),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                if jpg_path.exists():
-                    extracted_frames.append(str(jpg_path))
+                ts_list.append(float(raw_ts))
             except ValueError:
                 pass
+
+        def _extract_one(ts: float) -> Optional[str]:
+            jpg_path = frames_dir / f"verify_{int(ts):03d}s.jpg"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    str(ts),
+                    "-i",
+                    str(out_mp4),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    str(jpg_path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return str(jpg_path) if jpg_path.exists() else None
+
+        if len(ts_list) > 1:
+            with ThreadPoolExecutor(max_workers=min(4, len(ts_list))) as ex:
+                extracted_frames = [p for p in ex.map(_extract_one, ts_list) if p is not None]
+        elif ts_list:
+            one_p = _extract_one(ts_list[0])
+            if one_p is not None:
+                extracted_frames = [one_p]
 
     print(
         f"Success! Rendered video to: {outputs['video']}\n"
@@ -908,7 +940,11 @@ def cmd_apply_timeline_intelligence(args: argparse.Namespace) -> int:
 def cmd_render_screening_sheet(args: argparse.Namespace) -> int:
     """Mechanically render the 4x3 Multimodal Director Screening Sheet for AI visual quality inspection."""
     proj = Path(args.project_dir).resolve()
-    sheet_path = render_director_screening_sheet(proj, max_tiles=args.max_tiles)
+    sheet_path = render_director_screening_sheet(
+        proj,
+        max_tiles=args.max_tiles,
+        force=bool(getattr(args, "force", False)),
+    )
     if args.output:
         import shutil
 
@@ -990,6 +1026,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--no-render", dest="render", action="store_false", help="Skip MP4 render (contracts + timeline only)")
     p_pipe.add_argument("--antigravity-sdk", dest="use_antigravity", action="store_true", default=False, help="Enable nested Google Antigravity SDK escalation inside sub-agents")
     p_pipe.add_argument("--no-antigravity-sdk", dest="use_antigravity", action="store_false", help="Skip nested Antigravity SDK calls (default when orchestrated interactively by Antigravity)")
+    p_pipe.add_argument("--skip-whisper", action="store_true", default=False, help="Skip local Whisper speech transcription during prep")
+    p_pipe.add_argument("--skip-auto-bgm", action="store_true", default=False, help="Skip online BGM scouting/synthesis during prep (use synthetic beat grid until scout-bgm/apply-bgm-plan)")
+    p_pipe.add_argument("--fast-prep", action="store_true", default=False, help="Enable both --skip-whisper and --skip-auto-bgm for rapid structural prep")
     p_pipe.add_argument("--output", default=None, help="Output summary JSON path")
     p_pipe.set_defaults(func=cmd_run_pipeline)
 
@@ -1220,6 +1259,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_rss.add_argument("--project-dir", required=True, help="Project workspace directory")
     p_rss.add_argument("--max-tiles", type=int, default=12, help="Number of timeline cuts to sample (default 12)")
+    p_rss.add_argument("--force", action="store_true", default=False, help="Force re-render even if timeline SHA-1 matches cached screening sheet")
     p_rss.add_argument("--output", default=None, help="Optional output JPEG path")
     p_rss.set_defaults(func=cmd_render_screening_sheet)
 

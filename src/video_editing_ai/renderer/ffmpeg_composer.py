@@ -116,7 +116,11 @@ def _concat_segments_safe(
         shutil.copy2(segment_files[0], output_mp4)
         return output_mp4
 
-    sigs = [_probe_video_extradata_sig(p) for p in segment_files]
+    if len(segment_files) > 2:
+        with ThreadPoolExecutor(max_workers=min(8, get_io_worker_count(8), len(segment_files))) as ex:
+            sigs = list(ex.map(_probe_video_extradata_sig, segment_files))
+    else:
+        sigs = [_probe_video_extradata_sig(p) for p in segment_files]
     uniform_extradata = len(set(sigs)) == 1 and bool(sigs[0][0]) and bool(sigs[0][1])
 
     if uniform_extradata:

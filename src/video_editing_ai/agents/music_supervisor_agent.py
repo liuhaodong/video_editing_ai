@@ -730,6 +730,46 @@ class MusicSupervisorAgent(BaseEditingAgent):
         user_bgm: Optional[Path] = blackboard.extra_audio_paths[0] if blackboard.extra_audio_paths else None
         rejected_reason: Optional[str] = None
 
+        if blackboard.skip_auto_bgm and (user_bgm is None or not user_bgm.exists()):
+            report = BGMSelectionReport(
+                project_title=brief.project_title if brief else "Family_Travel_Story",
+                target_mood_profile=target_profile,
+                selected_track_path="",
+                track_title="Deferred to Interactive BGM Suite (scout-bgm / apply-bgm-plan)",
+                composer_or_artist="Deferred",
+                license_info="Pending Selection",
+                mood_match_score=8.0,
+                selection_rationale="Auto-BGM scouting skipped (--skip-auto-bgm / --fast-prep); awaiting interactive BGM selection.",
+                candidates=[],
+            )
+            out_path = blackboard.project_dir / "bgm_selection.json"
+            report.to_json_file(out_path)
+            blackboard.bgm_selection = report
+            blackboard.emit_activity(
+                self.role_id,
+                f"Skipped auto-BGM scouting (--skip-auto-bgm) for profile '{target_profile}'",
+                detail="AudioVibeAgent will use deterministic beat grid until apply-bgm-plan runs.",
+            )
+            blackboard.send_message(
+                sender_role=self.role_id,
+                recipient_role="audio_vibe",
+                message_type="handoff",
+                subject="BGM deferred (--skip-auto-bgm); synthetic beat grid active",
+                payload={
+                    "selected_track_path": "",
+                    "track_title": report.track_title,
+                    "target_mood_profile": report.target_mood_profile,
+                    "skipped_auto_bgm": True,
+                },
+            )
+            return {
+                "bgm_selection_path": str(out_path),
+                "selected_track_title": report.track_title,
+                "selected_track_path": "",
+                "mood_match_score": report.mood_match_score,
+                "skipped_auto_bgm": True,
+            }
+
         force_swap = any(
             m.message_type == "director_directive" and m.payload.get("swap_mismatched_bgm")
             for m in blackboard.get_messages_for(self.role_id)

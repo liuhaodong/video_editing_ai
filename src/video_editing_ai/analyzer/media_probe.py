@@ -435,39 +435,73 @@ def _estimate_focal_point(img: Image.Image) -> tuple[float, float]:
     return (0.5, 0.5)
 
 
+def _normalize_exif_tz_offset(raw_offset: object) -> Optional[str]:
+    if raw_offset is None:
+        return None
+    txt = str(raw_offset).strip()
+    if not txt:
+        return None
+    if txt.upper() == "Z":
+        return "Z"
+    m_off = re.match(r"^([+-])(\d{2}):?(\d{2})$", txt)
+    if m_off:
+        return f"{m_off.group(1)}{m_off.group(2)}:{m_off.group(3)}"
+    return None
+
+
 def _extract_exif_datetime(img: Image.Image, photo_path: Optional[Path] = None) -> Optional[str]:
     raw_dt: Optional[str] = None
+    raw_offset: object = None
     try:
         exif = img.getexif()
         if exif:
-            # 1. Check EXIF Sub-IFD (0x8769) for DateTimeOriginal (36867) or DateTimeDigitized (36868)
+            exif_ifd = None
             try:
                 exif_ifd = exif.get_ifd(0x8769)
-                if exif_ifd:
-                    raw_dt = exif_ifd.get(36867) or exif_ifd.get(36868)
             except Exception:
-                pass
-            # 2. Fallback to top-level DateTimeOriginal (36867) or DateTime (306)
+                exif_ifd = None
+
+            # 1. Check EXIF Sub-IFD (0x8769) for DateTimeOriginal (36867) or DateTimeDigitized (36868)
+            if exif_ifd:
+                if exif_ifd.get(36867):
+                    raw_dt = str(exif_ifd.get(36867))
+                    raw_offset = exif_ifd.get(36881) or exif_ifd.get(36880) or exif.get(36881) or exif.get(36880)
+                elif exif_ifd.get(36868):
+                    raw_dt = str(exif_ifd.get(36868))
+                    raw_offset = exif_ifd.get(36882) or exif_ifd.get(36880) or exif.get(36882) or exif.get(36880)
+
+            # 2. Fallback to top-level DateTimeOriginal (36867), DateTimeDigitized (36868), or DateTime (306)
             if not raw_dt:
-                for tag_id in (36867, 36868, 306):
+                for tag_id, off_tags in ((36867, (36881, 36880)), (36868, (36882, 36880)), (306, (36880,))):
                     if exif.get(tag_id):
                         raw_dt = str(exif.get(tag_id))
+                        for o_tag in off_tags:
+                            raw_offset = (exif_ifd.get(o_tag) if exif_ifd else None) or exif.get(o_tag)
+                            if raw_offset:
+                                break
                         break
     except Exception:
         pass
 
     if raw_dt:
         cleaned = str(raw_dt).strip()
+        tail_tz = _normalize_exif_tz_offset(cleaned[19:]) if len(cleaned) > 19 else None
         # Normalize EXIF "YYYY:MM:DD HH:MM:SS" -> ISO "YYYY-MM-DDTHH:MM:SS"
         if len(cleaned) >= 19 and cleaned[4] == ":" and cleaned[7] == ":":
             cleaned = f"{cleaned[:4]}-{cleaned[5:7]}-{cleaned[8:10]}T{cleaned[11:19]}"
+        tz_suffix = tail_tz or _normalize_exif_tz_offset(raw_offset)
+        if tz_suffix and not (cleaned.endswith("Z") or "+" in cleaned[10:] or "-" in cleaned[10:]):
+            cleaned = f"{cleaned}{tz_suffix}"
         return cleaned
 
     if photo_path is not None:
         m = re.search(r"(20\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", photo_path.stem)
         if m:
             y, mo, d, hh, mm, ss = m.groups()
-            return f"{y}-{mo}-{d}T{hh}:{mm}:{ss}"
+            iso = f"{y}-{mo}-{d}T{hh}:{mm}:{ss}"
+            if photo_path.stem.upper().startswith("PXL_"):
+                iso = f"{iso}Z"
+            return iso
     return None
 
 

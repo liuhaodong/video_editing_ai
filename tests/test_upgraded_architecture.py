@@ -2307,3 +2307,210 @@ def test_gate14_antigravity_primary_workflow_sdk_and_global_skill(
     assert help_proc.returncode == 0, f"Global skill CLI failed: {help_proc.stderr}"
 
 
+def test_gate15_performance_and_chronology_optimizations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate 15: MPS parity for depth/tilt/frosted cards, prebuffered render, EXIF TZ UTC sync, Director cache, and fast-prep flags."""
+    from concurrent.futures import ThreadPoolExecutor
+    import subprocess
+    from PIL import Image, ImageDraw
+
+    from video_editing_ai.agents.base import PipelineBlackboard
+    from video_editing_ai.agents.director_agent import ProductionDirectorAgent, render_director_screening_sheet
+    from video_editing_ai.agents.dit_ingest_agent import DITIngestAgent
+    from video_editing_ai.agents.orchestrator import run_multi_agent_pipeline
+    from video_editing_ai.analyzer import media_probe
+    from video_editing_ai.models.schema import (
+        CreativeBrief,
+        EditTimeline,
+        KenBurnsConfig,
+        TimelineSettings,
+        VisualTrackItem,
+    )
+    from video_editing_ai.renderer import ken_burns
+    from video_editing_ai.renderer.mps_photo_compositor import MPSPhotoCompositor
+
+    # 1. MPSPhotoCompositor parity (<6.0 MAE) for optimized floating_tilt_plate, cinematic_depth_3d, & batched frosted card
+    photo_path = tmp_path / "gate15_photo.jpg"
+    im = Image.new("RGB", (960, 720), (30, 46, 68))
+    dr = ImageDraw.Draw(im)
+    for y in range(0, 720, 4):
+        c = int(35 + 180 * (y / 720.0))
+        dr.line([(0, y), (960, y)], fill=(c, 95 + c // 4, 200 - c // 3), width=4)
+    dr.rectangle([200, 130, 760, 580], fill=(214, 186, 152), outline=(40, 32, 24), width=8)
+    dr.ellipse([360, 210, 600, 450], fill=(185, 68, 54))
+    im.save(photo_path, quality=95)
+
+    for mode in ("floating_tilt_plate", "cinematic_depth_3d"):
+        kb = KenBurnsConfig(
+            mode=mode,
+            start_zoom=1.0,
+            end_zoom=1.15,
+            focal_x=0.50,
+            focal_y=0.45,
+            overlay_fx="none",
+            caption_title="Gate 15 Parity",
+            caption_subtitle="Batched Tilt & Depth",
+            date_badge="2026-09-13",
+        )
+        ctx = ken_burns._prepare_photo_scene_context(photo_path=photo_path, width=640, height=360, kb=kb)
+        total_frames = 45
+        duration = 1.5
+        fps = 30
+        frame_indices = [8, 30, 31]  # sliding card + contiguous steady-state run
+
+        for dev_ovr in (None, "cpu"):
+            comp = MPSPhotoCompositor(ctx=ctx, device_override=dev_ovr)
+            try:
+                batch = comp.render_batch_rgb(
+                    frame_indices=frame_indices,
+                    total_frames=total_frames,
+                    duration=duration,
+                    fps=fps,
+                )
+            finally:
+                comp.close()
+            assert batch.shape == (len(frame_indices), 360, 640, 3)
+            for b_i, f_idx in enumerate(frame_indices):
+                cpu_frame = ken_burns._render_photo_frame_from_context(
+                    ctx=ctx,
+                    t_norm=f_idx / max(1, total_frames - 1),
+                    f_idx=f_idx,
+                    duration=duration,
+                    fps=fps,
+                )
+                mae = float(np.mean(np.abs(batch[b_i].numpy().astype(np.float32) - np.asarray(cpu_frame, dtype=np.float32))))
+                assert mae < 6.0, f"Gate 15 parity MAE {mae:.2f} >= 6.0 for mode={mode}, f_idx={f_idx}, dev={dev_ovr}"
+
+    # 2. Pre-buffered concurrent render_photo_clip (two clips in parallel, no deadlock/semaphore leak)
+    def _render_micro(idx: int) -> Path:
+        out_p = tmp_path / f"micro_{idx}.mp4"
+        return ken_burns.render_photo_clip(
+            photo_path=photo_path,
+            output_mp4=out_p,
+            duration=0.4,
+            width=320,
+            height=180,
+            fps=10,
+            hdr=True,
+            ken_burns=KenBurnsConfig(mode="floating_tilt_plate", overlay_fx="none"),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outs = list(pool.map(_render_micro, [0, 1]))
+    for op in outs:
+        assert op.exists() and op.stat().st_size > 1024
+        chk = subprocess.run(["ffmpeg", "-v", "error", "-i", str(op), "-f", "null", "-"], capture_output=True, text=True, check=False)
+        assert chk.returncode == 0 and chk.stderr.strip() == ""
+    assert ken_burns._PHOTO_PREBUFFER_SEM._value == 2
+
+    # 3. EXIF OffsetTimeOriginal multi-camera UTC normalization
+    exif_dir = tmp_path / "exif_cams"
+    exif_dir.mkdir(parents=True, exist_ok=True)
+
+    p_apple = exif_dir / "IMG_8198.jpg"
+    ex_apple = Image.Exif()
+    ex_apple[271] = "Apple"
+    ex_apple[272] = "iPhone 16 Pro"
+    ex_apple[36867] = "2026:09:13 12:07:47"
+    ex_apple[36881] = "-07:00"
+    im.resize((320, 240)).save(p_apple, exif=ex_apple, quality=85)
+
+    p_sony = exif_dir / "_DSC5086.jpg"
+    ex_sony = Image.Exif()
+    ex_sony[271] = "SONY"
+    ex_sony[272] = "ILCE-7CM2"
+    ex_sony[36867] = "2026:09:13 20:33:22"
+    ex_sony[36881] = "+01:00"
+    im.resize((320, 240)).save(p_sony, exif=ex_sony, quality=85)
+
+    with Image.open(p_apple) as ia:
+        assert media_probe._extract_exif_datetime(ia, p_apple) == "2026-09-13T12:07:47-07:00"
+    with Image.open(p_sony) as isony:
+        assert media_probe._extract_exif_datetime(isony, p_sony) == "2026-09-13T20:33:22+01:00"
+
+    dit_proj = tmp_path / "dit_tz_proj"
+    bb_dit = PipelineBlackboard(media_dir=exif_dir, project_dir=dit_proj)
+    DITIngestAgent().run(bb_dit)
+    assert bb_dit.dit_manifest is not None
+    by_name = {e.filename: e for e in bb_dit.dit_manifest.entries}
+    assert by_name["IMG_8198.jpg"].normalized_timestamp.startswith("2026-09-13T19:07:47")
+    assert by_name["_DSC5086.jpg"].normalized_timestamp.startswith("2026-09-13T19:33:22")
+    for off_sec in bb_dit.dit_manifest.camera_clock_offsets_sec.values():
+        assert off_sec == 0.0
+
+    # 4. ProductionDirectorAgent preserves intentionally blank caption_title="" & caches screening sheet
+    dir_proj = tmp_path / "dir_proj"
+    dir_proj.mkdir(parents=True, exist_ok=True)
+    bb_dir = PipelineBlackboard(media_dir=exif_dir, project_dir=dir_proj, use_antigravity=False)
+    bb_dir.creative_brief = CreativeBrief(
+        project_title="Gate 15 Director Test",
+        raw_user_prompt="Test",
+        narrative_style="family_keepsake_4act",
+        photo_mode="parallax_gallery",
+        target_duration_sec=30.0,
+    )
+    bb_dir.timeline = EditTimeline(
+        project_name="Gate 15 Director",
+        settings=TimelineSettings(width=640, height=360, fps=24, hdr=False),
+        visual_track=[
+            VisualTrackItem(
+                id="c1",
+                track="V1",
+                type="photo",
+                asset_id="a1",
+                source=str(p_apple),
+                timeline_start=0.0,
+                duration=3.0,
+                ken_burns=KenBurnsConfig(mode="full_bleed", caption_title="", caption_subtitle=""),
+            ),
+            VisualTrackItem(
+                id="c2",
+                track="V1",
+                type="photo",
+                asset_id="a2",
+                source=str(p_sony),
+                timeline_start=3.0,
+                duration=3.0,
+                ken_burns=KenBurnsConfig(mode="parallax_gallery", caption_title="IMG_8198", caption_subtitle=""),
+            ),
+        ],
+    )
+    ProductionDirectorAgent().run(bb_dir)
+    assert bb_dir.timeline.visual_track[0].ken_burns is not None
+    assert bb_dir.timeline.visual_track[0].ken_burns.caption_title == ""
+    assert bb_dir.timeline.visual_track[1].ken_burns is not None
+    assert bb_dir.timeline.visual_track[1].ken_burns.caption_title.startswith("Curated Keepsake Plate #")
+
+    sheet_1 = render_director_screening_sheet(dir_proj)
+    mtime_1 = sheet_1.stat().st_mtime_ns
+    sheet_2 = render_director_screening_sheet(dir_proj)
+    assert sheet_2.stat().st_mtime_ns == mtime_1
+    sheet_3 = render_director_screening_sheet(dir_proj, force=True)
+    assert sheet_3.stat().st_mtime_ns != mtime_1
+
+    # 5. Fast-prep flags (--skip-whisper + --skip-auto-bgm) complete end-to-end contracts cleanly
+    fast_proj = tmp_path / "fast_prep_proj"
+    bb_fast = run_multi_agent_pipeline(
+        media_dir=exif_dir,
+        project_dir=fast_proj,
+        user_prompt="Quick prep test",
+        interview_answers={"target_duration_sec": "30", "photo_mode": "parallax_gallery"},
+        width=640,
+        height=360,
+        fps=24,
+        hdr=False,
+        use_antigravity=False,
+        render_video=False,
+        export_fcpxml=False,
+        skip_whisper=True,
+        skip_auto_bgm=True,
+    )
+    assert bb_fast.bgm_selection is not None
+    assert bb_fast.bgm_selection.selected_track_path == ""
+    assert (fast_proj / "bgm_selection.json").exists()
+    assert (fast_proj / "beat_grid.json").exists()
+    assert (fast_proj / "timeline.yaml").exists()
+
+
+

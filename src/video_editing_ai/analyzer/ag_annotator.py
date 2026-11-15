@@ -332,6 +332,7 @@ def analyze_media_directory(
     user_hint: str = "",
     extra_audio_paths: Optional[list[str | Path]] = None,
     dit_manifest: Optional[DITIngestManifest] = None,
+    skip_whisper: bool = False,
 ) -> MediaCatalog:
     """Full Step 1 pipeline: probe media, extract keyframes & previews, transcribe dialogues, and annotate."""
     proj_path = Path(project_dir).resolve()
@@ -342,11 +343,12 @@ def analyze_media_directory(
         extra_audio_paths=extra_audio_paths,
         dit_manifest=dit_manifest,
     )
-    catalog = transcribe_catalog_videos(
-        catalog,
-        model_size=whisper_model,
-        language=language,
-    )
+    if not skip_whisper:
+        catalog = transcribe_catalog_videos(
+            catalog,
+            model_size=whisper_model,
+            language=language,
+        )
     catalog = enrich_catalog_with_antigravity(
         catalog,
         user_hint=user_hint,

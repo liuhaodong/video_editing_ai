@@ -80,6 +80,8 @@ class PipelineBlackboard:
         use_antigravity: bool = True,
         whisper_model: str = "small",
         max_revisions: int = 2,
+        skip_whisper: bool = False,
+        skip_auto_bgm: bool = False,
     ) -> None:
         self.media_dir = Path(media_dir).resolve()
         self.project_dir = Path(project_dir).resolve()
@@ -93,6 +95,8 @@ class PipelineBlackboard:
         self.hdr = hdr
         self.use_antigravity = use_antigravity
         self.whisper_model = whisper_model
+        self.skip_whisper = bool(skip_whisper)
+        self.skip_auto_bgm = bool(skip_auto_bgm)
 
         # Standard typed contracts
         self.catalog: Optional[MediaCatalog] = None

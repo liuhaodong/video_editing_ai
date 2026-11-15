@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any, Optional
 
 from ..analyzer.media_probe import (
@@ -30,7 +31,7 @@ def _parse_iso_dt(raw: Optional[str]) -> tuple[Optional[datetime], bool]:
     if not txt:
         return None, False
     had_tz = txt.endswith("Z") or ("+" in txt[10:]) or ("-" in txt[10:])
-    norm = txt.replace("Z", "+00:00")
+    norm = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", txt.replace("Z", "+00:00"))
     for fmt in (None, "%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
             if fmt is None:
@@ -134,7 +135,7 @@ class DITIngestAgent(BaseEditingAgent):
             ext = f.suffix.lower()
             resolved_str = str(f.resolve())
             size_b, mtime_ns, f_hash = compute_file_fingerprint(f)
-            cache_key = f"{resolved_str}|{size_b}|{mtime_ns}|{f_hash}"
+            cache_key = f"v2|{resolved_str}|{size_b}|{mtime_ns}|{f_hash}"
 
             cached_payload = disk_cache.get(cache_key)
             if isinstance(cached_payload, dict):

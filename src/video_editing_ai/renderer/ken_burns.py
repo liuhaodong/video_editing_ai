@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import threading
 from typing import Any, Optional
 
 import numpy as np
@@ -766,8 +767,8 @@ def _build_subject_depth_layers(
     small_w, small_h = max(32, bg_w // 4), max(32, bg_h // 4)
     small_rgb = bg_sharp.resize((small_w, small_h), Image.Resampling.BILINEAR)
     bokeh_small = small_rgb.filter(ImageFilter.GaussianBlur(radius=max(8, int(round(12 * scale_factor)))))
+    bokeh_small = Image.blend(bokeh_small, Image.new("RGB", (small_w, small_h), (8, 11, 20)), 0.28)
     bg_bokeh = bokeh_small.resize((bg_w, bg_h), Image.Resampling.BILINEAR)
-    bg_bokeh = Image.blend(bg_bokeh, Image.new("RGB", (bg_w, bg_h), (8, 11, 20)), 0.28)
 
     # Saliency + radial focal-point depth mask at 1/4 resolution
     gray_small = small_rgb.convert("L")
@@ -2564,6 +2565,10 @@ def build_segment_overlay_filtergraph(
     return extra_inputs, filter_parts, cur_v
 
 
+_PHOTO_PREBUFFER_SEM = threading.BoundedSemaphore(2)
+_MAX_PHOTO_PREBUFFER_BYTES = 4_800_000_000  # ~192 4K RGB24 frames (~6.4s @ 30fps) per worker
+
+
 def render_photo_clip(
     photo_path: str | Path,
     output_mp4: str | Path,
@@ -2690,66 +2695,145 @@ def render_photo_clip(
     from ..hardware import videotoolbox_hdr_encode_guard
 
     hw = get_hardware_profile()
-    wrote_bytes = False
     used_mps = False
+    mps_batch_size = 4 if width >= 3840 else 8
+    frame_bytes = max(1, width * height * 3)
+    pre_frames = min(total_frames, max(mps_batch_size, _MAX_PHOTO_PREBUFFER_BYTES // frame_bytes))
+    sem_held = False
+    pre_batches: list[Optional[Any]] = []
+    rem_comp: Optional[Any] = None
 
-    class _TrackedStdin:
-        def __init__(self, raw_pipe: Any) -> None:
-            self._pipe = raw_pipe
-
-        def write(self, data: Any) -> Any:
-            nonlocal wrote_bytes
-            res = self._pipe.write(data)
-            wrote_bytes = True
-            return res
-
-        def flush(self) -> None:
-            self._pipe.flush()
-
-    with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=v_enc):
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert proc.stdin is not None
-        try:
-            if hw.has_mps:
-                try:
-                    from .mps_photo_compositor import stream_photo_frames_to_pipe
-
-                    stream_photo_frames_to_pipe(
-                        ctx=ctx,
-                        total_frames=total_frames,
-                        duration=duration,
-                        fps=fps,
-                        pipe_stdin=_TrackedStdin(proc.stdin),
-                        batch_size=8,
-                    )
-                    used_mps = True
-                except Exception as exc:
-                    if wrote_bytes:
-                        raise
-                    print(f"[ken_burns] MPS photo compositor fallback to CPU Pillow: {exc}", file=sys.stderr)
-
-            if not used_mps:
-                for f_idx in range(total_frames):
-                    t_norm = f_idx / max(1, total_frames - 1)
-                    frame = _render_photo_frame_from_context(
-                        ctx=ctx,
-                        t_norm=t_norm,
-                        f_idx=f_idx,
-                        duration=duration,
-                        fps=fps,
-                    )
-                    try:
-                        proc.stdin.write(frame.tobytes())
-                    except (BrokenPipeError, OSError):
-                        break
-        finally:
+    try:
+        # Stage A: Pre-synthesize MPS photo frames outside _VT_HDR_ENCODE_LOCK so AMD MPS
+        # compute on Clip N+1 overlaps Apple T2 hevc_videotoolbox encoding on Clip N.
+        if hw.has_mps and total_frames > 0:
+            _PHOTO_PREBUFFER_SEM.acquire()
+            sem_held = True
+            comp: Optional[Any] = None
             try:
-                proc.stdin.close()
-            except (BrokenPipeError, OSError):
-                pass
+                from .mps_photo_compositor import MPSPhotoCompositor
 
-        stderr_bytes = proc.stderr.read() if proc.stderr else b""
-        ret = proc.wait()
+                comp = MPSPhotoCompositor(ctx=ctx)
+                for start_idx in range(0, pre_frames, mps_batch_size):
+                    batch_indices = list(range(start_idx, min(pre_frames, start_idx + mps_batch_size)))
+                    pre_batches.append(
+                        comp.render_batch_rgb(
+                            frame_indices=batch_indices,
+                            total_frames=total_frames,
+                            duration=duration,
+                            fps=fps,
+                        )
+                    )
+                if pre_frames >= total_frames:
+                    comp.close()
+                    comp = None
+                else:
+                    rem_comp = comp
+                used_mps = True
+            except Exception as exc:
+                pre_batches.clear()
+                if comp is not None:
+                    try:
+                        comp.close()
+                    except Exception:
+                        pass
+                if rem_comp is not None:
+                    try:
+                        rem_comp.close()
+                    except Exception:
+                        pass
+                    rem_comp = None
+                if sem_held:
+                    _PHOTO_PREBUFFER_SEM.release()
+                    sem_held = False
+                used_mps = False
+                print(f"[ken_burns] MPS photo compositor fallback to CPU Pillow: {exc}", file=sys.stderr)
+
+        # Stage B: Serialized HDR VideoToolbox encode consumes pre-buffered frames fast
+        with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=v_enc):
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert proc.stdin is not None
+            pipe_broken = False
+            try:
+                if used_mps:
+                    for b_idx in range(len(pre_batches)):
+                        batch_t = pre_batches[b_idx]
+                        pre_batches[b_idx] = None
+                        if batch_t is None or pipe_broken:
+                            continue
+                        mv = memoryview(np.ascontiguousarray(batch_t.numpy()))
+                        try:
+                            proc.stdin.write(mv)
+                        except (BrokenPipeError, OSError):
+                            pipe_broken = True
+                        finally:
+                            mv.release()
+                            del batch_t
+                    pre_batches.clear()
+                    if rem_comp is None and sem_held:
+                        _PHOTO_PREBUFFER_SEM.release()
+                        sem_held = False
+
+                    if not pipe_broken and rem_comp is not None and pre_frames < total_frames:
+                        for start_idx in range(pre_frames, total_frames, mps_batch_size):
+                            batch_indices = list(range(start_idx, min(total_frames, start_idx + mps_batch_size)))
+                            batch_t = rem_comp.render_batch_rgb(
+                                frame_indices=batch_indices,
+                                total_frames=total_frames,
+                                duration=duration,
+                                fps=fps,
+                            )
+                            mv = memoryview(np.ascontiguousarray(batch_t.numpy()))
+                            try:
+                                proc.stdin.write(mv)
+                            except (BrokenPipeError, OSError):
+                                break
+                            finally:
+                                mv.release()
+                                del batch_t
+                else:
+                    for f_idx in range(total_frames):
+                        t_norm = f_idx / max(1, total_frames - 1)
+                        frame = _render_photo_frame_from_context(
+                            ctx=ctx,
+                            t_norm=t_norm,
+                            f_idx=f_idx,
+                            duration=duration,
+                            fps=fps,
+                        )
+                        try:
+                            proc.stdin.write(frame.tobytes())
+                        except (BrokenPipeError, OSError):
+                            break
+            finally:
+                if rem_comp is not None:
+                    try:
+                        rem_comp.close()
+                    except Exception:
+                        pass
+                    rem_comp = None
+                if sem_held:
+                    _PHOTO_PREBUFFER_SEM.release()
+                    sem_held = False
+                try:
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+
+            stderr_bytes = proc.stderr.read() if proc.stderr else b""
+            ret = proc.wait()
+    finally:
+        pre_batches.clear()
+        if rem_comp is not None:
+            try:
+                rem_comp.close()
+            except Exception:
+                pass
+            rem_comp = None
+        if sem_held:
+            _PHOTO_PREBUFFER_SEM.release()
+            sem_held = False
+
     if ret != 0:
         err_msg = stderr_bytes.decode("utf-8", errors="replace")
         raise RuntimeError(f"FFmpeg photo clip render failed (code {ret}): {err_msg}")

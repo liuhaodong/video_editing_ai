@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 from typing import Any, Literal, Optional
 
 import numpy as np
 from PIL import Image, ImageOps
 
+from ..hardware import get_io_worker_count
 from ..models.schema import (
     CastManifest,
     CastSubjectEntry,
@@ -43,6 +46,23 @@ def classify_utterance_language(text: str) -> Literal["zh", "en", "mixed", "othe
     if other_alpha > 0:
         return "other"
     return "other"
+
+
+_HAAR_TLS = threading.local()
+
+
+def _get_haar_face_detector(cv2_mod: Any) -> Optional[Any]:
+    """Return a per-thread cached OpenCV Haar frontal-face CascadeClassifier."""
+    cached = getattr(_HAAR_TLS, "detector", None)
+    if cached is not None:
+        return None if cached is False else cached
+    cascade_path = str(Path(cv2_mod.data.haarcascades) / "haarcascade_frontalface_default.xml")
+    if Path(cascade_path).exists():
+        detector = cv2_mod.CascadeClassifier(cascade_path)
+        _HAAR_TLS.detector = detector
+        return detector
+    _HAAR_TLS.detector = False
+    return None
 
 
 def detect_subject_bbox_normalized(
@@ -82,9 +102,8 @@ def detect_subject_bbox_normalized(
         import cv2  # type: ignore[import-not-found]
 
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-        cascade_path = str(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml")
-        if Path(cascade_path).exists():
-            detector = cv2.CascadeClassifier(cascade_path)
+        detector = _get_haar_face_detector(cv2)
+        if detector is not None:
             faces = detector.detectMultiScale(gray, scaleFactor=1.12, minNeighbors=4, minSize=(20, 20))
             if len(faces) > 0:
                 # Choose largest / highest-prominence face box
@@ -234,10 +253,10 @@ class CastContinuityAgent(BaseEditingAgent):
         speaker_bboxes: dict[str, list[tuple[float, float, float, float]]] = {}
         detected_langs: set[str] = set()
 
+        active_items: list[tuple[CulledSubClip, Optional[str]]] = []
         for sc in mi.subclips:
             if sc.is_discarded:
                 continue
-
             sample_img: Optional[str] = None
             if sc.media_type == "photo":
                 ph_asset = ph_by_id.get(sc.source_asset_id)
@@ -246,8 +265,23 @@ class CastContinuityAgent(BaseEditingAgent):
                 v_asset = vid_by_id.get(sc.source_asset_id)
                 if v_asset and v_asset.scenes:
                     sample_img = next((s.keyframe_path for s in v_asset.scenes if s.keyframe_path), None)
+            active_items.append((sc, sample_img))
 
-            bbox, det_kind = detect_subject_bbox_normalized(sample_img, fallback_focal=sc.focal_point)
+        if len(active_items) > 2:
+            with ThreadPoolExecutor(max_workers=min(8, get_io_worker_count(8), len(active_items))) as ex:
+                det_results = list(
+                    ex.map(
+                        lambda item: detect_subject_bbox_normalized(item[1], fallback_focal=item[0].focal_point),
+                        active_items,
+                    )
+                )
+        else:
+            det_results = [
+                detect_subject_bbox_normalized(item[1], fallback_focal=item[0].focal_point)
+                for item in active_items
+            ]
+
+        for (sc, _sample_img), (bbox, det_kind) in zip(active_items, det_results):
             face_center = (round(0.5 * (bbox[0] + bbox[2]), 4), round(bbox[1] + 0.38 * (bbox[3] - bbox[1]), 4))
             # Update subclip focal_point toward detected face center so downstream consumers benefit automatically
             sc.focal_point = face_center

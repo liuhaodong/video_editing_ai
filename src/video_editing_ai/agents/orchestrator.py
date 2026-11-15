@@ -373,6 +373,8 @@ def run_multi_agent_pipeline(
     output_video_name: str = "final_story.mp4",
     progress_callback: Optional[Callable[[str, str, int], None]] = None,
     event_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    skip_whisper: bool = False,
+    skip_auto_bgm: bool = False,
 ) -> PipelineBlackboard:
     """High-level entry point to run the coordinated multi-agent editing pipeline."""
     blackboard = PipelineBlackboard(
@@ -387,6 +389,8 @@ def run_multi_agent_pipeline(
         hdr=hdr,
         use_antigravity=use_antigravity,
         whisper_model=whisper_model,
+        skip_whisper=skip_whisper,
+        skip_auto_bgm=skip_auto_bgm,
     )
     orchestrator = MultiAgentOrchestrator(
         enabled_optional_roles=enabled_optional_roles,
