@@ -9,6 +9,7 @@ import re
 from urllib.parse import quote
 
 from ..models.schema import EditTimeline
+from ..renderer.titles import get_theme_spec
 
 
 def _frames_to_fcpxml_rational(frames: int, fps: int = 30) -> str:
@@ -164,9 +165,16 @@ def export_fcpxml(timeline: EditTimeline, output_fcpxml: str | Path) -> Path:
         t_offset = _frames_to_fcpxml_rational(p_start_f + rel_f, fps)
         t_dur = _frames_to_fcpxml_rational(max(1, _sec_to_frames(t_item.duration, fps)), fps)
         ts_id = f"ts_{t_idx}"
-        full_label = t_item.text if not t_item.subtitle else f"{t_item.text} — {t_item.subtitle}"
+        parts = [p for p in (getattr(t_item, "overline", ""), t_item.text, t_item.subtitle or "") if p]
+        col_lines = getattr(t_item, "colophon_lines", None) or []
+        if col_lines:
+            parts.append(" | ".join(str(c) for c in col_lines[:3]))
+        full_label = " — ".join(parts) if parts else t_item.text
         esc_label = escape(full_label)
         esc_name = escape(f"{t_item.style}: {t_item.text[:32]}")
+        fcpxml_font = escape(
+            str(get_theme_spec(getattr(t_item, "theme", "apple_tv_glass")).get("fcpxml_font", "PingFang SC"))
+        )
         children_by_spine[p_idx].append(
             f'                            <title name="{esc_name}" lane="2" offset="{t_offset}" '
             f'ref="r_title" start="0s" duration="{t_dur}">\n'
@@ -174,7 +182,7 @@ def export_fcpxml(timeline: EditTimeline, output_fcpxml: str | Path) -> Path:
             f'                                    <text-style ref="{ts_id}">{esc_label}</text-style>\n'
             f"                                </text>\n"
             f'                                <text-style-def id="{ts_id}">\n'
-            f'                                    <text-style font="PingFang SC" fontSize="42"/>\n'
+            f'                                    <text-style font="{fcpxml_font}" fontSize="42"/>\n'
             f"                                </text-style-def>\n"
             f"                            </title>"
         )

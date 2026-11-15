@@ -66,6 +66,16 @@ def cmd_agents_run(
         "--story-arc-mode",
         help="Storyline mode: chronological_cinema (default), hero_journey, thematic_essay, or high_energy_reel",
     ),
+    title_theme: Optional[str] = typer.Option(
+        None,
+        "--title-theme",
+        help="Cinema title theme: criterion_atelier, a24_minimal, apple_tv_glass, kinfolk_magazine, archival_35mm, or kinetic_travelogue",
+    ),
+    burn_in_subtitles: Optional[bool] = typer.Option(
+        None,
+        "--burn-in-subtitles/--no-burn-in-subtitles",
+        help="Burn styled ASS subtitles into rendered MP4 in addition to SRT/ASS sidecars",
+    ),
     interactive_intake: bool = typer.Option(
         False,
         "--interactive-intake",
@@ -96,6 +106,10 @@ def cmd_agents_run(
     answers: dict[str, str] = {}
     if story_arc_mode:
         answers["story_arc_mode"] = story_arc_mode
+    if title_theme:
+        answers["title_theme"] = title_theme
+    if burn_in_subtitles is not None:
+        answers["burn_in_subtitles"] = "true" if burn_in_subtitles else "false"
     if interactive_intake:
         questions = generate_intake_questions(media_dir, prompt)
         console.print("[bold yellow]Stage 0 Client Intake Interview:[/bold yellow]")

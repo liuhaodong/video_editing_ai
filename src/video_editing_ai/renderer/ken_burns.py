@@ -2513,7 +2513,7 @@ def build_segment_overlay_filtergraph(
     hdr: bool,
     next_input_idx: int,
     segment_broll: Optional[list[tuple[Path, float, float]]] = None,
-    segment_titles: Optional[list[tuple[Path, float, float, float, float]]] = None,
+    segment_titles: Optional[list[tuple[Path, float, float, float, float] | dict[str, Any]]] = None,
 ) -> tuple[list[str], list[str], str]:
     """Build extra FFmpeg -i inputs & filter_complex stages for segment-scoped Track V2/V3 overlays."""
     extra_inputs: list[str] = []
@@ -2535,26 +2535,82 @@ def build_segment_overlay_filtergraph(
         cur_v = next_v
         in_idx += 1
 
-    for t_idx, (t_png, local_st, t_dur, fade_in, fade_out) in enumerate(segment_titles or []):
-        extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(t_png)])
-        end_t = local_st + t_dur
-        fi = min(t_dur * 0.4, fade_in)
-        fo = min(t_dur * 0.4, fade_out)
-        fo_st = max(0.0, t_dur - fo)
-        ov_label = f"[sov{t_idx}]"
-        next_v = f"[svt{t_idx + 1}]"
-        filter_parts.append(
-            f"[{in_idx}:v]format=rgba,"
-            f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
-            f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
-            f"setpts=PTS+{local_st:.3f}/TB{ov_label}"
-        )
-        filter_parts.append(
-            f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:"
-            f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
-        )
-        cur_v = next_v
-        in_idx += 1
+    for t_idx, t_ent in enumerate(segment_titles or []):
+        if isinstance(t_ent, dict):
+            local_st = float(t_ent["local_st"])
+            t_dur = float(t_ent["local_dur"])
+            end_t = local_st + t_dur
+            fi = min(t_dur * 0.4, float(t_ent.get("fade_in", 0.35)))
+            fo = min(t_dur * 0.4, float(t_ent.get("fade_out", 0.35)))
+            fo_st = max(0.0, t_dur - fo)
+            glass_rect = t_ent.get("glass_rect")
+            glass_mask_path = t_ent.get("glass_mask_path")
+            if glass_rect is not None and glass_mask_path is not None:
+                gx, gy, gw, gh, _ = glass_rect
+                sigma = max(2.0, float(t_ent.get("blur_sigma", 18.0)))
+                extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(glass_mask_path)])
+                filter_parts.append(f"{cur_v}split=2[v_smain{t_idx}][v_ssrc{t_idx}]")
+                filter_parts.append(
+                    f"[v_ssrc{t_idx}]crop={gw}:{gh}:{gx}:{gy},"
+                    f"gblur=sigma={sigma:.1f}:enable='between(t,{local_st:.3f},{end_t:.3f})',"
+                    f"format=rgba[v_sblur{t_idx}]"
+                )
+                filter_parts.append(
+                    f"[{in_idx}:v]format=gray,"
+                    f"fade=t=in:st=0:d={fi:.3f},"
+                    f"fade=t=out:st={fo_st:.3f}:d={fo:.3f},"
+                    f"setpts=PTS+{local_st:.3f}/TB[v_sgmask{t_idx}]"
+                )
+                filter_parts.append(f"[v_sblur{t_idx}][v_sgmask{t_idx}]alphamerge[v_sglass{t_idx}]")
+                filter_parts.append(
+                    f"[v_smain{t_idx}][v_sglass{t_idx}]overlay=x={gx}:y={gy}:format={ov_fmt}:"
+                    f"eof_action=pass:enable='between(t,{local_st:.3f},{end_t:.3f})'[v_spg{t_idx}]"
+                )
+                cur_v = f"[v_spg{t_idx}]"
+                in_idx += 1
+
+            ov_path = t_ent["overlay_path"]
+            rx, ry, _, _ = t_ent.get("roi", (0, 0, 0, 0))
+            ov_label = f"[sov{t_idx}]"
+            next_v = f"[svt{t_idx + 1}]"
+            if t_ent.get("kind") == "static_png":
+                extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(ov_path)])
+                filter_parts.append(
+                    f"[{in_idx}:v]format=rgba,"
+                    f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
+                    f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
+                    f"setpts=PTS+{local_st:.3f}/TB{ov_label}"
+                )
+            else:
+                extra_inputs.extend(["-i", str(ov_path)])
+                filter_parts.append(f"[{in_idx}:v]format=rgba,setpts=PTS+{local_st:.3f}/TB{ov_label}")
+            filter_parts.append(
+                f"{cur_v}{ov_label}overlay=x={rx}:y={ry}:format={ov_fmt}:eof_action=pass:"
+                f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
+            )
+            cur_v = next_v
+            in_idx += 1
+        else:
+            t_png, local_st, t_dur, fade_in, fade_out = t_ent
+            extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(t_png)])
+            end_t = local_st + t_dur
+            fi = min(t_dur * 0.4, fade_in)
+            fo = min(t_dur * 0.4, fade_out)
+            fo_st = max(0.0, t_dur - fo)
+            ov_label = f"[sov{t_idx}]"
+            next_v = f"[svt{t_idx + 1}]"
+            filter_parts.append(
+                f"[{in_idx}:v]format=rgba,"
+                f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
+                f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
+                f"setpts=PTS+{local_st:.3f}/TB{ov_label}"
+            )
+            filter_parts.append(
+                f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:"
+                f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
+            )
+            cur_v = next_v
+            in_idx += 1
 
     if hdr and (segment_broll or segment_titles):
         filter_parts.append(
@@ -2581,7 +2637,7 @@ def render_photo_clip(
     transition_in: Optional[TransitionConfig] = None,
     transition_out: Optional[TransitionConfig] = None,
     segment_broll: Optional[list[tuple[Path, float, float]]] = None,
-    segment_titles: Optional[list[tuple[Path, float, float, float, float]]] = None,
+    segment_titles: Optional[list[tuple[Path, float, float, float, float] | dict[str, Any]]] = None,
 ) -> Path:
     """Render a photo into a 4K HDR MP4 video clip using any of the 16 Premium Photo Modes + 8 Atmospheric Finishers."""
     kb = ken_burns or KenBurnsConfig()

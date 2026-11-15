@@ -531,7 +531,7 @@ def _ensure_timeline_initialized(blackboard: PipelineBlackboard) -> EditTimeline
         title_track=title_track,
         effects_track=[],
         audio_tracks=[],
-        subtitles=SubtitleConfig(enabled=True, burn_in=True, items=[]),
+        subtitles=SubtitleConfig(enabled=True, burn_in=False, items=[]),
     )
     blackboard.timeline = timeline
     return timeline

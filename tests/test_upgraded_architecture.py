@@ -2103,12 +2103,34 @@ def test_gate13_complete_dependency_manifest_and_doctor_cli() -> None:
     assert setup_ps1.exists()
     assert os.access(setup_sh, os.X_OK), "scripts/setup.sh must be executable"
 
-    bash_check = subprocess.run(
-        ["bash", "-n", str(setup_sh)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    if sys.platform == "win32":
+        git_bash_candidates = (
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
+            Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+        )
+        git_bash = next((str(p) for p in git_bash_candidates if p.exists()), None)
+        if git_bash is not None:
+            bash_check = subprocess.run(
+                [git_bash, "-n", setup_sh.as_posix()],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            bash_check = subprocess.run(
+                ["bash", "-n"],
+                input=setup_sh.read_text(encoding="utf-8").replace("\r\n", "\n"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+    else:
+        bash_check = subprocess.run(
+            ["bash", "-n", str(setup_sh)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     assert bash_check.returncode == 0, f"setup.sh syntax error: {bash_check.stderr}"
 
     pyproject_doc = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
@@ -2288,7 +2310,11 @@ def test_gate14_antigravity_primary_workflow_sdk_and_global_skill(
     dest_root = tmp_path / "global_skills"
     dest_root.mkdir(parents=True, exist_ok=True)
     pre_symlink = dest_root / "ai-video-editor"
-    pre_symlink.symlink_to(tmp_path / "stale_target")
+    try:
+        pre_symlink.symlink_to(tmp_path / "stale_target")
+    except OSError:
+        pre_symlink.mkdir(parents=True, exist_ok=True)
+        (pre_symlink / "stale.txt").write_text("stale", encoding="utf-8")
 
     installed_skill = sync_skill_to_global(dest_root=dest_root, repo_root=repo_root)
     assert installed_skill.is_dir() and not installed_skill.is_symlink()

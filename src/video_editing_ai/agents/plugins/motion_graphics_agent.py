@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 from ...models.schema import (
     EditTimeline,
@@ -13,10 +14,103 @@ from ...models.schema import (
     MotionGraphicsReport,
     NarrationScriptReport,
     TitleOverlayItem,
+    WordTimestamp,
 )
 from ...renderer.subtitles import resolve_subtitle_font_stack
-from ...renderer.titles import HDR_DIFFUSE_WHITE_PEAK_RGB, compute_overlay_bbox_norm
+from ...renderer.titles import (
+    HDR_DIFFUSE_WHITE_PEAK_RGB,
+    compute_overlay_bbox_norm,
+    get_theme_spec,
+    sample_shot_accent_hex,
+)
 from ..base import BaseEditingAgent, PipelineBlackboard, register_agent
+
+
+_ROMAN_NUMERALS = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII")
+
+
+def _bbox_intersection_area(a: list[float], b: list[float]) -> float:
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    return (ix2 - ix1) * (iy2 - iy1)
+
+
+def _resolve_sample_image_for_time(t_sec: float, timeline: Any, catalog: Any) -> Optional[str]:
+    """Find a representative still/keyframe image file near timeline time t_sec for accent sampling."""
+    video_kf_by_name: dict[str, str] = {}
+    first_photo: Optional[str] = None
+    if catalog is not None:
+        for p in getattr(catalog, "photos", []):
+            cand = p.preview_path or p.path
+            if cand and Path(cand).exists():
+                first_photo = cand
+                break
+        for v in getattr(catalog, "videos", []):
+            for sc in getattr(v, "scenes", []):
+                if getattr(sc, "keyframe_path", None) and Path(sc.keyframe_path).exists():
+                    video_kf_by_name[Path(v.path).name] = sc.keyframe_path
+                    break
+
+    for vc in getattr(timeline, "visual_track", []):
+        if vc.timeline_start <= t_sec + 1.5 and (vc.timeline_start + vc.duration) >= max(0.0, t_sec - 0.5):
+            if vc.type == "photo" and Path(vc.source).exists():
+                return vc.source
+            kf = video_kf_by_name.get(Path(vc.source).name)
+            if kf:
+                return kf
+    return first_photo
+
+
+def _sync_word_timestamps_onto_subtitles(timeline: Any, media_index: Any) -> None:
+    """Propagate word-level ASR timestamps from CulledSubClips onto master SubtitleItems."""
+    if media_index is None or not getattr(timeline.subtitles, "items", None):
+        return
+    subclips = getattr(media_index, "subclips", []) or []
+    if not subclips:
+        return
+
+    by_filename: dict[str, list[Any]] = {}
+    for sc in subclips:
+        if getattr(sc, "words", None):
+            by_filename.setdefault(Path(sc.source_path).name, []).append(sc)
+
+    if not by_filename:
+        return
+
+    for sub in timeline.subtitles.items:
+        if sub.words:
+            continue
+        for clip in timeline.visual_track:
+            if clip.type != "video":
+                continue
+            clip_end = clip.timeline_start + clip.duration
+            if clip.timeline_start - 0.5 > sub.end or clip_end + 0.5 < sub.start:
+                continue
+            spd = max(0.1, float(clip.speed or 1.0))
+            matched_words: list[WordTimestamp] = []
+            for sc in by_filename.get(Path(clip.source).name, []):
+                for w in sc.words:
+                    tl_w_start = clip.timeline_start + (float(w.start) - float(clip.source_in)) / spd
+                    tl_w_end = clip.timeline_start + (float(w.end) - float(clip.source_in)) / spd
+                    if tl_w_end < sub.start - 0.15 or tl_w_start > sub.end + 0.15:
+                        continue
+                    w_start = round(max(sub.start, min(sub.end, tl_w_start)), 3)
+                    w_end = round(max(w_start + 0.04, min(sub.end + 0.05, tl_w_end)), 3)
+                    matched_words.append(
+                        WordTimestamp(
+                            word=w.word,
+                            start=w_start,
+                            end=w_end,
+                            confidence=getattr(w, "confidence", 0.9),
+                        )
+                    )
+            if matched_words:
+                sub.words = matched_words
+                break
 
 
 def _format_exif_date(raw_ct: Any) -> str:
@@ -148,9 +242,10 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
     stage_order = 40
     substage_priority = 0
     description = (
-        "Consolidates all Track V3 graphics (opening card, chapter lower-thirds, GPS route progression cards, "
-        "dialogue quote badges, optional EXIF stamps, and closing card), configures bilingual subtitles "
-        "(PingFang SC / Avenir Next / platform fallbacks), and clamps RGBA peak white to HDR-safe diffuse white."
+        "Art-directs and consolidates Track V3 overlays across 6 Cinema Title Themes and 12 kinetic qtrle/card archetypes "
+        "(knockout stencil opening, magazine chapter plates, curved GPS ribbons, editorial wall-notes, credits colophon, "
+        "frosted glass lower-thirds & quote badges with live backdrop blur), configures bilingual/word-highlighted subtitles, "
+        "and clamps RGBA peak white to ~203-nit HDR diffuse white."
     )
     enabled_by_default = True
     requires_artifacts = ["creative_brief.json", "paper_edit.json", "timeline.yaml"]
@@ -166,8 +261,17 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             return {"graphics_injected": 0}
 
         is_hdr = bool(timeline.settings.hdr)
+        theme = brief.title_theme if brief is not None else (timeline.subtitles.theme or "apple_tv_glass")
+        theme_spec = get_theme_spec(theme)
+        use_glass = bool(theme_spec.get("glass_default", False))
+
         primary_font, secondary_font = resolve_subtitle_font_stack(timeline.subtitles.font_name)
         timeline.subtitles.font_name = primary_font
+        timeline.subtitles.theme = theme  # type: ignore[assignment]
+        if brief is not None:
+            timeline.subtitles.style_preset = brief.subtitle_style
+            timeline.subtitles.burn_in = bool(brief.burn_in_subtitles)
+        _sync_word_timestamps_onto_subtitles(timeline, blackboard.media_index)
 
         gps_assets = 0
         first_exif_stamp_meta: tuple[str, str] | None = None
@@ -228,25 +332,47 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             clean_proj_title = _smart_title_case(clean_proj_title)
 
         open_st, open_dur = _clamp_to_v1_segment(timeline, round(hook_end + 0.35, 2), 3.4)
+        open_accent = sample_shot_accent_hex(
+            _resolve_sample_image_for_time(open_st, timeline, catalog),
+            fallback_hex=str(theme_spec["accent_hex"]),
+        )
+        use_stencil_opening = hook_end > 0.0 and theme in ("a24_minimal", "apple_tv_glass", "kinetic_travelogue")
+        opening_style = "knockout_stencil_opening" if use_stencil_opening else "opening_card"
+        opening_motion = (
+            "stencil_reveal"
+            if use_stencil_opening
+            else ("tracking_expand" if theme in ("a24_minimal", "criterion_atelier") else "masked_rise")
+        )
+        open_eyebrow = _clean_waypoint_label(paper.chapters[0]) if paper.chapters else "CURATED DOCUMENTARY"
+
         consolidated_overlays: list[TitleOverlayItem] = [
             TitleOverlayItem(
                 id="title_opening",
-                style="opening_card",
-                eyebrow=_clean_waypoint_label(paper.chapters[0]) if paper.chapters else "OPENING",
+                style=opening_style,  # type: ignore[arg-type]
+                theme=theme,  # type: ignore[arg-type]
+                motion_preset=opening_motion,  # type: ignore[arg-type]
+                eyebrow=open_eyebrow,
+                overline=open_eyebrow,
                 text=clean_proj_title,
                 subtitle="A Curated Documentary Film",
                 timeline_start=open_st,
                 duration=open_dur,
                 fade_in=0.45,
                 fade_out=0.55,
-                accent_color="#E8E4DC",
+                accent_color=open_accent,
+                backdrop_blur=(not use_stencil_opening and use_glass),
                 hdr_safe=is_hdr,
             )
         ]
 
-        # 2. Route progression cards on major location transitions (up to 3) + clean chapter lower-thirds
+        # 2. Route progression cards on alternate chapter transitions + alternating chapter plates / frosted lower-thirds
         mg_items: list[MotionGraphicItem] = []
-        target_chapters = paper.chapters[1:4] if len(paper.chapters) > 1 else paper.chapters[:1]
+        if len(paper.chapters) >= 3:
+            target_chapters = [c for c_idx, c in enumerate(paper.chapters) if c_idx >= 1 and c_idx % 2 == 1][:3]
+        elif len(paper.chapters) > 1:
+            target_chapters = paper.chapters[1:2]
+        else:
+            target_chapters = paper.chapters[:1]
         route_chap_ids = {c.chapter_id for c in target_chapters}
 
         for c_idx, chap in enumerate(target_chapters, start=1):
@@ -298,8 +424,9 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 if vc.timeline_start < end_t and (vc.timeline_start + vc.duration) > start_t:
                     if vc.type == "photo" and vc.caption_title:
                         return True
-            # Route map cards sit at y=[0.79..0.96], so avoid overlapping active subtitles at y=[0.85..0.96]
-            if style_name == "route_map_card":
+            # Route map cards & curved ribbons sit at y=[0.80..0.96], so avoid overlapping subtitles at y=[0.85..0.96]
+            sub_box = [0.10, 0.85, 0.90, 0.96]
+            if _bbox_intersection_area(sub_box, compute_overlay_bbox_norm(style_name)) > 0.015:
                 for sub in timeline.subtitles.items:
                     if sub.start < end_t and sub.end > start_t:
                         return True
@@ -307,7 +434,12 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
 
         for mg in mg_items:
             st_t, dur_t = _clamp_to_v1_segment(timeline, mg.timeline_start, mg.duration)
-            if _has_bottom_collision(st_t, dur_t, "route_map_card"):
+            route_style = "curved_gps_ribbon" if len(mg.waypoints) >= 2 else "route_map_card"
+            ch_accent = sample_shot_accent_hex(
+                _resolve_sample_image_for_time(st_t, timeline, catalog),
+                fallback_hex=str(theme_spec["accent_hex"]),
+            )
+            if _has_bottom_collision(st_t, dur_t, route_style):
                 has_photo_plaque = any(
                     vc.type == "photo" and vc.caption_title and vc.timeline_start < (st_t + dur_t) and (vc.timeline_start + vc.duration) > st_t
                     for vc in timeline.visual_track
@@ -317,14 +449,18 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                         TitleOverlayItem(
                             id=mg.graphic_id,
                             style="lower_third",
-                            eyebrow="CHAPTER",
+                            theme=theme,  # type: ignore[arg-type]
+                            motion_preset="masked_rise",
+                            eyebrow="ROUTE PROGRESSION",
+                            overline="ROUTE PROGRESSION",
                             text=mg.title,
                             subtitle=mg.subtitle,
                             timeline_start=st_t,
                             duration=dur_t,
                             fade_in=0.35,
                             fade_out=0.35,
-                            accent_color="#E8E4DC",
+                            accent_color=ch_accent,
+                            backdrop_blur=True,
                             hdr_safe=is_hdr,
                         )
                     )
@@ -333,41 +469,61 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             consolidated_overlays.append(
                 TitleOverlayItem(
                     id=mg.graphic_id,
-                    style="route_map_card",
+                    style=route_style,  # type: ignore[arg-type]
+                    theme=theme,  # type: ignore[arg-type]
+                    motion_preset="bezier_route_draw" if route_style == "curved_gps_ribbon" else "masked_rise",
+                    eyebrow="JOURNEY ROUTE" if route_style == "curved_gps_ribbon" else None,
+                    overline="JOURNEY ROUTE" if route_style == "curved_gps_ribbon" else "",
                     text=mg.title,
                     subtitle=mg.subtitle,
                     timeline_start=st_t,
                     duration=dur_t,
                     fade_in=0.35,
                     fade_out=0.35,
-                    accent_color="#E8E4DC",
+                    accent_color=ch_accent,
+                    backdrop_blur=use_glass,
                     map_waypoints=mg.waypoints,
                     hdr_safe=is_hdr,
                 )
             )
 
-        # Add chapter lower-thirds for remaining chapters (>4) that do not have route cards or photo plaques
-        for chap in paper.chapters:
+        # Alternate magazine_chapter_plate (with Roman numerals I..VIII) & frosted lower_third on non-route chapters
+        plate_turn = 0
+        for chap_idx, chap in enumerate(paper.chapters):
             if chap.chapter_id in route_chap_ids or chap == paper.chapters[0]:
                 continue
             st_sec = act_start_times.get(chap.title)
             if st_sec is None or st_sec >= timeline.total_duration - 5.0:
                 continue
             lt_start, lt_dur = _clamp_to_v1_segment(timeline, round(st_sec + 0.45, 2), 3.0)
-            if not _has_bottom_collision(lt_start, lt_dur, "lower_third"):
+            roman = _ROMAN_NUMERALS[chap_idx] if chap_idx < len(_ROMAN_NUMERALS) else f"{chap_idx + 1:02d}"
+            use_mag_plate = (plate_turn % 2 == 0)
+            card_style = "magazine_chapter_plate" if use_mag_plate else "lower_third"
+            plate_turn += 1
+            if not _has_bottom_collision(lt_start, lt_dur, card_style):
                 chap_lbl = _clean_waypoint_label(chap)
+                plate_accent = sample_shot_accent_hex(
+                    _resolve_sample_image_for_time(lt_start, timeline, catalog),
+                    fallback_hex=str(theme_spec["accent_hex"]),
+                )
+                kicker = f"CHAPTER {roman}" if use_mag_plate else chap_lbl
                 consolidated_overlays.append(
                     TitleOverlayItem(
                         id=f"title_lt_{chap.chapter_id}",
-                        style="lower_third",
-                        eyebrow=chap_lbl,
+                        style=card_style,  # type: ignore[arg-type]
+                        theme=theme,  # type: ignore[arg-type]
+                        motion_preset="masked_rise",
+                        eyebrow=kicker,
+                        overline=kicker,
+                        chapter_numeral=roman if use_mag_plate else "",
                         text=chap.title,
                         subtitle=chap.narrative_goal[:56] if chap.narrative_goal else chap_lbl,
                         timeline_start=lt_start,
                         duration=lt_dur,
                         fade_in=0.30,
                         fade_out=0.35,
-                        accent_color="#E8E4DC",
+                        accent_color=plate_accent,
+                        backdrop_blur=(not use_mag_plate) or use_glass,
                         hdr_safe=is_hdr,
                     )
                 )
@@ -383,7 +539,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                     continue
                 raw_t = float(cue.get("target_timeline_sec") or 0.0)
                 if timeline.total_duration > 10.0:
-                    raw_t = max(raw_t, open_st + open_dur + 0.4)
+                    raw_t = max(raw_t, open_st + open_dur + 0.45)
                 dur_pref = min(5.2, max(3.4, float(cue.get("duration_sec") or 4.2)))
                 ed_st, ed_dur = _clamp_to_v1_segment(timeline, raw_t, dur_pref)
                 chap_obj = chap_by_id.get(str(cue.get("chapter_id") or ""))
@@ -394,14 +550,18 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                     TitleOverlayItem(
                         id=f"title_ed_{idx_cue:02d}",
                         style="editorial_caption",
+                        theme=theme,  # type: ignore[arg-type]
+                        motion_preset="masked_rise",
                         eyebrow=eyebrow,
+                        overline=eyebrow,
                         text=headline,
                         subtitle=body,
                         timeline_start=ed_st,
                         duration=ed_dur,
                         fade_in=0.35,
                         fade_out=0.35,
-                        accent_color="#E8E4DC",
+                        accent_color=open_accent,
+                        backdrop_blur=use_glass,
                         hdr_safe=is_hdr,
                     )
                 )
@@ -438,26 +598,31 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                     v_title = re.sub(r"^\[[^\]]+\]\s*", "", vc.narrative_note).strip()
                 if len(v_title) >= 4:
                     lt_st, lt_dur = _clamp_to_v1_segment(timeline, vc.timeline_start + 0.35, min(3.8, max(2.2, vc.duration - 0.6)))
+                    kicker = _strip_chapter_prefix(vc.act or "GALLERY MOMENT")[:26]
                     consolidated_overlays.append(
                         TitleOverlayItem(
                             id=f"title_vid_{vc.id}",
                             style="lower_third",
-                            eyebrow=_strip_chapter_prefix(vc.act or "GALLERY MOMENT")[:26],
+                            theme=theme,  # type: ignore[arg-type]
+                            motion_preset="masked_rise",
+                            eyebrow=kicker,
+                            overline=kicker,
                             text=v_title,
                             subtitle=v_sub or None,
                             timeline_start=lt_st,
                             duration=lt_dur,
                             fade_in=0.30,
                             fade_out=0.35,
-                            accent_color="#E8E4DC",
+                            accent_color=open_accent,
+                            backdrop_blur=True,
                             hdr_safe=is_hdr,
                         )
                     )
 
-        # 3. Dialogue quote badge (upper-left [0.06, 0.09, 0.58, 0.24] -> zero collision with bottom subtitles!)
+        # 3. Dialogue quote badge (upper-left [0.06, 0.10, 0.58, 0.25] -> zero collision with bottom subtitles!)
         if timeline.subtitles.items:
             best_sub = max(timeline.subtitles.items, key=lambda s: len(s.text))
-            if len(best_sub.text.strip()) >= 6 and best_sub.start > hook_end + 4.2:
+            if len(best_sub.text.strip()) >= 6 and best_sub.start > open_st + open_dur + 0.3:
                 qb_st, qb_dur = _clamp_to_v1_segment(
                     timeline,
                     round(best_sub.start + 0.15, 2),
@@ -467,14 +632,18 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                     TitleOverlayItem(
                         id="title_quote_badge_01",
                         style="dialogue_badge",
+                        theme=theme,  # type: ignore[arg-type]
+                        motion_preset="masked_rise",
                         eyebrow="CANDID SPOKEN MOMENT",
+                        overline="CANDID SPOKEN MOMENT",
                         text=f'"{best_sub.text[:36]}"',
                         subtitle=best_sub.secondary_text or "Family Dialogue",
                         timeline_start=qb_st,
                         duration=qb_dur,
                         fade_in=0.30,
                         fade_out=0.30,
-                        accent_color="#E8E4DC",
+                        accent_color=open_accent,
+                        backdrop_blur=use_glass,
                         hdr_safe=is_hdr,
                     )
                 )
@@ -483,55 +652,83 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
         prompt_low = (brief.raw_user_prompt if brief else blackboard.user_prompt).lower()
         if first_exif_stamp_meta is not None and (gps_assets > 0 or "exif" in prompt_low or "stamp" in prompt_low):
             stamp_date, stamp_loc = first_exif_stamp_meta
-            raw_stamp_start = round(min(max(hook_end + 4.4, 4.4), max(0.5, timeline.total_duration * 0.25)), 2)
+            raw_stamp_start = round(min(max(open_st + open_dur + 0.5, 4.4), max(0.5, timeline.total_duration * 0.25)), 2)
             stamp_start, stamp_dur = _clamp_to_v1_segment(timeline, raw_stamp_start, 2.6)
             if stamp_start + stamp_dur < timeline.total_duration - 3.6:
                 consolidated_overlays.append(
                     TitleOverlayItem(
                         id="title_exif_stamp_01",
                         style="exif_stamp",
-                        eyebrow="LOCATION ARCHIVE",
+                        theme=theme,  # type: ignore[arg-type]
+                        motion_preset="typewriter_telemetry",
+                        eyebrow="EXIF TELEMETRY",
+                        overline="EXIF TELEMETRY",
                         text=stamp_date,
                         subtitle=stamp_loc,
                         timeline_start=stamp_start,
                         duration=stamp_dur,
                         fade_in=0.30,
                         fade_out=0.35,
-                        accent_color="#E8E4DC",
+                        accent_color=open_accent,
+                        backdrop_blur=use_glass,
                         hdr_safe=is_hdr,
                     )
                 )
 
-        # 5. Closing card at the tail of the film (moved out of ShowrunnerAgent into Stage 40 title_designer)
+        # 5. Closing card / Editorial Colophon at the tail of the film (moved out of ShowrunnerAgent into Stage 40)
         if timeline.total_duration >= 8.0:
             raw_closing_dur = 3.2
             raw_closing_start = round(max(open_st + open_dur + 0.4, timeline.total_duration - raw_closing_dur - 0.2), 2)
             closing_start, closing_dur = _clamp_to_v1_segment(timeline, raw_closing_start, raw_closing_dur)
+            use_colophon = len(paper.chapters) >= 2
+            cams: list[str] = []
+            if catalog is not None:
+                cams = sorted(
+                    {
+                        str(getattr(a, "camera_model", "") or "").strip()
+                        for a in [*getattr(catalog, "videos", []), *getattr(catalog, "photos", [])]
+                        if str(getattr(a, "camera_model", "") or "").strip()
+                    }
+                )
+            colophon_lines = (
+                [
+                    f"{len(paper.chapters)} CHAPTERS · {len(timeline.visual_track)} TIMELINE CUTS",
+                    f"OPTICS · {', '.join(cams[:2])}" if cams else "MULTI-CAM ARCHIVE SELECTION",
+                    f"GRADE · {timeline.settings.width}x{timeline.settings.height} {'BT.2020 HLG' if is_hdr else 'REC.709'}",
+                ]
+                if use_colophon
+                else []
+            )
             # Drop any non-opening bottom/center overlay that overlaps the closing card window
             consolidated_overlays = [
                 t
                 for t in consolidated_overlays
                 if t.id == "title_opening"
-                or compute_overlay_bbox_norm(t.style)[1] < 0.30
+                or compute_overlay_bbox_norm(t.style)[1] < 0.27
                 or (t.timeline_start + t.duration) <= closing_start - 0.35
             ]
+            closing_kicker = "END CREDITS & COLOPHON" if use_colophon else "MEMORIES PRESERVED"
             consolidated_overlays.append(
                 TitleOverlayItem(
                     id="title_closing",
-                    style="closing_card",
-                    eyebrow="MEMORIES PRESERVED",
+                    style="credits_colophon_card" if use_colophon else "closing_card",
+                    theme=theme,  # type: ignore[arg-type]
+                    motion_preset="tracking_expand",
+                    eyebrow=closing_kicker,
+                    overline=closing_kicker,
+                    colophon_lines=colophon_lines,
                     text="Fin · Memories Preserved",
                     subtitle=clean_proj_title,
                     timeline_start=closing_start,
                     duration=closing_dur,
                     fade_in=0.55,
                     fade_out=0.65,
-                    accent_color="#E8E4DC",
+                    accent_color=open_accent,
                     hdr_safe=is_hdr,
                 )
             )
 
-        # De-conflict sequential overlays in the same spatial zone (upper_left / upper_right / bottom_center)
+        # De-conflict overlays: never overlap full-canvas knockout stencil opening, and keep 3-zone spatial discipline
         def _zone_for(style_name: str) -> str:
             x1, y1, x2, y2 = compute_overlay_bbox_norm(style_name)
             if y2 < 0.32 and x2 < 0.65:
@@ -545,12 +742,25 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
         last_by_zone: dict[str, int] = {}
         for ov in consolidated_overlays:
             ov.hdr_safe = is_hdr
+            if (
+                opening_style == "knockout_stencil_opening"
+                and ov.id != "title_opening"
+                and ov.timeline_start < (open_st + open_dur + 0.25)
+                and (ov.timeline_start + ov.duration) > max(0.0, open_st - 0.15)
+            ):
+                continue
             z = _zone_for(ov.style)
             if z in last_by_zone:
                 prev_idx = last_by_zone[z]
                 prev = deduped_overlays[prev_idx]
                 if ov.timeline_start < (prev.timeline_start + prev.duration + 0.45):
-                    if ov.style in ("opening_card", "closing_card", "dialogue_badge"):
+                    if ov.style in (
+                        "opening_card",
+                        "closing_card",
+                        "knockout_stencil_opening",
+                        "credits_colophon_card",
+                        "dialogue_badge",
+                    ):
                         deduped_overlays[prev_idx] = ov
                     continue
             last_by_zone[z] = len(deduped_overlays)
@@ -567,6 +777,10 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             GraphicsOverlaySpec(
                 overlay_id=t.id,
                 style=t.style,
+                theme=t.theme,
+                motion_preset=t.motion_preset,
+                backdrop_blur=t.backdrop_blur,
+                overlay_kind=t.style,
                 text=t.text,
                 subtitle=t.subtitle or "",
                 timeline_start=t.timeline_start,
@@ -579,6 +793,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
         ]
         gfx_manifest = GraphicsManifest(
             project_title=proj_title,
+            title_theme=theme,  # type: ignore[arg-type]
             hdr_safe_mode=is_hdr,
             primary_font_family=primary_font,
             secondary_font_family=secondary_font,

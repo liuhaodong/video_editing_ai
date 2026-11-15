@@ -16,6 +16,8 @@ from ..analyzer.media_probe import (
 from ..models.schema import (
     VALID_PHOTO_MODES,
     VALID_PHOTO_OVERLAY_FX,
+    VALID_SUBTITLE_STYLES,
+    VALID_TITLE_THEMES,
     CreativeBrief,
     InterviewQuestion,
 )
@@ -571,6 +573,133 @@ def _detect_narration_delivery_mode(
     return "visual_editorial_cards"
 
 
+def _recommend_title_theme(
+    info: dict[str, Any],
+    narrative_style: str,
+    story_arc_mode: str,
+    user_prompt: str = "",
+) -> tuple[str, str]:
+    """Recommend one of the 6 Cinema Title Themes from library balance, arc mode, and prompt tone."""
+    prompt_low = (user_prompt or "").lower()
+    if any(k in prompt_low for k in ("criterion", "atelier", "museum", "gallery", "fine art", "exhibition")):
+        return (
+            "criterion_atelier",
+            "Matched Criterion Atelier (tall editorial Didone serif + muted brass rules) to museum/exhibition tone.",
+        )
+    if any(k in prompt_low for k in ("a24", "minimalist", "indie", "stencil", "knockout", "monolith")):
+        return (
+            "a24_minimal",
+            "Matched A24 Minimal (tracked Didone + monospace telemetry + knockout stencil opening) to indie cinema tone.",
+        )
+    if any(k in prompt_low for k in ("35mm", "archival", "kodak", "analog", "vintage", "retro", "film grain")):
+        return (
+            "archival_35mm",
+            "Matched Archival 35mm (warm sepia amber + typewriter datecodes) to analog keepsake tone.",
+        )
+    if any(k in prompt_low for k in ("kinfolk", "magazine", "vogue", "editorial spread", "print")):
+        return (
+            "kinfolk_magazine",
+            "Matched Kinfolk Magazine (warm ivory paper plates + classic serif numerals) to print-editorial tone.",
+        )
+    if any(k in prompt_low for k in ("travelogue", "roadtrip", "expedition", "adventure", "high_energy_reel")):
+        return (
+            "kinetic_travelogue",
+            "Matched Kinetic Travelogue (crisp architectural neo-grotesk + kinetic GPS telemetry ribbons) to travel tone.",
+        )
+    if any(k in prompt_low for k in ("apple", "visionos", "frosted glass", "glassmorphism", "modern clean")):
+        return (
+            "apple_tv_glass",
+            "Matched Apple TV Glass (clean geometric hierarchy + live Gaussian frosted-glass pills) to modern polish.",
+        )
+
+    if story_arc_mode == "thematic_essay":
+        return (
+            "criterion_atelier",
+            "Thematic Essay arc pairs naturally with Criterion Atelier curatorial serif typography and chapter plates.",
+        )
+    if story_arc_mode == "hero_journey":
+        return (
+            "a24_minimal",
+            "Hero's Journey arc pairs naturally with A24 Minimal knockout opening typography and understated cards.",
+        )
+    if story_arc_mode == "high_energy_reel" or narrative_style == "upbeat_montage":
+        return (
+            "kinetic_travelogue",
+            "Upbeat montage pacing pairs naturally with Kinetic Travelogue bold neo-grotesk & GPS ribbon graphics.",
+        )
+
+    p_count = int(info.get("photo_count", 0) or 0)
+    v_count = int(info.get("video_count", 0) or 0)
+    if p_count >= max(12, v_count * 3):
+        return (
+            "kinfolk_magazine",
+            "Photo-forward stills collection suits Kinfolk Magazine editorial plates and serif Roman chapter numerals.",
+        )
+    return (
+        "apple_tv_glass",
+        "Balanced video + photo documentary suits Apple TV Glass with live frosted-glass refraction and knockout opening.",
+    )
+
+
+def _resolve_title_typography_answers(
+    info: dict[str, Any],
+    narrative_style: str,
+    story_arc_mode: str,
+    answers: dict[str, str],
+    user_prompt: str = "",
+) -> tuple[str, bool, str, str, str, list[str]]:
+    """Resolve validated title_theme, burn_in_subtitles, subtitle_style, plus recommendation metadata."""
+    rec_theme, rec_rationale = _recommend_title_theme(info, narrative_style, story_arc_mode, user_prompt)
+    prompt_low = (user_prompt or "").lower()
+    notes: list[str] = []
+
+    raw_theme = _extract_option_code(str(answers.get("title_theme", "")))
+    if raw_theme in VALID_TITLE_THEMES:
+        title_theme = raw_theme
+    else:
+        title_theme = rec_theme
+        if any(
+            k in prompt_low
+            for k in ("criterion", "a24", "35mm", "archival", "kinfolk", "travelogue", "apple", "frosted glass")
+        ):
+            notes.append(f"Title Theme -> {title_theme}")
+
+    raw_burn = str(answers.get("burn_in_subtitles", "")).strip().lower()
+    if raw_burn in {"true", "1", "yes", "on", "burn", "hardcode"}:
+        burn_in = True
+    elif raw_burn in {"false", "0", "no", "off", "sidecar"}:
+        burn_in = False
+    elif any(
+        k in prompt_low
+        for k in ("burn in subtitle", "burn-in subtitle", "burned-in subtitle", "hardcode subtitle", "burn subtitles")
+    ):
+        burn_in = True
+        notes.append("Subtitles -> Burn-In + SRT/ASS Sidecars Enabled")
+    else:
+        burn_in = False
+
+    raw_sub_style = _extract_option_code(str(answers.get("subtitle_style", "")))
+    if raw_sub_style in VALID_SUBTITLE_STYLES:
+        subtitle_style = raw_sub_style
+    elif any(k in prompt_low for k in ("kinetic_word_highlight", "word highlight", "karaoke", "active word")):
+        subtitle_style = "kinetic_word_highlight"
+        notes.append("Subtitle Preset -> Kinetic Word Highlight")
+    elif any(k in prompt_low for k in ("minimal_glass", "minimal glass", "frosted subtitle")):
+        subtitle_style = "minimal_glass"
+        notes.append("Subtitle Preset -> Minimal Glass")
+    elif any(k in prompt_low for k in ("cinema_editorial", "editorial subtitle", "classic subtitle")):
+        subtitle_style = "cinema_editorial"
+        notes.append("Subtitle Preset -> Cinema Editorial")
+    elif title_theme == "apple_tv_glass":
+        subtitle_style = "minimal_glass"
+    elif title_theme in ("kinetic_travelogue", "a24_minimal"):
+        subtitle_style = "kinetic_word_highlight"
+    else:
+        subtitle_style = "cinema_editorial"
+
+    return title_theme, burn_in, subtitle_style, rec_theme, rec_rationale, notes
+
+
 def refine_intake_interactively(
     media_dir: str | Path,
     user_message: str = "",
@@ -750,12 +879,33 @@ def refine_intake_interactively(
     if primary_photo_mode not in VALID_PHOTO_MODES:
         primary_photo_mode = "parallax_gallery"
 
+    story_arc_mode = _extract_option_code(str(answers.get("story_arc_mode", "chronological_cinema")))
+    if story_arc_mode not in {
+        "chronological_cinema",
+        "hero_journey",
+        "thematic_essay",
+        "high_energy_reel",
+    }:
+        story_arc_mode = "chronological_cinema"
+
+    narrative_style_code = _extract_option_code(str(answers["narrative_style"]))
+    title_theme, burn_in_subtitles, subtitle_style, rec_theme, theme_rationale, typo_notes = (
+        _resolve_title_typography_answers(info, narrative_style_code, story_arc_mode, answers, raw_msg)
+    )
+    refinements_applied.extend(typo_notes)
+    answers["title_theme"] = title_theme
+    answers["burn_in_subtitles"] = "true" if burn_in_subtitles else "false"
+    answers["subtitle_style"] = subtitle_style
+
     director_recommendations_summary = {
         "recommended_duration_sec": rec_sec,
         "recommended_duration_mmss": dur_rec["director_recommended_mmss"],
         "duration_rationale": dur_rec["director_duration_rationale"],
         "recommended_photo_modes": default_fx_suite,
         "recommended_overlay_fx": default_finishers,
+        "recommended_title_theme": rec_theme,
+        "title_theme_rationale": theme_rationale,
+        "recommended_subtitle_style": subtitle_style,
         "question_recommendations": {
             q.id: {
                 "is_multi_select": q.is_multi_select,
@@ -766,20 +916,11 @@ def refine_intake_interactively(
         },
     }
 
-    story_arc_mode = _extract_option_code(str(answers.get("story_arc_mode", "chronological_cinema")))
-    if story_arc_mode not in {
-        "chronological_cinema",
-        "hero_journey",
-        "thematic_essay",
-        "high_energy_reel",
-    }:
-        story_arc_mode = "chronological_cinema"
-
     project_title = info["display_title"].replace(" ", "_")
     draft_brief = CreativeBrief(
         project_title=project_title,
         raw_user_prompt=raw_msg,
-        narrative_style=_extract_option_code(str(answers["narrative_style"])),  # type: ignore[arg-type]
+        narrative_style=narrative_style_code,  # type: ignore[arg-type]
         story_arc_mode=story_arc_mode,  # type: ignore[arg-type]
         tone="warm_joyful",
         target_duration_sec=chosen_dur,
@@ -790,6 +931,9 @@ def refine_intake_interactively(
         photo_mode=primary_photo_mode,  # type: ignore[arg-type]
         enabled_photo_modes=enabled_modes,  # type: ignore[arg-type]
         enabled_overlay_fx=enabled_overlays,  # type: ignore[arg-type]
+        title_theme=title_theme,  # type: ignore[arg-type]
+        burn_in_subtitles=burn_in_subtitles,
+        subtitle_style=subtitle_style,  # type: ignore[arg-type]
         max_broll_duration_sec=3.5 if chosen_dur <= 75 else 4.5,
         max_consecutive_same_subject=3,
         nat_sound_db=-20.0,
@@ -955,12 +1099,25 @@ class ClientIntakeAgent(BaseEditingAgent):
             for q in questions
         ]
 
+        title_theme, burn_in_subtitles, subtitle_style, rec_theme, theme_rationale, _ = (
+            _resolve_title_typography_answers(
+                lib_info,
+                narrative_style,
+                story_arc_mode,
+                answers,
+                blackboard.user_prompt,
+            )
+        )
+
         director_recommendations_summary = {
             "recommended_duration_sec": lib_info["director_recommended_duration_sec"],
             "recommended_duration_mmss": lib_info["director_recommended_mmss"],
             "duration_rationale": lib_info["director_duration_rationale"],
             "recommended_photo_modes": default_fx_suite,
             "recommended_overlay_fx": default_finishers,
+            "recommended_title_theme": rec_theme,
+            "title_theme_rationale": theme_rationale,
+            "recommended_subtitle_style": subtitle_style,
             "question_recommendations": {
                 q.id: {
                     "is_multi_select": q.is_multi_select,
@@ -985,6 +1142,9 @@ class ClientIntakeAgent(BaseEditingAgent):
             photo_mode=photo_mode,  # type: ignore[arg-type]
             enabled_photo_modes=enabled_modes,  # type: ignore[arg-type]
             enabled_overlay_fx=enabled_overlays,  # type: ignore[arg-type]
+            title_theme=title_theme,  # type: ignore[arg-type]
+            burn_in_subtitles=burn_in_subtitles,
+            subtitle_style=subtitle_style,  # type: ignore[arg-type]
             max_broll_duration_sec=3.5 if target_dur <= 65 else 4.5,
             max_consecutive_same_subject=3,
             nat_sound_db=-20.0,

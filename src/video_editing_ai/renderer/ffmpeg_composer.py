@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -10,7 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from ..analyzer.media_probe import probe_video_file
 from ..hardware import caffeinate_guard, get_hardware_profile, get_io_worker_count
@@ -24,8 +25,29 @@ from .ken_burns import (
     render_frosted_video_overlay_png,
     render_photo_clip,
 )
+from .kinetic_titles import render_glass_mask_png, render_kinetic_title_mov
 from .subtitles import export_ass_subtitles, export_srt_subtitles
-from .titles import render_title_png
+from .titles import compute_glass_pill_rect, render_title_png
+
+
+def _escape_ffmpeg_filter_path(path: Path) -> str:
+    """Escape a file path for FFmpeg libavfilter single-quoted filename='...' arguments."""
+    posix = path.resolve().as_posix()
+    return posix.replace(":", r"\:").replace("'", r"\'")
+
+
+@contextmanager
+def _unlink_on_exit(paths: list[Path]) -> Iterator[None]:
+    """Ensure temporary per-render kinetic title / glass mask files are cleaned up on exit."""
+    try:
+        yield
+    finally:
+        for tmp_art in paths:
+            try:
+                if tmp_art.exists():
+                    tmp_art.unlink()
+            except Exception:
+                pass
 
 
 # Extensible registry mapping Stage-40/32/42 EffectTrackItem.effect_type -> FFmpeg filter builder
@@ -253,7 +275,7 @@ def _render_video_segment(
     hdr: bool = True,
     attached_effects: Optional[list[EffectTrackItem]] = None,
     segment_broll: Optional[list[tuple[Path, float, float]]] = None,
-    segment_titles: Optional[list[tuple[Path, float, float, float, float]]] = None,
+    segment_titles: Optional[list[tuple[Path, float, float, float, float] | dict[str, Any]]] = None,
 ) -> Path:
     """Trim, scale/composite (with ambient blurred backdrop for portrait 9:16 videos), overlay documentary card, and encode."""
     info = probe_video_file(Path(item.source))
@@ -638,8 +660,9 @@ def render_timeline(
     fps = timeline.settings.fps
     hdr = timeline.settings.hdr
     total_dur = timeline.total_duration
+    temp_title_artifacts: list[Path] = []
 
-    with caffeinate_guard():
+    with caffeinate_guard(), _unlink_on_exit(temp_title_artifacts):
         # 1. Export .srt and .ass subtitle files alongside the output video
         srt_path = out_path.with_suffix(".srt")
         ass_path = out_path.with_suffix(".ass")
@@ -710,17 +733,51 @@ def render_timeline(
             for t in timeline.title_track
             if t.timeline_start < total_dur
         ]
-        title_pngs_all: list[Path] = []
+        title_entries_all: list[dict[str, Any]] = []
         for t_idx, t_item in enumerate(active_titles):
-            png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.png"
-            render_title_png(t_item, png_path, width=width, height=height, hdr_safe=hdr)
-            title_pngs_all.append(png_path)
+            glass_rect = compute_glass_pill_rect(t_item, width=width, height=height) if t_item.backdrop_blur else None
+            glass_mask_path: Optional[Path] = None
+            if glass_rect is not None:
+                glass_mask_path = titles_dir / f"_glass_mask_{t_idx + 1:03d}_{t_item.id}.png"
+                render_glass_mask_png(glass_rect, glass_mask_path)
+                temp_title_artifacts.append(glass_mask_path)
+
+            if getattr(t_item, "motion_preset", "masked_rise") == "static":
+                png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.png"
+                render_title_png(t_item, png_path, width=width, height=height, hdr_safe=hdr)
+                overlay_path = png_path
+                roi = (0, 0, width, height)
+                kind = "static_png"
+            else:
+                mov_path = titles_dir / f"_kin_title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.mov"
+                overlay_path, roi = render_kinetic_title_mov(
+                    t_item,
+                    mov_path,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    hdr_safe=hdr,
+                    transparent_glass_body=(glass_rect is not None),
+                )
+                temp_title_artifacts.append(mov_path)
+                kind = "kinetic_mov"
+
+            title_entries_all.append(
+                {
+                    "item": t_item,
+                    "kind": kind,
+                    "overlay_path": overlay_path,
+                    "roi": roi,
+                    "glass_rect": glass_rect,
+                    "glass_mask_path": glass_mask_path,
+                }
+            )
 
         num_clips = len(timeline.visual_track)
         v1_broll_entries: list[list[tuple[VisualTrackItem, Path, float, float]]] = [[] for _ in range(num_clips)]
-        v1_title_entries: list[list[tuple[TitleOverlayItem, Path, float, float]]] = [[] for _ in range(num_clips)]
+        v1_title_entries: list[list[dict[str, Any]]] = [[] for _ in range(num_clips)]
         step4_broll_pairs: list[tuple[VisualTrackItem, Path]] = []
-        step4_title_pairs: list[tuple[TitleOverlayItem, Path]] = []
+        step4_title_entries: list[dict[str, Any]] = []
 
         def _find_containing_segment(ov_start: float, ov_end: float) -> Optional[int]:
             for idx, v_item in enumerate(timeline.visual_track):
@@ -740,15 +797,25 @@ def render_timeline(
             else:
                 step4_broll_pairs.append((b_item, b_mp4))
 
-        for t_item, png_path in zip(active_titles, title_pngs_all):
+        for ent in title_entries_all:
+            t_item = ent["item"]
             seg_idx = _find_containing_segment(t_item.timeline_start, t_item.timeline_start + t_item.duration)
             if seg_idx is not None:
                 v_item = timeline.visual_track[seg_idx]
                 local_st = max(0.0, round(t_item.timeline_start - v_item.timeline_start, 3))
                 local_dur = round(max(0.1, min(v_item.duration - local_st, t_item.duration)), 3)
-                v1_title_entries[seg_idx].append((t_item, png_path, local_st, local_dur))
+                v1_title_entries[seg_idx].append(
+                    {
+                        **ent,
+                        "local_st": local_st,
+                        "local_dur": local_dur,
+                        "fade_in": t_item.fade_in,
+                        "fade_out": t_item.fade_out,
+                        "blur_sigma": getattr(t_item, "backdrop_blur_sigma", 18.0),
+                    }
+                )
             else:
-                step4_title_pairs.append((t_item, png_path))
+                step4_title_entries.append(ent)
 
         # 2b. Render Track V1 visual clips in parallel (MPS photo synthesis + Apple T2 VideoToolbox)
         segment_files: list[Path] = [Path()] * num_clips
@@ -759,7 +826,7 @@ def render_timeline(
                 Path,
                 list[EffectTrackItem],
                 list[tuple[Path, float, float]],
-                list[tuple[Path, float, float, float, float]],
+                list[dict[str, Any]],
             ]
         ] = []
 
@@ -769,7 +836,7 @@ def render_timeline(
             t_assigned = v1_title_entries[idx]
             sig_payload = json.dumps(
                 {
-                    "v": 4,
+                    "v": 5,
                     "item": item.model_dump(mode="json"),
                     "fx": [f.model_dump(mode="json") for f in clip_fxs],
                     "seg_broll": [
@@ -777,8 +844,12 @@ def render_timeline(
                         for bi, _, lst, ldur in b_assigned
                     ],
                     "seg_titles": [
-                        {"item": ti.model_dump(mode="json"), "st": lst, "dur": ldur}
-                        for ti, _, lst, ldur in t_assigned
+                        {
+                            "item": te["item"].model_dump(mode="json"),
+                            "st": te["local_st"],
+                            "dur": te["local_dur"],
+                        }
+                        for te in t_assigned
                     ],
                     "w": width,
                     "h": height,
@@ -792,8 +863,7 @@ def render_timeline(
             segment_files[idx] = seg_mp4
             if not seg_mp4.exists() or seg_mp4.stat().st_size < 1024:
                 seg_b_args = [(mp4, lst, ldur) for _, mp4, lst, ldur in b_assigned]
-                seg_t_args = [(png, lst, ldur, ti.fade_in, ti.fade_out) for ti, png, lst, ldur in t_assigned]
-                tasks_to_run.append((idx, item, seg_mp4, clip_fxs, seg_b_args, seg_t_args))
+                tasks_to_run.append((idx, item, seg_mp4, clip_fxs, seg_b_args, t_assigned))
 
         def _render_one_v1(
             task_tuple: tuple[
@@ -802,7 +872,7 @@ def render_timeline(
                 Path,
                 list[EffectTrackItem],
                 list[tuple[Path, float, float]],
-                list[tuple[Path, float, float, float, float]],
+                list[dict[str, Any]],
             ],
         ) -> tuple[int, Path]:
             t_idx, t_item, t_mp4, t_fxs, t_broll, t_titles = task_tuple
@@ -870,8 +940,6 @@ def render_timeline(
 
         step4_broll = [p[0] for p in step4_broll_pairs]
         broll_files = [p[1] for p in step4_broll_pairs]
-        step4_titles = [p[0] for p in step4_title_pairs]
-        title_pngs = [p[1] for p in step4_title_pairs]
 
         diegetic_windows: list[tuple[float, float]] = []
         mix_manifest_path = out_path.parent / "audio_mix_manifest.json"
@@ -885,7 +953,13 @@ def render_timeline(
                 pass
 
         active_bgm = [a for a in timeline.audio_tracks if Path(a.source).exists()]
-        has_step4_video_ops = bool(step4_broll or step4_titles)
+        burn_subs = bool(
+            timeline.subtitles.enabled
+            and timeline.subtitles.burn_in
+            and timeline.subtitles.items
+            and ass_path.exists()
+        )
+        has_step4_video_ops = bool(step4_broll or step4_title_entries or burn_subs)
 
         if not has_step4_video_ops and not active_bgm:
             shutil.copy2(base_concat_mp4, out_path)
@@ -907,11 +981,23 @@ def render_timeline(
             for b_mp4 in broll_files:
                 final_cmd.extend(["-i", str(b_mp4)])
 
-            title_input_start_idx = 1 + len(step4_broll)
-            for t_item, png_path in zip(step4_titles, title_pngs):
-                final_cmd.extend(["-loop", "1", "-t", f"{t_item.duration:.3f}", "-i", str(png_path)])
+            next_in_idx = 1 + len(step4_broll)
+            for ent in step4_title_entries:
+                t_item = ent["item"]
+                if ent["glass_mask_path"] is not None:
+                    final_cmd.extend(["-loop", "1", "-t", f"{t_item.duration:.3f}", "-i", str(ent["glass_mask_path"])])
+                    ent["mask_in_idx"] = next_in_idx
+                    next_in_idx += 1
+                else:
+                    ent["mask_in_idx"] = None
+                if ent["kind"] == "static_png":
+                    final_cmd.extend(["-loop", "1", "-t", f"{t_item.duration:.3f}", "-i", str(ent["overlay_path"])])
+                else:
+                    final_cmd.extend(["-i", str(ent["overlay_path"])])
+                ent["ov_in_idx"] = next_in_idx
+                next_in_idx += 1
 
-            bgm_input_start_idx = title_input_start_idx + len(step4_titles)
+            bgm_input_start_idx = next_in_idx
             for a_item in active_bgm:
                 if a_item.role == "music":
                     # Enable -stream_loop -1 on BGM music tracks so they cover the full video runtime
@@ -937,27 +1023,62 @@ def render_timeline(
                 )
                 cur_v = next_v
 
-            # Composite cross-segment Track V3 RGBA Title Overlays
-            for idx, t_item in enumerate(step4_titles):
-                in_idx = title_input_start_idx + idx
+            # Composite cross-segment Track V3 Live Frosted-Glass Refraction & Kinetic/RGBA Title Overlays
+            for idx, ent in enumerate(step4_title_entries):
+                t_item = ent["item"]
+                in_idx = int(ent["ov_in_idx"])
                 st = t_item.timeline_start
                 dur = t_item.duration
                 end_t = st + dur
                 fi = min(dur * 0.4, t_item.fade_in)
                 fo = min(dur * 0.4, t_item.fade_out)
                 fo_st = max(0.0, dur - fo)
+
+                if ent["glass_rect"] is not None and ent["mask_in_idx"] is not None:
+                    gx, gy, gw, gh, _ = ent["glass_rect"]
+                    mask_idx = int(ent["mask_in_idx"])
+                    sigma = max(2.0, float(getattr(t_item, "backdrop_blur_sigma", 18.0)))
+                    filter_parts.append(f"{cur_v}split=2[v_main{idx}][v_src{idx}]")
+                    filter_parts.append(
+                        f"[v_src{idx}]crop={gw}:{gh}:{gx}:{gy},"
+                        f"gblur=sigma={sigma:.1f}:enable='between(t,{st:.3f},{end_t:.3f})',"
+                        f"format=rgba[v_blur{idx}]"
+                    )
+                    filter_parts.append(
+                        f"[{mask_idx}:v]format=gray,"
+                        f"fade=t=in:st=0:d={fi:.3f},"
+                        f"fade=t=out:st={fo_st:.3f}:d={fo:.3f},"
+                        f"setpts=PTS+{st:.3f}/TB[v_gmask{idx}]"
+                    )
+                    filter_parts.append(f"[v_blur{idx}][v_gmask{idx}]alphamerge[v_glass{idx}]")
+                    filter_parts.append(
+                        f"[v_main{idx}][v_glass{idx}]overlay=x={gx}:y={gy}:format={ov_fmt}:"
+                        f"eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'[v_pg{idx}]"
+                    )
+                    cur_v = f"[v_pg{idx}]"
+
+                mov_rx, mov_ry, _, _ = ent["roi"]
                 ov_label = f"[ov{idx}]"
                 next_v = f"[vt{idx + 1}]"
+                if ent["kind"] == "static_png":
+                    filter_parts.append(
+                        f"[{in_idx}:v]format=rgba,"
+                        f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
+                        f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
+                        f"setpts=PTS+{st:.3f}/TB{ov_label}"
+                    )
+                else:
+                    filter_parts.append(f"[{in_idx}:v]format=rgba,setpts=PTS+{st:.3f}/TB{ov_label}")
                 filter_parts.append(
-                    f"[{in_idx}:v]format=rgba,"
-                    f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
-                    f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
-                    f"setpts=PTS+{st:.3f}/TB{ov_label}"
-                )
-                filter_parts.append(
-                    f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
+                    f"{cur_v}{ov_label}overlay=x={mov_rx}:y={mov_ry}:format={ov_fmt}:"
+                    f"eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'{next_v}"
                 )
                 cur_v = next_v
+
+            if burn_subs:
+                esc_ass = _escape_ffmpeg_filter_path(ass_path)
+                filter_parts.append(f"{cur_v}ass=filename='{esc_ass}'[vsub]")
+                cur_v = "[vsub]"
 
             if hdr and has_step4_video_ops:
                 filter_parts.append(

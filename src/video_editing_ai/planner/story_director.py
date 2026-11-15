@@ -301,7 +301,7 @@ def _build_baseline_timeline(
         audio_tracks=audio_tracks,
         subtitles=SubtitleConfig(
             enabled=True,
-            burn_in=True,
+            burn_in=False,
             items=subtitle_items,
         ),
     )

@@ -79,6 +79,20 @@ class MultiAgentRunRequest(BaseModel):
     hdr: bool = True
     use_antigravity: bool = True
     render_video: bool = True
+    title_theme: Optional[str] = None
+    burn_in_subtitles: Optional[bool] = None
+    subtitle_style: Optional[str] = None
+
+
+def _merge_run_answers(req: MultiAgentRunRequest) -> dict[str, str]:
+    merged = dict(req.interview_answers)
+    if req.title_theme:
+        merged["title_theme"] = req.title_theme
+    if req.burn_in_subtitles is not None:
+        merged["burn_in_subtitles"] = "true" if req.burn_in_subtitles else "false"
+    if req.subtitle_style:
+        merged["subtitle_style"] = req.subtitle_style
+    return merged
 
 
 class RenderRequest(BaseModel):
@@ -737,12 +751,13 @@ def create_app(default_project_dir: str | Path = "active_video_project") -> Fast
 
             proj = Path(req.project_dir).resolve()
             state["project_dir"] = str(proj)
+            merged_answers = _merge_run_answers(req)
             _write_project_meta(
                 proj,
                 {
                     "media_dir": str(media_path),
                     "user_prompt": req.user_prompt,
-                    "interview_answers": req.interview_answers,
+                    "interview_answers": merged_answers,
                     "status": "running",
                 },
             )
@@ -908,7 +923,7 @@ def create_app(default_project_dir: str | Path = "active_video_project") -> Fast
                     project_dir=proj,
                     user_prompt=req.user_prompt,
                     extra_audio_paths=extra_audio,
-                    interview_answers=req.interview_answers,
+                    interview_answers=merged_answers,
                     enabled_optional_roles=req.enabled_optional_roles,
                     disabled_roles=req.disabled_roles,
                     width=req.width,
@@ -1064,7 +1079,7 @@ def create_app(default_project_dir: str | Path = "active_video_project") -> Fast
             project_dir=proj,
             user_prompt=req.user_prompt,
             extra_audio_paths=extra_audio,
-            interview_answers=req.interview_answers,
+            interview_answers=_merge_run_answers(req),
             enabled_optional_roles=req.enabled_optional_roles,
             disabled_roles=req.disabled_roles,
             width=req.width,

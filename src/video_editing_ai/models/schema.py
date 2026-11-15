@@ -70,6 +70,75 @@ VALID_PHOTO_OVERLAY_FX: tuple[str, ...] = (
     "fine_art_rag_texture",
 )
 
+TitleThemeType = Literal[
+    "criterion_atelier",
+    "a24_minimal",
+    "apple_tv_glass",
+    "kinfolk_magazine",
+    "archival_35mm",
+    "kinetic_travelogue",
+]
+
+VALID_TITLE_THEMES: tuple[str, ...] = (
+    "criterion_atelier",
+    "a24_minimal",
+    "apple_tv_glass",
+    "kinfolk_magazine",
+    "archival_35mm",
+    "kinetic_travelogue",
+)
+
+TitleStyleType = Literal[
+    "opening_card",
+    "act_banner",
+    "lower_third",
+    "editorial_caption",
+    "dialogue_badge",
+    "closing_card",
+    "route_map_card",
+    "exif_stamp",
+    "knockout_stencil_opening",
+    "magazine_chapter_plate",
+    "curved_gps_ribbon",
+    "credits_colophon_card",
+]
+
+VALID_TITLE_STYLES: tuple[str, ...] = (
+    "opening_card",
+    "act_banner",
+    "lower_third",
+    "editorial_caption",
+    "dialogue_badge",
+    "closing_card",
+    "route_map_card",
+    "exif_stamp",
+    "knockout_stencil_opening",
+    "magazine_chapter_plate",
+    "curved_gps_ribbon",
+    "credits_colophon_card",
+)
+
+TitleMotionPresetType = Literal[
+    "masked_rise",
+    "tracking_expand",
+    "typewriter_telemetry",
+    "stencil_reveal",
+    "bezier_route_draw",
+    "static",
+]
+
+SubtitleStyleType = Literal[
+    "cinema_editorial",
+    "minimal_glass",
+    "kinetic_word_highlight",
+]
+
+VALID_SUBTITLE_STYLES: tuple[str, ...] = (
+    "cinema_editorial",
+    "minimal_glass",
+    "kinetic_word_highlight",
+)
+
 
 
 # ============================================================================
@@ -330,6 +399,18 @@ class CreativeBrief(BaseModel):
             "editorial typography instead of offline robotic OS TTS; 'spoken_voiceover' synthesizes "
             "spoken audio only when explicitly requested."
         ),
+    )
+    title_theme: TitleThemeType = Field(
+        default="apple_tv_glass",
+        description="Art-directed cinema typography & motion theme applied across Track V3 titles",
+    )
+    burn_in_subtitles: bool = Field(
+        default=False,
+        description="When True, burns styled ASS subtitles directly into the rendered MP4",
+    )
+    subtitle_style: SubtitleStyleType = Field(
+        default="cinema_editorial",
+        description="Subtitle rendering style preset ('cinema_editorial', 'minimal_glass', 'kinetic_word_highlight')",
     )
     interview_qa: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -990,35 +1071,66 @@ class TitleOverlayItem(BaseModel):
     """A graphical title card, chapter banner, route map, or lower-third callout (Track V3)."""
 
     id: str
-    style: Literal[
-        "opening_card",
-        "act_banner",
-        "lower_third",
-        "editorial_caption",
-        "dialogue_badge",
-        "closing_card",
-        "route_map_card",
-        "exif_stamp",
-    ] = Field(default="lower_third")
+    style: TitleStyleType = Field(default="lower_third")
+    theme: TitleThemeType = Field(
+        default="apple_tv_glass",
+        description="Curated cinema title design theme driving typography, palette, and framing",
+    )
+    motion_preset: TitleMotionPresetType = Field(
+        default="masked_rise",
+        description="Internal kinetic animation preset ('masked_rise', 'tracking_expand', 'typewriter_telemetry', 'stencil_reveal', 'bezier_route_draw', 'static')",
+    )
     eyebrow: Optional[str] = Field(
         default=None,
         description="Optional tracked uppercase kicker or gallery/chapter label above the headline",
     )
     text: str = Field(..., description="Primary title or callout headline")
     subtitle: Optional[str] = Field(default=None, description="Secondary line or English/bilingual subtitle")
+    overline: str = Field(default="", description="Optional tracked small-caps kicker/overline above headline")
+    chapter_numeral: str = Field(
+        default="", description="Optional watermark Roman/Arabic numeral (e.g., 'I', 'II', '01') for chapter plates"
+    )
+    colophon_lines: list[str] = Field(
+        default_factory=list,
+        description="Structured archival/credits lines for credits_colophon_card",
+    )
     timeline_start: float = Field(..., ge=0.0)
     duration: float = Field(default=3.5, gt=0.2)
     fade_in: float = Field(default=0.35, ge=0.0)
     fade_out: float = Field(default=0.35, ge=0.0)
     accent_color: str = Field(default="#E8E4DC", description="Hex color for subtle pearl/alabaster highlight")
+    letter_spacing_px: float = Field(
+        default=0.0,
+        ge=-4.0,
+        le=48.0,
+        description="Optional optical tracking override in 1080p pixels",
+    )
+    backdrop_blur: bool = Field(
+        default=False,
+        description="When True, blurs and refracts live underlying video behind rounded glass cards",
+    )
+    backdrop_blur_sigma: float = Field(
+        default=18.0,
+        ge=2.0,
+        le=64.0,
+        description="Gaussian blur sigma for live frosted-glass backdrop cards",
+    )
     hdr_safe: bool = Field(
         default=False,
         description="When True, clamps RGBA peak white & drop-shadow alpha to HLG diffuse white (~203 nits)",
     )
     map_waypoints: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Optional route waypoints [{'label': '...', 'active': True, 'lat': ..., 'lon': ...}] for route_map_card",
+        description="Optional route waypoints [{'label': '...', 'active': True, 'lat': ..., 'lon': ...}] for route_map_card / curved_gps_ribbon",
     )
+
+    @model_validator(mode="after")
+    def _sync_eyebrow_and_overline(self) -> "TitleOverlayItem":
+        if self.eyebrow and not self.overline:
+            self.overline = self.eyebrow
+        elif self.overline and self.eyebrow is None:
+            self.eyebrow = self.overline
+        return self
 
 
 # ============================================================================
@@ -1229,13 +1341,19 @@ class SubtitleItem(BaseModel):
     speaker: Optional[str] = Field(default=None)
     text: str = Field(..., description="Primary subtitle text")
     secondary_text: Optional[str] = Field(default=None, description="Optional bilingual/secondary subtitle line")
+    words: list[WordTimestamp] = Field(
+        default_factory=list,
+        description="Optional word-level timing (timeline seconds) for kinetic_word_highlight ASS tags",
+    )
 
 
 class SubtitleConfig(BaseModel):
     """Subtitle track settings and timed items."""
 
     enabled: bool = Field(default=True)
-    burn_in: bool = Field(default=True, description="Whether to burn subtitles into the rendered video")
+    burn_in: bool = Field(default=False, description="Whether to burn subtitles into the rendered video")
+    style_preset: SubtitleStyleType = Field(default="cinema_editorial")
+    theme: TitleThemeType = Field(default="apple_tv_glass")
     font_name: str = Field(default="Microsoft YaHei")
     font_size: int = Field(default=42)
     items: list[SubtitleItem] = Field(default_factory=list)
@@ -1586,16 +1704,10 @@ class GraphicsOverlaySpec(BaseModel):
     """Consolidated Track V3 graphic overlay entry in graphics_manifest.json."""
 
     overlay_id: str
-    style: Literal[
-        "opening_card",
-        "act_banner",
-        "lower_third",
-        "editorial_caption",
-        "dialogue_badge",
-        "closing_card",
-        "route_map_card",
-        "exif_stamp",
-    ] = "lower_third"
+    style: TitleStyleType = "lower_third"
+    theme: TitleThemeType = "apple_tv_glass"
+    motion_preset: TitleMotionPresetType = "masked_rise"
+    backdrop_blur: bool = False
     overlay_kind: str = "lower_third"
     text: str
     subtitle: str = ""
@@ -1613,11 +1725,13 @@ class GraphicsManifest(BaseModel):
     """Stage 40 Output (graphics_manifest.json): Consolidated Track V3 overlays & bilingual subtitle typography."""
 
     project_title: str
+    title_theme: TitleThemeType = "apple_tv_glass"
     hdr_safe_mode: bool = True
     hdr_safe_clamping: bool = True
     hdr_peak_code_value_8bit: int = 192
     primary_font_family: str = "PingFang SC"
     secondary_font_family: str = "Avenir Next"
+    monospace_font_family: str = "Consolas"
     subtitle_count: int = 0
     bilingual_subtitles_count: int = 0
     overlays_count: int = 0
