@@ -372,3 +372,89 @@ def test_timeline_surgeon_and_skill_cli_travel_map(tmp_path: Path) -> None:
         check=True,
     )
     assert out_mp4.exists() and out_mp4.stat().st_size > 2000
+
+
+def test_arclength_constant_speed_and_great_circle_geodesic() -> None:
+    from video_editing_ai.renderer.travel_map import _ArcLengthPath, _great_circle_latlon_pts
+
+    path = _ArcLengthPath([(0.0, 0.0), (100.0, 0.0), (101.0, 0.0), (102.0, 0.0), (200.0, 0.0)])
+    assert abs(path.total_len - 200.0) < 1e-4
+    for u, expected_x in ((0.25, 50.0), (0.50, 100.0), (0.75, 150.0)):
+        sampled = path.sample_prefix(u)
+        assert abs(sampled[-1][0] - expected_x) < 0.5
+        assert abs(sampled[-1][1]) < 1e-4
+
+    heading, bank = path.tangent_and_curvature(0.5)
+    assert isinstance(heading, float) and isinstance(bank, float)
+
+    gc_pts = _great_circle_latlon_pts(40.64, -73.78, 51.47, -0.45)
+    assert len(gc_pts) >= 3
+    mid_lat, _mid_lon = gc_pts[len(gc_pts) // 2]
+    assert mid_lat > 0.5 * (40.64 + 51.47) + 2.5
+
+    trans_pacific = [
+        {"label": "San Francisco", "lat": 37.62, "lon": -122.38, "alt_m": 4.0},
+        {"label": "Tokyo", "lat": 35.55, "lon": 139.78, "alt_m": 6.0},
+    ]
+    frame = render_travel_map_frame(
+        waypoints=trans_pacific,
+        style="satellite_hybrid_4k",
+        width=640,
+        height=360,
+        leg_index=0,
+        t_norm=0.55,
+        transport_mode="flight",
+        hdr_safe=True,
+        allow_tile_fetch=False,
+    )
+    arr = np.asarray(frame, dtype=np.uint8)
+    assert arr.shape == (360, 640, 3)
+    assert int(arr.max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+
+
+def test_all_vehicles_and_satellite_hybrid_4k_hdr(tmp_path: Path) -> None:
+    assert resolve_travel_map_style("auto", transport_mode="drive") == "google_road_navigator"
+    assert resolve_travel_map_style("auto", transport_mode="flight") == "aerial_relief_hybrid"
+    assert "satellite_hybrid_4k" in CART_THEME_SPECS
+
+    waypoints = [
+        {"label": "Palm Springs", "lat": 33.8303, "lon": -116.5453, "alt_m": 146.0},
+        {"label": "San Diego", "lat": 32.7157, "lon": -117.1611, "alt_m": 19.0},
+    ]
+    styles = ("google_road_navigator", "aerial_relief_hybrid", "satellite_hybrid_4k", "midnight_vox_atlas")
+    modes = ("flight", "drive", "train", "boat", "walk")
+
+    for mode in modes:
+        for style in styles:
+            frame_hdr = render_travel_map_frame(
+                waypoints=waypoints,
+                style=style,
+                width=640,
+                height=360,
+                leg_index=0,
+                t_norm=0.58,
+                transport_mode=mode,
+                hdr_safe=True,
+                allow_tile_fetch=False,
+                cache_dir=tmp_path / "map_cache",
+            )
+            arr_hdr = np.asarray(frame_hdr, dtype=np.uint8)
+            assert arr_hdr.shape == (360, 640, 3)
+            assert int(arr_hdr.max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+
+    frame_sdr = render_travel_map_frame(
+        waypoints=waypoints,
+        style="satellite_hybrid_4k",
+        width=640,
+        height=360,
+        leg_index=0,
+        t_norm=0.58,
+        transport_mode="drive",
+        hdr_safe=False,
+        allow_tile_fetch=False,
+        cache_dir=tmp_path / "map_cache",
+    )
+    arr_sdr = np.asarray(frame_sdr, dtype=np.uint8)
+    assert arr_sdr.shape == (360, 640, 3)
+    assert int(arr_sdr.max()) > 0
+

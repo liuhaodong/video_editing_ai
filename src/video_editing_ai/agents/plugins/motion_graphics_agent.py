@@ -499,8 +499,11 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             allow_tiles = os.environ.get("AI_EDITOR_OFFLINE_MAPS", "0") != "1"
             maps_dir = blackboard.project_dir / "cache" / "maps"
             tiles_cache_dir = maps_dir / "tiles"
-            map_w = max(640, min(int(timeline.settings.width), 1920))
-            map_h = max(360, min(int(timeline.settings.height), 1080))
+            max_map_w = 3840 if os.environ.get("AI_EDITOR_MAP_4K") == "1" else 2560
+            max_map_h = 2160 if os.environ.get("AI_EDITOR_MAP_4K") == "1" else 1440
+            map_w = max(640, min(int(timeline.settings.width), max_map_w))
+            map_h = max(360, min(int(timeline.settings.height), max_map_h))
+            user_prompt_blob = str(getattr(brief, "raw_user_prompt", "") if brief is not None else blackboard.user_prompt)
 
             for leg_pos, leg_i in enumerate(chosen_legs):
                 orig_wp = waypoints[leg_i]
@@ -510,6 +513,11 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 ch_dest = chap_by_id.get(dest_wp.chapter_id)
                 mode_hint = getattr(ch_dest, "transport_mode", "auto") if ch_dest is not None else "auto"
                 t_mode = infer_transport_mode(leg_km, orig_wp.label, dest_wp.label, hint=mode_hint)
+                leg_style = (
+                    resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
+                    if str(tm_raw_style or "auto").strip().lower() == "auto"
+                    else tm_style
+                )
 
                 if tm_mode == "picture_in_picture":
                     want_place = "v3_pip"
@@ -553,7 +561,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                         render_travel_map_clip(
                             waypoints=waypoints,
                             output_mp4=map_mp4,
-                            style=tm_style,
+                            style=leg_style,
                             duration=seg_dur,
                             width=map_w,
                             height=map_h,
@@ -595,7 +603,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                                 transport_mode=t_mode,  # type: ignore[arg-type]
                                 distance_km=round(leg_km, 2),
                                 bearing_deg=bearing,
-                                style=tm_style,
+                                style=leg_style,
                                 placement="v2_flyover",
                                 timeline_start=seg_start,
                                 duration=seg_dur,
@@ -667,7 +675,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                                 transport_mode=t_mode,  # type: ignore[arg-type]
                                 distance_km=round(leg_km, 2),
                                 bearing_deg=bearing,
-                                style=tm_style,
+                                style=leg_style,
                                 placement="v3_pip",
                                 timeline_start=chosen_st,
                                 duration=chosen_dur,

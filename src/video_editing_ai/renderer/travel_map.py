@@ -62,13 +62,14 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "graticule_rgba": (86, 122, 162, 62),
         "route_glow": (44, 194, 238),
         "route_core": (122, 232, 252),
+        "route_casing": (8, 24, 44),
         "route_future": (132, 162, 198),
         "route_history": (86, 178, 214),
         "accent": (244, 182, 82),
         "pin_fill": (18, 26, 42),
         "pin_text": (244, 248, 252),
-        "hud_fill": (10, 16, 28, 212),
-        "hud_border": (110, 220, 246, 120),
+        "hud_fill": (10, 16, 28, 218),
+        "hud_border": (110, 220, 246, 125),
         "hud_title": (244, 248, 252),
         "hud_sub": (176, 198, 222),
         "hud_metric": (122, 232, 252),
@@ -78,8 +79,11 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "neatline": False,
         "compass_color": (160, 198, 228),
         "horizon_mist": (12, 22, 38),
-        "tile_url": "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-        "tile_blend": 0.88,
+        "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "labels_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_strength": 0.22,
+        "tile_blend": 0.90,
     },
     "google_road_navigator": {
         "display_name": "Google-Style Road & Terrain Navigator",
@@ -91,16 +95,17 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_high": (212, 206, 192),
         "coast_rgb": (118, 152, 188),
         "contour_rgba": (168, 160, 146, 52),
-        "graticule_rgba": (132, 146, 164, 34),
+        "graticule_rgba": (132, 146, 164, 26),
         "route_glow": (26, 115, 232),
         "route_core": (66, 133, 244),
-        "route_future": (120, 134, 152),
+        "route_casing": (20, 56, 132),
+        "route_future": (110, 126, 146),
         "route_history": (52, 168, 83),
         "accent": (234, 67, 53),
         "pin_fill": (255, 255, 255),
         "pin_text": (32, 33, 36),
-        "hud_fill": (255, 255, 255, 236),
-        "hud_border": (26, 115, 232, 170),
+        "hud_fill": (255, 255, 255, 238),
+        "hud_border": (26, 115, 232, 175),
         "hud_title": (32, 33, 36),
         "hud_sub": (95, 99, 104),
         "hud_metric": (26, 115, 232),
@@ -111,7 +116,9 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "compass_color": (60, 64, 67),
         "horizon_mist": (244, 246, 248),
         "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-        "tile_blend": 0.96,
+        "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_strength": 0.28,
+        "tile_blend": 0.97,
     },
     "archival_expedition_parchment": {
         "display_name": "Archival Expedition Parchment",
@@ -123,15 +130,16 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_high": (182, 154, 114),
         "coast_rgb": (96, 76, 54),
         "contour_rgba": (128, 102, 72, 92),
-        "graticule_rgba": (112, 88, 62, 74),
+        "graticule_rgba": (112, 88, 62, 68),
         "route_glow": (192, 68, 52),
         "route_core": (164, 42, 36),
+        "route_casing": (78, 32, 24),
         "route_future": (118, 92, 66),
         "route_history": (146, 72, 56),
         "accent": (178, 126, 44),
         "pin_fill": (236, 228, 208),
         "pin_text": (42, 32, 22),
-        "hud_fill": (234, 226, 206, 228),
+        "hud_fill": (234, 226, 206, 230),
         "hud_border": (112, 88, 58, 165),
         "hud_title": (38, 30, 22),
         "hud_sub": (90, 72, 52),
@@ -143,7 +151,9 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "compass_color": (82, 64, 44),
         "horizon_mist": (218, 210, 190),
         "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
-        "tile_blend": 0.90,
+        "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_strength": 0.24,
+        "tile_blend": 0.92,
     },
     "aerial_relief_hybrid": {
         "display_name": "Aerial Relief Hybrid",
@@ -154,17 +164,18 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_mid": (118, 108, 82),
         "land_high": (172, 162, 144),
         "coast_rgb": (146, 206, 202),
-        "contour_rgba": (228, 212, 174, 60),
-        "graticule_rgba": (196, 216, 220, 52),
+        "contour_rgba": (228, 212, 174, 56),
+        "graticule_rgba": (196, 216, 220, 42),
         "route_glow": (244, 184, 74),
-        "route_core": (248, 216, 128),
+        "route_core": (250, 216, 120),
+        "route_casing": (14, 22, 32),
         "route_future": (216, 226, 230),
         "route_history": (208, 166, 88),
         "accent": (246, 190, 80),
         "pin_fill": (20, 34, 42),
         "pin_text": (248, 246, 240),
-        "hud_fill": (14, 24, 30, 208),
-        "hud_border": (246, 190, 80, 125),
+        "hud_fill": (14, 24, 30, 218),
+        "hud_border": (246, 190, 80, 140),
         "hud_title": (248, 246, 240),
         "hud_sub": (192, 210, 212),
         "hud_metric": (248, 204, 102),
@@ -173,9 +184,50 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "light_paper": False,
         "neatline": False,
         "compass_color": (212, 226, 224),
-        "horizon_mist": (38, 62, 72),
+        "horizon_mist": (24, 40, 50),
         "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "tile_blend": 0.58,
+        "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_strength": 0.26,
+        "roads_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        "labels_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        "tile_blend": 0.92,
+    },
+    "satellite_hybrid_4k": {
+        "display_name": "Satellite Hybrid 4K",
+        "water_deep": (8, 24, 38),
+        "water_shallow": (18, 58, 78),
+        "bathymetry_rgb": (38, 92, 114),
+        "land_low": (44, 64, 48),
+        "land_mid": (98, 90, 70),
+        "land_high": (154, 146, 128),
+        "coast_rgb": (132, 198, 212),
+        "contour_rgba": (214, 202, 168, 48),
+        "graticule_rgba": (180, 208, 224, 38),
+        "route_glow": (56, 189, 248),
+        "route_core": (255, 214, 102),
+        "route_casing": (12, 18, 28),
+        "route_future": (222, 232, 242),
+        "route_history": (56, 189, 248),
+        "accent": (245, 158, 11),
+        "pin_fill": (14, 22, 34),
+        "pin_text": (250, 250, 252),
+        "hud_fill": (12, 18, 26, 222),
+        "hud_border": (56, 189, 248, 155),
+        "hud_title": (250, 252, 255),
+        "hud_sub": (186, 204, 220),
+        "hud_metric": (255, 214, 102),
+        "title_tier": "sans",
+        "sub_tier": "mono",
+        "light_paper": False,
+        "neatline": False,
+        "compass_color": (216, 230, 238),
+        "horizon_mist": (14, 24, 34),
+        "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_strength": 0.25,
+        "roads_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        "labels_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        "tile_blend": 0.96,
     },
     "kinfolk_minimal_monograph": {
         "display_name": "Kinfolk Minimal Monograph",
@@ -187,15 +239,16 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_high": (208, 200, 186),
         "coast_rgb": (138, 148, 154),
         "contour_rgba": (170, 164, 152, 78),
-        "graticule_rgba": (152, 146, 138, 64),
+        "graticule_rgba": (152, 146, 138, 60),
         "route_glow": (196, 102, 74),
         "route_core": (178, 76, 52),
+        "route_casing": (88, 42, 30),
         "route_future": (146, 138, 130),
         "route_history": (176, 112, 90),
         "accent": (178, 76, 52),
         "pin_fill": (244, 240, 234),
         "pin_text": (38, 34, 30),
-        "hud_fill": (242, 238, 230, 226),
+        "hud_fill": (242, 238, 230, 228),
         "hud_border": (166, 156, 142, 145),
         "hud_title": (34, 32, 28),
         "hud_sub": (100, 94, 86),
@@ -206,8 +259,11 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "neatline": True,
         "compass_color": (108, 102, 94),
         "horizon_mist": (228, 226, 220),
-        "tile_url": "https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
-        "tile_blend": 0.48,
+        "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "labels_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        "hillshade_strength": 0.20,
+        "tile_blend": 0.56,
     },
 }
 
@@ -216,13 +272,16 @@ def resolve_travel_map_style(
     requested_style: str = "auto",
     title_theme: str = "apple_tv_glass",
     prompt_text: str = "",
+    transport_mode: str = "auto",
 ) -> str:
-    """Resolve explicit or brief-matched cartography style from the 4 curated palettes."""
+    """Resolve explicit, mode-adaptive, or brief-matched cartography style."""
     req = (requested_style or "auto").strip().lower()
     if req in CART_THEME_SPECS:
         return req
 
     low = (prompt_text or "").lower()
+    if any(k in low for k in ("satellite hybrid", "earth studio", "satellite 4k")):
+        return "satellite_hybrid_4k"
     if any(k in low for k in ("google", "road", "street", "highway", "navigator", "driving map")):
         return "google_road_navigator"
     if any(k in low for k in ("parchment", "vintage", "archival", "expedition", "indiana", "sepia", "treasure")):
@@ -233,6 +292,12 @@ def resolve_travel_map_style(
         return "kinfolk_minimal_monograph"
     if any(k in low for k in ("vox", "midnight", "neon", "cyan", "dark atlas")):
         return "midnight_vox_atlas"
+
+    t_mode = (transport_mode or "auto").strip().lower()
+    if t_mode in ("flight", "boat"):
+        return "aerial_relief_hybrid"
+    if t_mode in ("drive", "train", "walk"):
+        return "google_road_navigator"
 
     theme_map = {
         "criterion_atelier": "archival_expedition_parchment",
@@ -812,42 +877,61 @@ def _build_ssl_ctx() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
-def _try_fetch_slippy_mosaic(
+def _compute_tile_grid_for_zoom(
     viewport: _MapViewport,
-    style: str,
+    z_fetch: int,
+) -> tuple[int, int, int, int, int, int, float]:
+    scale_f = 2.0 ** (z_fetch - viewport.zoom)
+    n_tiles = 1 << z_fetch
+    x0_s = viewport.x0_world * scale_f
+    x1_s = viewport.x1_world * scale_f
+    y0_s = viewport.y0_world * scale_f
+    y1_s = viewport.y1_world * scale_f
+    tx_min = int(math.floor(x0_s / 256.0))
+    tx_max = int(math.floor(x1_s / 256.0))
+    ty_min = max(0, int(math.floor(y0_s / 256.0)))
+    ty_max = min(n_tiles - 1, int(math.floor(y1_s / 256.0)))
+    total_tiles = max(1, (tx_max - tx_min + 1) * (ty_max - ty_min + 1))
+    return n_tiles, tx_min, tx_max, ty_min, ty_max, total_tiles, scale_f
+
+
+def _fetch_tile_mosaic_pil(
+    viewport: _MapViewport,
+    url_tpl: str,
+    layer_tag: str,
+    mode: str = "RGB",
+    fill_color: tuple[int, ...] = (0, 0, 0),
     cache_dir: Optional[Path] = None,
-) -> Optional[np.ndarray]:
-    """Fetch and disk-cache Open/Esri slippy tiles covering viewport, graded into the theme."""
-    spec = CART_THEME_SPECS[style]
-    url_tpl = spec["tile_url"]
-    n_tiles = 1 << viewport.zoom
-    tx_min = int(math.floor(viewport.x0_world / 256.0))
-    tx_max = int(math.floor(viewport.x1_world / 256.0))
-    ty_min = max(0, int(math.floor(viewport.y0_world / 256.0)))
-    ty_max = min(n_tiles - 1, int(math.floor(viewport.y1_world / 256.0)))
-    total_tiles = (tx_max - tx_min + 1) * (ty_max - ty_min + 1)
-    if total_tiles > 160:
+    retina_boost: bool = True,
+) -> Optional[Image.Image]:
+    """Fetch parallel disk-cached slippy tiles at Retina (z+1) density with automatic tile-cap fallback."""
+    z_fetch = min(15, viewport.zoom + (1 if retina_boost else 0))
+    n_tiles, tx_min, tx_max, ty_min, ty_max, total_tiles, scale_f = _compute_tile_grid_for_zoom(viewport, z_fetch)
+    if total_tiles > 324 and z_fetch > viewport.zoom:
+        z_fetch = viewport.zoom
+        n_tiles, tx_min, tx_max, ty_min, ty_max, total_tiles, scale_f = _compute_tile_grid_for_zoom(viewport, z_fetch)
+    if total_tiles > 324:
         return None
 
-    tile_root = (cache_dir or Path("cache")) / "map_tiles" / style / str(viewport.zoom)
+    tile_root = (cache_dir or Path("cache")) / "map_tiles" / layer_tag / str(z_fetch)
     tile_root.mkdir(parents=True, exist_ok=True)
     ctx = _build_ssl_ctx()
 
     canvas_w = max(256, (tx_max - tx_min + 1) * 256)
     canvas_h = max(256, (ty_max - ty_min + 1) * 256)
-    mosaic = Image.new("RGB", (canvas_w, canvas_h), spec["water_deep"])
+    mosaic = Image.new(mode, (canvas_w, canvas_h), fill_color)
     fetched_ok = 0
 
     def _fetch_one(tx_raw: int, ty: int) -> tuple[int, int, Optional[Path]]:
         tx_wrap = tx_raw % n_tiles
         local_png = tile_root / f"{tx_wrap}_{ty}.png"
         if not local_png.exists():
-            url = url_tpl.format(z=viewport.zoom, x=tx_wrap, y=ty)
+            url = url_tpl.format(z=z_fetch, x=tx_wrap, y=ty)
             req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
             try:
-                with urllib.request.urlopen(req, timeout=2.5, context=ctx) as resp:
+                with urllib.request.urlopen(req, timeout=2.8, context=ctx) as resp:
                     data = resp.read()
-                if len(data) > 200:
+                if len(data) > 160:
                     local_png.write_bytes(data)
             except Exception:
                 return tx_raw, ty, None
@@ -855,7 +939,7 @@ def _try_fetch_slippy_mosaic(
 
     coords = [(tx_raw, ty) for tx_raw in range(tx_min, tx_max + 1) for ty in range(ty_min, ty_max + 1)]
     results: list[tuple[int, int, Optional[Path]]] = []
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=12) as pool:
         futs = [pool.submit(_fetch_one, tx_r, ty_v) for tx_r, ty_v in coords]
         for fut in as_completed(futs):
             results.append(fut.result())
@@ -865,7 +949,8 @@ def _try_fetch_slippy_mosaic(
             continue
         try:
             with Image.open(local_png) as t_im:
-                mosaic.paste(t_im.convert("RGB"), ((tx_raw - tx_min) * 256, (ty - ty_min) * 256))
+                conv = t_im.convert(mode)
+                mosaic.paste(conv, ((tx_raw - tx_min) * 256, (ty - ty_min) * 256))
                 fetched_ok += 1
         except Exception:
             continue
@@ -873,14 +958,59 @@ def _try_fetch_slippy_mosaic(
     if fetched_ok < max(1, total_tiles // 2):
         return None
 
-    # Crop exact pixel window and resize cleanly into (viewport.width, viewport.height)
-    ox = int(round(viewport.x0_world - tx_min * 256.0))
-    oy = int(round(viewport.y0_world - ty_min * 256.0))
-    ow = int(round(viewport.x1_world - viewport.x0_world))
-    oh = int(round(viewport.y1_world - viewport.y0_world))
+    ox = int(round(viewport.x0_world * scale_f - tx_min * 256.0))
+    oy = int(round(viewport.y0_world * scale_f - ty_min * 256.0))
+    ow = int(round((viewport.x1_world - viewport.x0_world) * scale_f))
+    oh = int(round((viewport.y1_world - viewport.y0_world) * scale_f))
     crop = mosaic.crop((ox, oy, ox + max(8, ow), oy + max(8, oh)))
-    crop = crop.resize((viewport.width, viewport.height), Image.Resampling.BICUBIC)
-    return np.asarray(crop, dtype=np.float32)
+    crop = crop.resize((viewport.width, viewport.height), Image.Resampling.LANCZOS)
+    if mode == "RGB":
+        crop = crop.filter(ImageFilter.UnsharpMask(radius=0.9, percent=28, threshold=2))
+    return crop
+
+
+def _try_fetch_slippy_mosaic(
+    viewport: _MapViewport,
+    style: str,
+    cache_dir: Optional[Path] = None,
+    url_override: Optional[str] = None,
+    layer_tag: str = "",
+    retina_boost: bool = True,
+) -> Optional[np.ndarray]:
+    """Fetch and disk-cache high-DPI Retina (z+1) slippy tiles covering viewport."""
+    spec = CART_THEME_SPECS[style]
+    url_tpl = url_override or spec["tile_url"]
+    img = _fetch_tile_mosaic_pil(
+        viewport=viewport,
+        url_tpl=url_tpl,
+        layer_tag=layer_tag or style,
+        mode="RGB",
+        fill_color=tuple(spec["water_deep"]),
+        cache_dir=cache_dir,
+        retina_boost=retina_boost,
+    )
+    if img is None:
+        return None
+    return np.asarray(img, dtype=np.float32)
+
+
+def _try_fetch_rgba_tile_layer(
+    viewport: _MapViewport,
+    url_tpl: str,
+    layer_tag: str,
+    cache_dir: Optional[Path] = None,
+    retina_boost: bool = True,
+) -> Optional[Image.Image]:
+    """Fetch a transparent RGBA slippy reference overlay (roads, places, boundaries)."""
+    return _fetch_tile_mosaic_pil(
+        viewport=viewport,
+        url_tpl=url_tpl,
+        layer_tag=layer_tag,
+        mode="RGBA",
+        fill_color=(0, 0, 0, 0),
+        cache_dir=cache_dir,
+        retina_boost=retina_boost,
+    )
 
 
 def _synth_fbm_2d(h: int, w: int, seed: int) -> np.ndarray:
@@ -1091,20 +1221,37 @@ def _cached_world_baseplate(
     coast_alpha = np.clip((elev - sea_level) * 55.0 + 0.5, 0.0, 1.0)[..., None]
     rgb = water_rgb * (1.0 - coast_alpha) + land_rgb * coast_alpha
 
-    # Optional online cached slippy-tile blend
+    # Optional online cached Retina slippy-tile base + 3D DEM World_Hillshade relief
     has_real_tiles = False
+    c_dir_obj = Path(cache_dir_str) if cache_dir_str else None
     if allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
-        tile_arr = _try_fetch_slippy_mosaic(vp, style=style, cache_dir=Path(cache_dir_str) if cache_dir_str else None)
+        tile_arr = _try_fetch_slippy_mosaic(vp, style=style, cache_dir=c_dir_obj, retina_boost=True)
         if tile_arr is not None and tile_arr.shape == rgb.shape:
             has_real_tiles = True
             blend = float(spec.get("tile_blend", 0.52))
-            if style in ("google_road_navigator", "aerial_relief_hybrid", "archival_expedition_parchment"):
-                warm = np.array([1.01, 0.995, 0.965], dtype=np.float32) if style == "archival_expedition_parchment" else 1.0
+            if style == "archival_expedition_parchment":
+                warm = np.array([1.01, 0.995, 0.965], dtype=np.float32)
                 rgb = np.clip(tile_arr * warm, 0, 255) * blend + rgb * (1.0 - blend)
             elif style == "midnight_vox_atlas":
                 rgb = np.clip(tile_arr * 1.15, 0, 255) * blend + rgb * (1.0 - blend)
             else:
                 rgb = np.clip(tile_arr, 0, 255) * blend + rgb * (1.0 - blend)
+
+            hs_url = spec.get("hillshade_url")
+            hs_strength = float(spec.get("hillshade_strength", 0.0) or 0.0)
+            if hs_url and hs_strength > 0.01:
+                hs_arr = _try_fetch_slippy_mosaic(
+                    vp,
+                    style=style,
+                    cache_dir=c_dir_obj,
+                    url_override=hs_url,
+                    layer_tag="world_hillshade",
+                    retina_boost=False,
+                )
+                if hs_arr is not None and hs_arr.shape == rgb.shape:
+                    hs_luma = (0.299 * hs_arr[:, :, 0] + 0.587 * hs_arr[:, :, 1] + 0.114 * hs_arr[:, :, 2]) / 255.0
+                    relief = np.clip(1.0 + hs_strength * ((hs_luma - 0.62) * 2.2), 0.72, 1.24)[..., None]
+                    rgb = np.clip(rgb * relief, 0, 255)
 
     # Quantized marching iso-elevation contour hairlines on land (only when using offline synthetic terrain)
     if not has_real_tiles:
@@ -1124,6 +1271,18 @@ def _cached_world_baseplate(
         rgb = np.where(iso_mask, rgb * (1.0 - contour_a) + contour_col * contour_a, rgb)
 
     base_img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
+    if has_real_tiles and spec.get("roads_overlay_url"):
+        roads_im = _try_fetch_rgba_tile_layer(
+            vp,
+            url_tpl=str(spec["roads_overlay_url"]),
+            layer_tag="world_transportation",
+            cache_dir=c_dir_obj,
+            retina_boost=True,
+        )
+        if roads_im is not None:
+            r_alpha = roads_im.getchannel("A").point(lambda v: int(round(v * 0.85)))
+            roads_im.putalpha(r_alpha)
+            base_img.alpha_composite(roads_im)
     draw = ImageDraw.Draw(base_img, "RGBA")
     s = world_w / 1920.0
     f_mono = _load_font_tier(max(10, int(round(12 * s))), tier="mono", bold=False)
@@ -1169,9 +1328,188 @@ def _cached_world_baseplate(
     return base_img.convert("RGB")
 
 
+@lru_cache(maxsize=16)
+def _cached_labels_overlay(
+    style: str,
+    world_w: int,
+    world_h: int,
+    wp_sig: tuple[tuple[float, float, float, str], ...],
+    allow_tile_fetch: bool,
+    cache_dir_str: str,
+    focus_leg_index: int = -1,
+) -> Optional[Image.Image]:
+    """Fetch optional transparent RGBA reference labels overlay so city names float crisp above routes."""
+    if not allow_tile_fetch or os.environ.get("AI_EDITOR_OFFLINE_MAPS") == "1":
+        return None
+    spec = CART_THEME_SPECS.get(style, {})
+    lbl_url = spec.get("labels_overlay_url")
+    if not lbl_url:
+        return None
+    waypoints = [
+        MapWaypointSpec(waypoint_id=f"wp_{i+1:02d}", label=lbl, lat=lat, lon=lon, alt_m=alt)
+        for i, (lat, lon, alt, lbl) in enumerate(wp_sig)
+    ]
+    vp = _compute_viewport(waypoints, world_w, world_h, focus_leg_index=focus_leg_index)
+    lbl_tag = "world_dark_labels" if "Dark_Gray" in str(lbl_url) else ("world_light_labels" if "Light_Gray" in str(lbl_url) else "world_places")
+    return _try_fetch_rgba_tile_layer(
+        vp,
+        url_tpl=str(lbl_url),
+        layer_tag=lbl_tag,
+        cache_dir=Path(cache_dir_str) if cache_dir_str else None,
+        retina_boost=True,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Vector Splines, Flight Parabolic Arcs, Vehicle Silhouettes & Photo Callouts
+# Great-Circle Flight Geodesics, Arc-Length Path Engine & Sub-Pixel Shaders
 # ---------------------------------------------------------------------------
+
+def _great_circle_latlon_pts(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+    n_samples: int = 160,
+) -> list[tuple[float, float]]:
+    """Sample points along a spherical 3D Great-Circle SLERP geodesic between (lat1, lon1) and (lat2, lon2)."""
+    phi1, lam1 = math.radians(float(lat1)), math.radians(float(lon1))
+    phi2, lam2 = math.radians(float(lat2)), math.radians(float(lon2))
+    p0 = np.array([math.cos(phi1) * math.cos(lam1), math.cos(phi1) * math.sin(lam1), math.sin(phi1)], dtype=np.float64)
+    p1 = np.array([math.cos(phi2) * math.cos(lam2), math.cos(phi2) * math.sin(lam2), math.sin(phi2)], dtype=np.float64)
+    dot = float(np.clip(np.dot(p0, p1), -1.0, 1.0))
+    omega = math.acos(dot)
+    n = max(12, int(n_samples))
+    out: list[tuple[float, float]] = []
+    if omega < 1e-6:
+        for i in range(n):
+            t = i / float(n - 1)
+            out.append((lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t))
+        return out
+    sin_om = math.sin(omega)
+    for i in range(n):
+        t = i / float(n - 1)
+        a = math.sin((1.0 - t) * omega) / sin_om
+        b = math.sin(t * omega) / sin_om
+        v = a * p0 + b * p1
+        v_norm = float(np.linalg.norm(v))
+        if v_norm > 1e-12:
+            v = v / v_norm
+        lat_t = math.degrees(math.asin(max(-1.0, min(1.0, float(v[2])))))
+        lon_t = math.degrees(math.atan2(float(v[1]), float(v[0])))
+        out.append((lat_t, lon_t))
+    return out
+
+
+def _project_flight_latlons_to_px(
+    vp: _MapViewport,
+    orig: MapWaypointSpec,
+    dest: MapWaypointSpec,
+    gc_latlons: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Project Great-Circle lat/lon points into viewport pixel coords safely across antimeridian arcs."""
+    crosses_dateline = abs(dest.lon - orig.lon) > 180.0
+    if not crosses_dateline:
+        return [vp.latlon_to_px(lat, lon) for lat, lon in gc_latlons]
+    # Preserve the curved high-latitude Great-Circle profile without horizontal [-180..+180] wrap snaps
+    x0, _ = vp.latlon_to_px(orig.lat, orig.lon)
+    x1, _ = vp.latlon_to_px(dest.lat, dest.lon)
+    n = max(1, len(gc_latlons) - 1)
+    pts: list[tuple[float, float]] = []
+    for i, (lat_t, _) in enumerate(gc_latlons):
+        frac = i / float(n)
+        _, py = vp.latlon_to_px(lat_t, orig.lon)
+        pts.append((x0 + (x1 - x0) * frac, py))
+    return pts
+
+
+class _ArcLengthPath:
+    """Cumulative Euclidean arc-length reparameterizer for jitter-free constant-speed vehicle motion."""
+
+    def __init__(self, pts: list[tuple[float, float]]) -> None:
+        clean: list[tuple[float, float]] = []
+        for x, y in pts:
+            if not clean or math.hypot(x - clean[-1][0], y - clean[-1][1]) >= 0.05:
+                clean.append((float(x), float(y)))
+        if len(clean) < 2:
+            p0 = clean[0] if clean else (0.0, 0.0)
+            clean = [p0, (p0[0] + 1.0, p0[1])]
+        self.pts = np.asarray(clean, dtype=np.float64)
+        diffs = np.diff(self.pts, axis=0)
+        seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
+        self.cum_d = np.concatenate(([0.0], np.cumsum(seg_lens)))
+        self.total_len = float(self.cum_d[-1]) if float(self.cum_d[-1]) > 1e-6 else 1.0
+
+    def point_at_s(self, s: float) -> tuple[float, float]:
+        s_c = max(0.0, min(self.total_len, float(s)))
+        if s_c <= 0.0:
+            return (float(self.pts[0, 0]), float(self.pts[0, 1]))
+        if s_c >= self.total_len:
+            return (float(self.pts[-1, 0]), float(self.pts[-1, 1]))
+        idx = int(np.searchsorted(self.cum_d, s_c, side="right")) - 1
+        idx = max(0, min(len(self.pts) - 2, idx))
+        s0 = float(self.cum_d[idx])
+        s1 = float(self.cum_d[idx + 1])
+        frac = (s_c - s0) / max(1e-6, s1 - s0)
+        x = float(self.pts[idx, 0] + (self.pts[idx + 1, 0] - self.pts[idx, 0]) * frac)
+        y = float(self.pts[idx, 1] + (self.pts[idx + 1, 1] - self.pts[idx, 1]) * frac)
+        return (x, y)
+
+    def sample_prefix(self, u: float) -> list[tuple[float, float]]:
+        s_target = max(0.0, min(1.0, float(u))) * self.total_len
+        if s_target <= 1e-4:
+            p0 = (float(self.pts[0, 0]), float(self.pts[0, 1]))
+            return [p0, self.point_at_s(min(self.total_len, 1.0))]
+        idx = int(np.searchsorted(self.cum_d, s_target, side="right"))
+        prefix = [(float(self.pts[k, 0]), float(self.pts[k, 1])) for k in range(max(1, min(len(self.pts), idx)))]
+        tip = self.point_at_s(s_target)
+        if math.hypot(tip[0] - prefix[-1][0], tip[1] - prefix[-1][1]) >= 0.01:
+            prefix.append(tip)
+        return prefix
+
+    def sample_window(self, s_start: float, s_end: float, step_px: float = 4.0) -> list[tuple[float, float]]:
+        s0 = max(0.0, min(self.total_len, float(s_start)))
+        s1 = max(0.0, min(self.total_len, float(s_end)))
+        if s1 - s0 < 0.25:
+            return []
+        n = max(3, int(math.ceil((s1 - s0) / max(1.0, step_px))) + 1)
+        return [self.point_at_s(s0 + (s1 - s0) * (k / float(n - 1))) for k in range(n)]
+
+    def tangent_and_curvature(self, u: float, window_px: float = 22.0) -> tuple[float, float]:
+        s_cur = max(0.0, min(self.total_len, float(u) * self.total_len))
+        half_w = max(4.0, float(window_px))
+        # Gaussian-weighted local tangent samples to eliminate highway-ramp heading snap
+        offsets = (-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0)
+        weights = np.array([0.05, 0.09, 0.13, 0.17, 0.20, 0.17, 0.13, 0.09, 0.05], dtype=np.float64)
+        angles: list[float] = []
+        delta = max(2.0, half_w * 0.22)
+        for off in offsets:
+            sc = max(0.0, min(self.total_len, s_cur + off * half_w))
+            sa = max(0.0, sc - delta)
+            sb = min(self.total_len, sc + delta)
+            if sb - sa < 0.5:
+                sa = max(0.0, self.total_len - 2.0)
+                sb = self.total_len
+            pa = self.point_at_s(sa)
+            pb = self.point_at_s(sb)
+            ang = math.atan2(pb[1] - pa[1], pb[0] - pa[0]) if math.hypot(pb[0] - pa[0], pb[1] - pa[1]) > 1e-4 else 0.0
+            angles.append(ang)
+        unwrapped = np.unwrap(np.array(angles, dtype=np.float64))
+        weights /= np.sum(weights)
+        smooth_heading = float(np.sum(unwrapped * weights))
+        turn_diff = float(unwrapped[-2] - unwrapped[1])
+        bank_factor = float(np.clip(turn_diff / 0.45, -1.0, 1.0))
+        return smooth_heading, bank_factor
+
+    def smoothed_camera_point(self, u: float, window_px: float = 160.0) -> tuple[float, float]:
+        s_cur = max(0.0, min(self.total_len, float(u) * self.total_len))
+        half_w = max(8.0, float(window_px))
+        xs, ys = [], []
+        for k in range(11):
+            frac = (k / 10.0) * 2.0 - 1.0
+            px, py = self.point_at_s(s_cur + frac * half_w)
+            xs.append(px)
+            ys.append(py)
+        return (float(np.mean(xs)), float(np.mean(ys)))
 
 def _ease_in_out_cubic(u: float) -> float:
     x = max(0.0, min(1.0, float(u)))
@@ -1224,7 +1562,7 @@ def _draw_aa_polyline(
 ) -> None:
     if len(pts) < 2:
         return
-    arr = np.round(np.array(pts, dtype=np.float32)).astype(np.int32).reshape((-1, 1, 2))
+    arr = np.round(np.asarray(pts, dtype=np.float64) * 16.0).astype(np.int32).reshape((-1, 1, 2))
     cv2.polylines(
         overlay_bgr_a,
         [arr],
@@ -1232,6 +1570,7 @@ def _draw_aa_polyline(
         color=(rgba[0], rgba[1], rgba[2], rgba[3]),
         thickness=max(1, int(thickness)),
         lineType=cv2.LINE_AA,
+        shift=4,
     )
 
 
@@ -1261,17 +1600,244 @@ def _draw_dashed_aa_polyline(
                 t1 = (pos + step) / seg
                 cv2.line(
                     overlay_rgba,
-                    (int(round(x1 + (x2 - x1) * t0)), int(round(y1 + (y2 - y1) * t0))),
-                    (int(round(x1 + (x2 - x1) * t1)), int(round(y1 + (y2 - y1) * t1))),
+                    (int(round((x1 + (x2 - x1) * t0) * 16.0)), int(round((y1 + (y2 - y1) * t0) * 16.0))),
+                    (int(round((x1 + (x2 - x1) * t1) * 16.0)), int(round((y1 + (y2 - y1) * t1) * 16.0))),
                     color=rgba,
                     thickness=max(1, thickness),
                     lineType=cv2.LINE_AA,
+                    shift=4,
                 )
             pos += step
             rem -= step
             if rem <= 1e-3:
                 draw_on = not draw_on
                 rem = dash_px if draw_on else gap_px
+
+
+def _draw_cased_route(
+    route_arr: np.ndarray,
+    pts: list[tuple[float, float]],
+    spec: dict[str, Any],
+    stroke_w: int,
+    s_w: float,
+    is_flight: bool = False,
+    ground_pts: Optional[list[tuple[float, float]]] = None,
+) -> None:
+    """Render a 4-pass sub-pixel AA route shader: shadow -> contrasting casing -> core -> comet tip."""
+    if len(pts) < 2:
+        return
+    if is_flight and ground_pts and len(ground_pts) >= 2:
+        _draw_dashed_aa_polyline(route_arr, ground_pts, (8, 12, 18, 92), max(2, stroke_w - 1), dash_px=10.0 * s_w, gap_px=8.0 * s_w)
+
+    # 1. Soft ground shadow / atmospheric bloom
+    if is_flight or not spec.get("light_paper", False):
+        _draw_aa_polyline(route_arr, pts, (*spec["route_glow"], 96), max(4, stroke_w * 3))
+    else:
+        off_x, off_y = 1.6 * s_w, 2.4 * s_w
+        shadow_pts = [(px + off_x, py + off_y) for px, py in pts]
+        _draw_aa_polyline(route_arr, shadow_pts, (12, 18, 28, 72), max(4, stroke_w * 2 + int(round(4 * s_w))))
+
+    # 2. High-contrast outer casing
+    casing_rgb = spec.get("route_casing", (18, 48, 112))
+    casing_w = max(4, stroke_w + max(3, int(round(4.5 * s_w))))
+    _draw_aa_polyline(route_arr, pts, (*casing_rgb, 240), casing_w)
+
+    # 3. Saturated inner core
+    _draw_aa_polyline(route_arr, pts, (*spec["route_core"], 255), max(2, stroke_w + 1))
+
+    # 4. Luminous leading-edge comet pulse immediately trailing the vehicle
+    arc_p = _ArcLengthPath(pts)
+    tail_s = max(0.0, arc_p.total_len - 88.0 * s_w)
+    tip_pts = arc_p.sample_window(tail_s, arc_p.total_len, step_px=max(2.0, 4.0 * s_w))
+    if len(tip_pts) >= 2:
+        rc = spec["route_core"]
+        comet_rgb = (
+            min(255, int(round(rc[0] * 0.45 + 255 * 0.55))),
+            min(255, int(round(rc[1] * 0.45 + 255 * 0.55))),
+            min(255, int(round(rc[2] * 0.45 + 255 * 0.55))),
+        )
+        _draw_aa_polyline(route_arr, tip_pts, (*comet_rgb, 210), max(1, stroke_w - 1))
+
+
+def _draw_aircraft_ground_shadow(
+    canvas: Image.Image,
+    gx: float,
+    gy: float,
+    angle_rad: float,
+    scale: float,
+    alpha: int = 90,
+) -> None:
+    """Render a soft Gaussian-blurred ground silhouette shadow beneath an airborne aircraft."""
+    if alpha <= 4:
+        return
+    box = max(44, int(round(80 * scale)))
+    ss = box * 2
+    sub = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(sub, "RGBA")
+    m = ss * 0.5
+    r = ss * 0.34
+    ca, sa = math.cos(angle_rad), math.sin(angle_rad)
+
+    def _rot(lx: float, ly: float) -> tuple[float, float]:
+        return (m + lx * ca - ly * sa, m + lx * sa + ly * ca)
+
+    poly = [
+        _rot(r * 1.04, 0.0),
+        _rot(r * 0.32, r * 0.14),
+        _rot(-r * 0.26, r * 0.94),
+        _rot(-r * 0.46, r * 0.88),
+        _rot(-r * 0.12, r * 0.15),
+        _rot(-r * 0.72, r * 0.10),
+        _rot(-r * 0.92, r * 0.42),
+        _rot(-r * 1.02, r * 0.36),
+        _rot(-r * 0.86, 0.0),
+        _rot(-r * 1.02, -r * 0.36),
+        _rot(-r * 0.92, -r * 0.42),
+        _rot(-r * 0.72, -r * 0.10),
+        _rot(-r * 0.12, -r * 0.15),
+        _rot(-r * 0.46, -r * 0.88),
+        _rot(-r * 0.26, -r * 0.94),
+        _rot(r * 0.32, -r * 0.14),
+    ]
+    d.polygon(poly, fill=(6, 10, 16, max(12, min(200, int(alpha)))))
+    sub = sub.filter(ImageFilter.GaussianBlur(radius=max(1.5, ss * 0.055)))
+    down = sub.resize((box, box), Image.Resampling.LANCZOS)
+    canvas.alpha_composite(down, (int(round(gx - box * 0.5)), int(round(gy - box * 0.5))))
+
+
+def _draw_flight_contrails(
+    canvas: Image.Image,
+    arc_pts: list[tuple[float, float]],
+    scale: float,
+    alt_sin: float,
+) -> None:
+    """Draw twin fading turbofan vapor contrails along the elevated flight path behind wings."""
+    if len(arc_pts) < 4 or alt_sin <= 0.08:
+        return
+    arc_path = _ArcLengthPath(arc_pts)
+    trail_len = min(arc_path.total_len * 0.72, 175.0 * scale)
+    if trail_len < 8.0:
+        return
+    s0 = max(0.0, arc_path.total_len - trail_len)
+    samples = arc_path.sample_window(s0, arc_path.total_len, step_px=max(2.0, 4.0 * scale))
+    if len(samples) < 3:
+        return
+
+    overlay = np.zeros((canvas.height, canvas.width, 4), dtype=np.uint8)
+    wing_sep = 11.5 * scale * (0.78 + 0.34 * alt_sin)
+    base_thick = max(2, int(round(2.4 * scale)))
+    # Build port and starboard contrail ribbons
+    for k in range(1, len(samples)):
+        frac = k / float(max(1, len(samples) - 1))
+        x0, y0 = samples[k - 1]
+        x1, y1 = samples[k]
+        dx, dy = x1 - x0, y1 - y0
+        seg_l = math.hypot(dx, dy)
+        if seg_l < 0.05:
+            continue
+        nx, ny = -dy / seg_l, dx / seg_l
+        fade_a = int(round(145.0 * (frac ** 1.45) * min(1.0, alt_sin * 1.35)))
+        if fade_a < 4:
+            continue
+        for sign in (-1.0, 1.0):
+            ox, oy = nx * wing_sep * sign, ny * wing_sep * sign
+            cv2.line(
+                overlay,
+                (int(round((x0 + ox) * 16.0)), int(round((y0 + oy) * 16.0))),
+                (int(round((x1 + ox) * 16.0)), int(round((y1 + oy) * 16.0))),
+                color=(238, 246, 255, fade_a),
+                thickness=base_thick,
+                lineType=cv2.LINE_AA,
+                shift=4,
+            )
+    contrail_im = Image.fromarray(overlay).filter(ImageFilter.GaussianBlur(radius=max(0.6, 1.1 * scale)))
+    canvas.alpha_composite(contrail_im)
+
+
+def _draw_boat_kelvin_wake(
+    canvas: Image.Image,
+    arc_path: _ArcLengthPath,
+    u: float,
+    scale: float,
+) -> None:
+    """Render an animated foaming V-shaped Kelvin bow wake and center prop wash behind a vessel."""
+    s_cur = max(0.0, min(arc_path.total_len, float(u) * arc_path.total_len))
+    wake_len = min(s_cur, 115.0 * scale)
+    if wake_len < 6.0:
+        return
+    samples = arc_path.sample_window(s_cur - wake_len, s_cur, step_px=max(2.0, 3.5 * scale))
+    if len(samples) < 3:
+        return
+
+    overlay = np.zeros((canvas.height, canvas.width, 4), dtype=np.uint8)
+    for k in range(1, len(samples)):
+        frac = k / float(max(1, len(samples) - 1))  # 0=oldest tail, 1=at hull
+        dist_back = 1.0 - frac
+        x0, y0 = samples[k - 1]
+        x1, y1 = samples[k]
+        dx, dy = x1 - x0, y1 - y0
+        seg_l = math.hypot(dx, dy)
+        if seg_l < 0.05:
+            continue
+        nx, ny = -dy / seg_l, dx / seg_l
+        arm_spread = (4.5 + 24.0 * dist_back) * scale
+        arm_alpha = int(round(170.0 * (frac ** 1.3)))
+        center_alpha = int(round(115.0 * (frac ** 1.6)))
+        w_arm = max(1, int(round((1.5 + 2.0 * dist_back) * scale)))
+        for sign in (-1.0, 1.0):
+            ox, oy = nx * arm_spread * sign, ny * arm_spread * sign
+            cv2.line(
+                overlay,
+                (int(round((x0 + ox) * 16.0)), int(round((y0 + oy) * 16.0))),
+                (int(round((x1 + ox) * 16.0)), int(round((y1 + oy) * 16.0))),
+                color=(242, 250, 255, arm_alpha),
+                thickness=w_arm,
+                lineType=cv2.LINE_AA,
+                shift=4,
+            )
+        cv2.line(
+            overlay,
+            (int(round(x0 * 16.0)), int(round(y0 * 16.0))),
+            (int(round(x1 * 16.0)), int(round(y1 * 16.0))),
+            color=(210, 240, 252, center_alpha),
+            thickness=max(1, int(round(2.5 * scale))),
+            lineType=cv2.LINE_AA,
+            shift=4,
+        )
+    canvas.alpha_composite(Image.fromarray(overlay))
+
+
+def _draw_articulated_train(
+    canvas: Image.Image,
+    arc_path: _ArcLengthPath,
+    u: float,
+    fill_rgb: tuple[int, int, int],
+    stroke_rgb: tuple[int, int, int],
+    scale: float,
+) -> None:
+    """Render an articulated 3-car bullet train whose coaches follow curved railway geometry."""
+    s_lead = max(0.0, min(arc_path.total_len, float(u) * arc_path.total_len))
+    car_spacing = 30.0 * scale
+    # Draw rear coach -> middle coach -> streamlined lead locomotive
+    for car_idx in (2, 1, 0):
+        s_car = s_lead - car_idx * car_spacing
+        if s_car < 0.0 and car_idx > 0:
+            continue
+        s_car = max(0.0, s_car)
+        cx, cy = arc_path.point_at_s(s_car)
+        u_car = s_car / max(1e-6, arc_path.total_len)
+        ang, _ = arc_path.tangent_and_curvature(u_car, window_px=14.0 * scale)
+        sub_mode = "train" if car_idx == 0 else "train_coach"
+        _draw_transport_icon(
+            canvas,
+            cx=cx,
+            cy=cy,
+            angle_rad=ang,
+            mode=sub_mode,
+            fill_rgb=fill_rgb,
+            stroke_rgb=stroke_rgb,
+            scale=scale * 0.94,
+        )
 
 
 def _draw_transport_icon(
@@ -1283,150 +1849,300 @@ def _draw_transport_icon(
     fill_rgb: tuple[int, int, int],
     stroke_rgb: tuple[int, int, int],
     scale: float,
+    bank_factor: float = 0.0,
 ) -> None:
-    """Render a crisp 2x-supersampled geometric vector silhouette rotated along heading."""
-    box = max(48, int(round(76 * scale)))
-    ss = box * 2
+    """Render a crisp 4x-supersampled multi-layer vehicle rotated along heading."""
+    box = max(56, int(round(84 * scale)))
+    ss = box * 4
     sub = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
     d = ImageDraw.Draw(sub, "RGBA")
     m = ss * 0.5
     r = ss * 0.34
+    ca, sa = math.cos(angle_rad), math.sin(angle_rad)
 
-    def _rot(lx: float, ly: float) -> tuple[float, float]:
-        ca = math.cos(angle_rad)
-        sa = math.sin(angle_rad)
-        return (m + lx * ca - ly * sa, m + lx * sa + ly * ca)
-
-    # Soft shadow halo
-    d.ellipse([m - r * 0.9, m - r * 0.9, m + r * 0.9, m + r * 0.9], fill=(8, 12, 18, 95))
+    def _rot(lx: float, ly: float, off_x: float = 0.0, off_y: float = 0.0) -> tuple[float, float]:
+        return (m + off_x + lx * ca - ly * sa, m + off_y + lx * sa + ly * ca)
 
     if mode == "flight":
-        # Swept-wing jetliner pointing along +X
-        poly = [
-            _rot(r * 1.05, 0.0),
-            _rot(r * 0.35, r * 0.16),
-            _rot(-r * 0.25, r * 0.92),
-            _rot(-r * 0.48, r * 0.85),
-            _rot(-r * 0.12, r * 0.18),
-            _rot(-r * 0.72, r * 0.12),
-            _rot(-r * 0.92, r * 0.42),
-            _rot(-r * 1.02, r * 0.36),
-            _rot(-r * 0.86, 0.0),
-            _rot(-r * 1.02, -r * 0.36),
-            _rot(-r * 0.92, -r * 0.42),
-            _rot(-r * 0.72, -r * 0.12),
-            _rot(-r * 0.12, -r * 0.18),
-            _rot(-r * 0.48, -r * 0.85),
-            _rot(-r * 0.25, -r * 0.92),
-            _rot(r * 0.35, -r * 0.16),
-        ]
-        d.polygon(poly, fill=(*fill_rgb, 250), outline=(*stroke_rgb, 255))
-    elif mode == "train":
-        # Aerodynamic high-speed train capsule
-        poly = [
-            _rot(r * 0.98, 0.0),
-            _rot(r * 0.52, r * 0.34),
-            _rot(-r * 0.75, r * 0.34),
-            _rot(-r * 0.88, 0.0),
-            _rot(-r * 0.75, -r * 0.34),
-            _rot(r * 0.52, -r * 0.34),
-        ]
-        d.polygon(poly, fill=(*fill_rgb, 248), outline=(*stroke_rgb, 255))
-        nose_glass = [_rot(r * 0.82, 0.0), _rot(r * 0.45, r * 0.20), _rot(r * 0.45, -r * 0.20)]
-        d.polygon(nose_glass, fill=(24, 34, 48, 220))
-    elif mode == "boat":
-        # Sleek vessel hull + triangular wake lines
-        poly = [
-            _rot(r * 0.96, 0.0),
-            _rot(r * 0.28, r * 0.36),
-            _rot(-r * 0.80, r * 0.28),
-            _rot(-r * 0.72, 0.0),
-            _rot(-r * 0.80, -r * 0.28),
-            _rot(r * 0.28, -r * 0.36),
-        ]
-        d.polygon(poly, fill=(*fill_rgb, 248), outline=(*stroke_rgb, 255))
-        d.line([_rot(-r * 0.85, 0.0), _rot(-r * 1.25, r * 0.38)], fill=(*stroke_rgb, 185), width=max(2, int(ss * 0.03)))
-        d.line([_rot(-r * 0.85, 0.0), _rot(-r * 1.25, -r * 0.38)], fill=(*stroke_rgb, 185), width=max(2, int(ss * 0.03)))
-    else:
-        # Top-down Touring SUV / Car pointing along +X with tires, windshield, roof glass & headlights
-        # Glowing warm headlight beams ahead (+X)
-        beam_l = [_rot(r * 0.90, -r * 0.24), _rot(r * 1.52, -r * 0.42), _rot(r * 1.52, -r * 0.06)]
-        beam_r = [_rot(r * 0.90, r * 0.24), _rot(r * 1.52, r * 0.06), _rot(r * 1.52, r * 0.42)]
-        d.polygon(beam_l, fill=(255, 240, 175, 115))
-        d.polygon(beam_r, fill=(255, 240, 175, 115))
+        # Widebody swept-wing jetliner pointing along +X (with turbofans, flaps, cockpit & nav lights)
+        bank_sq = 1.0 - 0.16 * min(1.0, abs(float(bank_factor)))
+        wing_y = r * 0.98 * bank_sq
+        outline_c = (24, 34, 48, 238)
+        lw_o = max(2, int(ss * 0.014))
 
-        # 4 dark wheel arches protruding slightly from sides
+        # Horizontal tailplane
+        tailplane = [
+            _rot(-r * 0.62, 0.0),
+            _rot(-r * 0.92, wing_y * 0.43),
+            _rot(-r * 1.03, wing_y * 0.38),
+            _rot(-r * 0.84, 0.0),
+            _rot(-r * 1.03, -wing_y * 0.38),
+            _rot(-r * 0.92, -wing_y * 0.43),
+        ]
+        d.polygon(tailplane, fill=(224, 230, 238, 255), outline=outline_c, width=lw_o)
+
+        # Swept main wings + trailing flap shadow
+        main_wings = [
+            _rot(r * 0.34, r * 0.14),
+            _rot(-r * 0.24, wing_y),
+            _rot(-r * 0.45, wing_y * 0.95),
+            _rot(-r * 0.12, r * 0.16),
+            _rot(-r * 0.12, -r * 0.16),
+            _rot(-r * 0.45, -wing_y * 0.95),
+            _rot(-r * 0.24, -wing_y),
+            _rot(r * 0.34, -r * 0.14),
+        ]
+        d.polygon(main_wings, fill=(236, 240, 246, 255), outline=outline_c, width=lw_o)
+        for sign in (-1.0, 1.0):
+            flap = [
+                _rot(-r * 0.14, sign * r * 0.18),
+                _rot(-r * 0.42, sign * wing_y * 0.86),
+                _rot(-r * 0.34, sign * wing_y * 0.86),
+                _rot(-r * 0.06, sign * r * 0.18),
+            ]
+            d.polygon(flap, fill=(176, 188, 204, 215))
+
+            # Under-wing turbofan engine pods
+            eng = [
+                _rot(r * 0.24, sign * r * 0.36 * bank_sq),
+                _rot(r * 0.22, sign * r * 0.48 * bank_sq),
+                _rot(-r * 0.04, sign * r * 0.47 * bank_sq),
+                _rot(-r * 0.04, sign * r * 0.37 * bank_sq),
+            ]
+            d.polygon(eng, fill=(208, 216, 228, 255), outline=outline_c, width=max(1, lw_o // 2))
+            intake = [
+                _rot(r * 0.25, sign * r * 0.38 * bank_sq),
+                _rot(r * 0.25, sign * r * 0.46 * bank_sq),
+                _rot(r * 0.19, sign * r * 0.46 * bank_sq),
+                _rot(r * 0.19, sign * r * 0.38 * bank_sq),
+            ]
+            d.polygon(intake, fill=(30, 40, 54, 245))
+
+        # Tapered fuselage + dorsal specular highlight + livery stripe
+        fuselage = [
+            _rot(r * 1.08, 0.0),
+            _rot(r * 0.84, r * 0.115),
+            _rot(r * 0.48, r * 0.145),
+            _rot(-r * 0.54, r * 0.135),
+            _rot(-r * 0.98, r * 0.045),
+            _rot(-r * 1.02, 0.0),
+            _rot(-r * 0.98, -r * 0.045),
+            _rot(-r * 0.54, -r * 0.135),
+            _rot(r * 0.48, -r * 0.145),
+            _rot(r * 0.84, -r * 0.115),
+        ]
+        d.polygon(fuselage, fill=(250, 252, 255, 255), outline=outline_c, width=lw_o)
+        dorsal_hi = [
+            _rot(r * 0.88, -r * 0.03),
+            _rot(-r * 0.72, -r * 0.03),
+            _rot(-r * 0.72, r * 0.02),
+            _rot(r * 0.88, r * 0.02),
+        ]
+        d.polygon(dorsal_hi, fill=(255, 255, 255, 210))
+
+        # Livery vertical tailfin accent
+        tailfin = [_rot(-r * 0.64, 0.0), _rot(-r * 0.96, r * 0.035), _rot(-r * 1.02, 0.0), _rot(-r * 0.96, -r * 0.035)]
+        d.polygon(tailfin, fill=(*fill_rgb, 245))
+
+        # Cockpit wraparound glass
+        cockpit = [
+            _rot(r * 0.94, 0.0),
+            _rot(r * 0.78, r * 0.075),
+            _rot(r * 0.69, r * 0.065),
+            _rot(r * 0.69, -r * 0.065),
+            _rot(r * 0.78, -r * 0.075),
+        ]
+        d.polygon(cockpit, fill=(24, 38, 56, 248))
+
+        # Wingtip nav strobes (port -Y red, starboard +Y green)
+        nav_r = max(2.5, ss * 0.016)
+        px_p, py_p = _rot(-r * 0.34, -wing_y * 0.96)
+        px_s, py_s = _rot(-r * 0.34, wing_y * 0.96)
+        d.ellipse([px_p - nav_r, py_p - nav_r, px_p + nav_r, py_p + nav_r], fill=(239, 68, 68, 255))
+        d.ellipse([px_s - nav_r, py_s - nav_r, px_s + nav_r, py_s + nav_r], fill=(34, 197, 94, 255))
+
+    elif mode in ("train", "train_coach"):
+        # Streamlined Shinkansen/Eurostar coach (nose cone for lead, articulated flat ends for trailing coaches)
+        outline_c = (24, 34, 48, 245)
+        lw_o = max(2, int(ss * 0.016))
+        sh_off_x, sh_off_y = ss * 0.022, ss * 0.026
+        is_lead = mode == "train"
+        body_pts = (
+            [
+                _rot(r * 0.98, 0.0),
+                _rot(r * 0.72, r * 0.23),
+                _rot(r * 0.42, r * 0.28),
+                _rot(-r * 0.76, r * 0.28),
+                _rot(-r * 0.80, 0.0),
+                _rot(-r * 0.76, -r * 0.28),
+                _rot(r * 0.42, -r * 0.28),
+                _rot(r * 0.72, -r * 0.23),
+            ]
+            if is_lead
+            else [
+                _rot(r * 0.78, r * 0.27),
+                _rot(-r * 0.78, r * 0.27),
+                _rot(-r * 0.78, -r * 0.27),
+                _rot(r * 0.78, -r * 0.27),
+            ]
+        )
+        # Tight railbed shadow
+        sh_im = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+        sh_d = ImageDraw.Draw(sh_im, "RGBA")
+        sh_poly = [(px + sh_off_x, py + sh_off_y) for px, py in body_pts]
+        sh_d.polygon(sh_poly, fill=(10, 14, 22, 118))
+        sh_im = sh_im.filter(ImageFilter.GaussianBlur(radius=ss * 0.025))
+        sub.alpha_composite(sh_im)
+        d = ImageDraw.Draw(sub, "RGBA")
+
+        d.polygon(body_pts, fill=(246, 249, 252, 255), outline=outline_c, width=lw_o)
+        # Roof accent livery stripe & recessed side window bands
+        x_lo, x_hi = (-r * 0.70, r * 0.56) if is_lead else (-r * 0.72, r * 0.72)
+        d.polygon([_rot(x_hi, -r * 0.14), _rot(x_hi, r * 0.14), _rot(x_lo, r * 0.14), _rot(x_lo, -r * 0.14)], fill=(*fill_rgb, 232))
+        d.polygon([_rot(x_hi * 0.86, -r * 0.06), _rot(x_hi * 0.86, r * 0.06), _rot(x_lo * 0.86, r * 0.06), _rot(x_lo * 0.86, -r * 0.06)], fill=(245, 248, 252, 195))
+        if is_lead:
+            canopy = [_rot(r * 0.82, 0.0), _rot(r * 0.58, r * 0.16), _rot(r * 0.42, r * 0.16), _rot(r * 0.42, -r * 0.16), _rot(r * 0.58, -r * 0.16)]
+            d.polygon(canopy, fill=(24, 36, 52, 246))
+            for hs in (-1.0, 1.0):
+                d.ellipse([_rot(r * 0.88, hs * r * 0.09)[0] - nav_r_t(ss), _rot(r * 0.88, hs * r * 0.09)[1] - nav_r_t(ss),
+                           _rot(r * 0.88, hs * r * 0.09)[0] + nav_r_t(ss), _rot(r * 0.88, hs * r * 0.09)[1] + nav_r_t(ss)], fill=(255, 236, 156, 255))
+
+    elif mode == "boat":
+        # Sculpted coastal yacht cruiser with white stepped bow, warm teak deck & tinted bridge glass
+        outline_c = (20, 32, 46, 245)
+        lw_o = max(2, int(ss * 0.016))
+        hull = [
+            _rot(r * 0.98, 0.0),
+            _rot(r * 0.52, r * 0.29),
+            _rot(-r * 0.18, r * 0.34),
+            _rot(-r * 0.82, r * 0.27),
+            _rot(-r * 0.84, 0.0),
+            _rot(-r * 0.82, -r * 0.27),
+            _rot(-r * 0.18, -r * 0.34),
+            _rot(r * 0.52, -r * 0.29),
+        ]
+        d.polygon(hull, fill=(248, 250, 252, 255), outline=outline_c, width=lw_o)
+        # Warm teak aft cockpit & bow walkway trim
+        teak_aft = [_rot(-r * 0.22, -r * 0.22), _rot(-r * 0.22, r * 0.22), _rot(-r * 0.74, r * 0.19), _rot(-r * 0.74, -r * 0.19)]
+        d.polygon(teak_aft, fill=(192, 144, 92, 248))
+        # Cabin superstructure + tinted bridge windscreen
+        cabin = [_rot(r * 0.56, 0.0), _rot(r * 0.28, r * 0.22), _rot(-r * 0.24, r * 0.22), _rot(-r * 0.24, -r * 0.22), _rot(r * 0.28, -r * 0.22)]
+        d.polygon(cabin, fill=(238, 242, 246, 255), outline=(170, 182, 196, 220))
+        bridge_glass = [_rot(r * 0.42, 0.0), _rot(r * 0.24, r * 0.18), _rot(r * 0.10, r * 0.18), _rot(r * 0.10, -r * 0.18), _rot(r * 0.24, -r * 0.18)]
+        d.polygon(bridge_glass, fill=(22, 48, 72, 245))
+        # Radar arch stripe
+        d.line([_rot(-r * 0.08, -r * 0.20), _rot(-r * 0.08, r * 0.20)], fill=(*fill_rgb, 240), width=max(2, int(ss * 0.022)))
+
+    elif mode == "walk":
+        # Crisp directional GPS radar beacon with forward view-cone wedge
+        cone = [_rot(0.0, 0.0), _rot(r * 1.15, -r * 0.62), _rot(r * 1.15, r * 0.62)]
+        d.polygon(cone, fill=(*fill_rgb, 82))
+        pr_o = r * 0.42
+        pr_i = r * 0.28
+        d.ellipse([m - pr_o, m - pr_o, m + pr_o, m + pr_o], fill=(255, 255, 255, 248), outline=(24, 34, 48, 220), width=max(2, int(ss * 0.015)))
+        d.ellipse([m - pr_i, m - pr_i, m + pr_i, m + pr_i], fill=(*fill_rgb, 255))
+
+    else:
+        # Sculpted pearl-white Touring SUV / Car with directional ground shadow (no grey circle puck)
+        outline_c = (22, 30, 44, 255)
+        lw_o = max(2, int(ss * 0.020))
+
+        # Tight chassis-shaped directional drop shadow
+        chassis_pts = [
+            _rot(r * 0.96, -r * 0.24),
+            _rot(r * 1.02, 0.0),
+            _rot(r * 0.96, r * 0.24),
+            _rot(r * 0.56, r * 0.38),
+            _rot(-r * 0.80, r * 0.37),
+            _rot(-r * 0.94, r * 0.25),
+            _rot(-r * 0.94, -r * 0.25),
+            _rot(-r * 0.80, -r * 0.37),
+            _rot(r * 0.56, -r * 0.38),
+        ]
+        sh_im = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+        sh_d = ImageDraw.Draw(sh_im, "RGBA")
+        sh_off_x, sh_off_y = ss * 0.024, ss * 0.030
+        sh_d.polygon([(px + sh_off_x, py + sh_off_y) for px, py in chassis_pts], fill=(8, 12, 20, 128))
+        sh_im = sh_im.filter(ImageFilter.GaussianBlur(radius=ss * 0.030))
+        sub.alpha_composite(sh_im)
+        d = ImageDraw.Draw(sub, "RGBA")
+
+        # Soft layered LED headlight beams
+        for alpha_f, reach, spread in ((42, 1.56, 0.44), (72, 1.24, 0.34)):
+            beam_l = [_rot(r * 0.88, -r * 0.22), _rot(r * reach, -r * spread), _rot(r * reach, -r * 0.05)]
+            beam_r = [_rot(r * 0.88, r * 0.22), _rot(r * reach, r * 0.05), _rot(r * reach, r * spread)]
+            d.polygon(beam_l, fill=(255, 244, 190, alpha_f))
+            d.polygon(beam_r, fill=(255, 244, 190, alpha_f))
+
+        # 4 dark tucked tires
         tire_col = (22, 26, 34, 245)
-        for tx, ty in ((r * 0.50, -r * 0.44), (r * 0.50, r * 0.44), (-r * 0.48, -r * 0.44), (-r * 0.48, r * 0.44)):
+        for tx, ty in ((r * 0.50, -r * 0.42), (r * 0.50, r * 0.42), (-r * 0.48, -r * 0.42), (-r * 0.48, r * 0.42)):
             tire = [
-                _rot(tx - r * 0.17, ty - r * 0.07),
-                _rot(tx + r * 0.17, ty - r * 0.07),
-                _rot(tx + r * 0.17, ty + r * 0.07),
-                _rot(tx - r * 0.17, ty + r * 0.07),
+                _rot(tx - r * 0.16, ty - r * 0.065),
+                _rot(tx + r * 0.16, ty - r * 0.065),
+                _rot(tx + r * 0.16, ty + r * 0.065),
+                _rot(tx - r * 0.16, ty + r * 0.065),
             ]
             d.polygon(tire, fill=tire_col)
 
         # Side mirrors
         for my_sign in (-1.0, 1.0):
             mir = [
-                _rot(r * 0.26, my_sign * r * 0.39),
-                _rot(r * 0.16, my_sign * r * 0.53),
-                _rot(r * 0.08, my_sign * r * 0.50),
-                _rot(r * 0.16, my_sign * r * 0.39),
+                _rot(r * 0.27, my_sign * r * 0.37),
+                _rot(r * 0.17, my_sign * r * 0.51),
+                _rot(r * 0.09, my_sign * r * 0.48),
+                _rot(r * 0.16, my_sign * r * 0.37),
             ]
-            d.polygon(mir, fill=(242, 245, 250, 250), outline=(24, 32, 46, 255))
+            d.polygon(mir, fill=(242, 245, 250, 255), outline=outline_c, width=max(1, lw_o // 2))
 
-        # Rounded SUV chassis (pearl-white with dark contrasting outline so visible on both light/dark maps)
-        chassis = [
-            _rot(r * 0.96, -r * 0.26),
-            _rot(r * 1.02, 0.0),
-            _rot(r * 0.96, r * 0.26),
-            _rot(r * 0.58, r * 0.39),
-            _rot(-r * 0.82, r * 0.38),
-            _rot(-r * 0.95, r * 0.26),
-            _rot(-r * 0.95, -r * 0.26),
-            _rot(-r * 0.82, -r * 0.38),
-            _rot(r * 0.58, -r * 0.39),
-        ]
-        d.polygon(chassis, fill=(248, 250, 252, 255), outline=(24, 32, 46, 255), width=max(2, int(ss * 0.025)))
+        # Sculpted pearl-white SUV body + hood crease lines
+        d.polygon(chassis_pts, fill=(249, 250, 253, 255), outline=outline_c, width=lw_o)
+        for crease_y in (-r * 0.16, r * 0.16):
+            d.line([_rot(r * 0.88, crease_y * 0.82), _rot(r * 0.48, crease_y)], fill=(204, 212, 224, 215), width=max(2, int(ss * 0.010)))
 
-        # Dark tinted front windshield & panoramic glass roof + rear window
+        # Tinted wraparound windshield + panoramic glass roof + diagonal sky reflection
         windshield = [
-            _rot(r * 0.44, -r * 0.30),
-            _rot(r * 0.52, 0.0),
-            _rot(r * 0.44, r * 0.30),
-            _rot(r * 0.16, r * 0.27),
-            _rot(r * 0.16, -r * 0.27),
+            _rot(r * 0.45, -r * 0.29),
+            _rot(r * 0.53, 0.0),
+            _rot(r * 0.45, r * 0.29),
+            _rot(r * 0.16, r * 0.26),
+            _rot(r * 0.16, -r * 0.26),
         ]
-        d.polygon(windshield, fill=(28, 42, 60, 242))
+        d.polygon(windshield, fill=(24, 38, 54, 246))
+        glint = [_rot(r * 0.43, -r * 0.18), _rot(r * 0.47, -r * 0.02), _rot(r * 0.21, -r * 0.14), _rot(r * 0.19, -r * 0.23)]
+        d.polygon(glint, fill=(165, 200, 236, 92))
         sunroof = [
-            _rot(r * 0.08, -r * 0.25),
-            _rot(r * 0.08, r * 0.25),
-            _rot(-r * 0.54, r * 0.25),
-            _rot(-r * 0.54, -r * 0.25),
+            _rot(r * 0.08, -r * 0.24),
+            _rot(r * 0.08, r * 0.24),
+            _rot(-r * 0.53, r * 0.24),
+            _rot(-r * 0.53, -r * 0.24),
         ]
-        d.polygon(sunroof, fill=(38, 54, 76, 232))
+        d.polygon(sunroof, fill=(32, 48, 68, 236))
         rear_glass = [
-            _rot(-r * 0.62, -r * 0.26),
-            _rot(-r * 0.62, r * 0.26),
-            _rot(-r * 0.82, r * 0.24),
-            _rot(-r * 0.82, -r * 0.24),
+            _rot(-r * 0.61, -r * 0.25),
+            _rot(-r * 0.61, r * 0.25),
+            _rot(-r * 0.80, r * 0.23),
+            _rot(-r * 0.80, -r * 0.23),
         ]
-        d.polygon(rear_glass, fill=(28, 42, 60, 242))
+        d.polygon(rear_glass, fill=(24, 38, 54, 246))
 
-        # Amber/white headlights & red taillights
+        # Crisp LED headlights & ruby taillight bars
         for hy_sign in (-1.0, 1.0):
             d.polygon(
-                [_rot(r * 0.92, hy_sign * r * 0.16), _rot(r * 1.00, hy_sign * r * 0.24), _rot(r * 0.88, hy_sign * r * 0.31)],
-                fill=(255, 224, 120, 255),
+                [_rot(r * 0.90, hy_sign * r * 0.15), _rot(r * 0.99, hy_sign * r * 0.23), _rot(r * 0.86, hy_sign * r * 0.29)],
+                fill=(255, 232, 140, 255),
             )
             d.polygon(
-                [_rot(-r * 0.90, hy_sign * r * 0.16), _rot(-r * 0.95, hy_sign * r * 0.26), _rot(-r * 0.85, hy_sign * r * 0.30)],
-                fill=(230, 48, 48, 255),
+                [_rot(-r * 0.88, hy_sign * r * 0.15), _rot(-r * 0.93, hy_sign * r * 0.25), _rot(-r * 0.84, hy_sign * r * 0.29)],
+                fill=(228, 42, 46, 255),
             )
 
     down = sub.resize((box, box), Image.Resampling.LANCZOS)
     canvas.alpha_composite(down, (int(round(cx - box * 0.5)), int(round(cy - box * 0.5))))
+
+
+def nav_r_t(ss: int) -> float:
+    return max(2.0, ss * 0.015)
 
 
 def _paste_hero_photo_callout(
@@ -1631,10 +2347,58 @@ def _apply_camera_homography(
         arr,
         h_mat,
         (out_w, out_h),
-        flags=cv2.INTER_LINEAR,
+        flags=cv2.INTER_LANCZOS4,
         borderMode=cv2.BORDER_REPLICATE,
     )
     return warped
+
+
+def _draw_hud_mode_glyph(
+    draw: ImageDraw.ImageDraw,
+    cx: float,
+    cy: float,
+    size: float,
+    mode: str,
+    color_rgba: tuple[int, int, int, int],
+) -> None:
+    """Draw a tiny crisp geometric vector icon (plane/car/train/boat/walk) inside the HUD header."""
+    r = max(5.0, float(size))
+    if mode == "flight":
+        poly = [
+            (cx + r * 0.9, cy),
+            (cx + r * 0.2, cy - r * 0.16),
+            (cx - r * 0.2, cy - r * 0.85),
+            (cx - r * 0.42, cy - r * 0.78),
+            (cx - r * 0.15, cy - r * 0.16),
+            (cx - r * 0.68, cy - r * 0.12),
+            (cx - r * 0.88, cy - r * 0.36),
+            (cx - r * 0.95, cy),
+            (cx - r * 0.88, cy + r * 0.36),
+            (cx - r * 0.68, cy + r * 0.12),
+            (cx - r * 0.15, cy + r * 0.16),
+            (cx - r * 0.42, cy + r * 0.78),
+            (cx - r * 0.2, cy + r * 0.85),
+            (cx + r * 0.2, cy + r * 0.16),
+        ]
+        draw.polygon(poly, fill=color_rgba)
+    elif mode == "train":
+        draw.rounded_rectangle([cx - r * 0.85, cy - r * 0.34, cx + r * 0.85, cy + r * 0.34], radius=max(2, int(r * 0.25)), fill=color_rgba)
+        draw.line([(cx - r * 0.95, cy + r * 0.52), (cx + r * 0.95, cy + r * 0.52)], fill=color_rgba, width=max(1, int(r * 0.15)))
+    elif mode == "boat":
+        hull = [(cx + r * 0.9, cy), (cx + r * 0.35, cy + r * 0.35), (cx - r * 0.75, cy + r * 0.35), (cx - r * 0.85, cy - r * 0.10), (cx + r * 0.35, cy - r * 0.10)]
+        draw.polygon(hull, fill=color_rgba)
+        draw.polygon([(cx - r * 0.15, cy - r * 0.12), (cx + r * 0.15, cy - r * 0.65), (cx + r * 0.25, cy - r * 0.12)], fill=color_rgba)
+    elif mode == "walk":
+        draw.ellipse([cx - r * 0.32, cy - r * 0.80, cx + r * 0.32, cy - r * 0.18], fill=color_rgba)
+        draw.line([(cx, cy - r * 0.18), (cx, cy + r * 0.35)], fill=color_rgba, width=max(2, int(r * 0.22)))
+        draw.line([(cx, cy + r * 0.35), (cx - r * 0.42, cy + r * 0.85)], fill=color_rgba, width=max(2, int(r * 0.20)))
+        draw.line([(cx, cy + r * 0.35), (cx + r * 0.42, cy + r * 0.85)], fill=color_rgba, width=max(2, int(r * 0.20)))
+    else:
+        draw.rounded_rectangle([cx - r * 0.90, cy - r * 0.22, cx + r * 0.90, cy + r * 0.28], radius=max(2, int(r * 0.22)), fill=color_rgba)
+        cabin = [(cx - r * 0.48, cy - r * 0.20), (cx - r * 0.25, cy - r * 0.56), (cx + r * 0.32, cy - r * 0.56), (cx + r * 0.55, cy - r * 0.20)]
+        draw.polygon(cabin, fill=color_rgba)
+        for wx_o in (-r * 0.48, r * 0.48):
+            draw.ellipse([cx + wx_o - r * 0.20, cy + r * 0.18, cx + wx_o + r * 0.20, cy + r * 0.56], fill=color_rgba)
 
 
 def _render_screen_hud(
@@ -1662,7 +2426,12 @@ def _render_screen_hud(
     cur_km = leg_km * u
     cur_lat = orig.lat + (dest.lat - orig.lat) * u
     cur_lon = orig.lon + (dest.lon - orig.lon) * u
-    cur_alt = orig.alt_m + (dest.alt_m - orig.alt_m) * u
+    base_alt = orig.alt_m + (dest.alt_m - orig.alt_m) * u
+    if transport_mode == "flight":
+        cruise_peak = min(10950.0, max(1800.0, leg_km * 14.0))
+        cur_alt = base_alt + cruise_peak * math.sin(math.pi * u)
+    else:
+        cur_alt = base_alt
 
     # Top horizon mist strip for 2.5D atmospheric depth (subtle edge fade)
     if not compact_hud:
@@ -1721,7 +2490,8 @@ def _render_screen_hud(
     rw1, _ = measure_tracked_text(draw, route_line, f_head)
     rw2, _ = measure_tracked_text(draw, stat_line, f_stat)
     rw3, _ = measure_tracked_text(draw, over_line, f_over, letter_spacing_px=2.0 * s)
-    box_w = min(int(w * 0.68), max(int(round(360 * s)), max(rw1, rw2, rw3) + int(round(56 * s))))
+    glyph_pad = int(round(28 * s))
+    box_w = min(int(w * 0.68), max(int(round(360 * s)), max(rw1, rw2 + glyph_pad, rw3) + int(round(62 * s))))
     box_h = max(68, int(round(108 * s)))
     draw.rounded_rectangle(
         [px, py, px + box_w, py + box_h],
@@ -1739,9 +2509,10 @@ def _render_screen_hud(
     tx = px + int(round(28 * s))
     draw_tracked_text(frame_rgba, (tx, py + int(round(13 * s))), over_line, font=f_over, fill=metric_c, letter_spacing_px=2.0 * s, shadow=False, hdr_safe=hdr_safe)
     draw_tracked_text(frame_rgba, (tx, py + int(round(34 * s))), route_line, font=f_head, fill=title_c, shadow=False, hdr_safe=hdr_safe)
-    draw_tracked_text(frame_rgba, (tx, py + int(round(74 * s))), stat_line, font=f_stat, fill=sub_c, shadow=False, hdr_safe=hdr_safe)
+    _draw_hud_mode_glyph(draw, tx + int(round(9 * s)), py + int(round(82 * s)), 8.5 * s, transport_mode, (*spec["accent"], 242))
+    draw_tracked_text(frame_rgba, (tx + glyph_pad, py + int(round(74 * s))), stat_line, font=f_stat, fill=sub_c, shadow=False, hdr_safe=hdr_safe)
 
-    # Lower-right synchronized elevation sparkline card
+    # Lower-right synchronized elevation sparkline card (2x supersampled curve)
     sp_w = max(140, int(round(310 * s)))
     sp_h = max(56, int(round(92 * s)))
     sp_x = w - int(round(w * 0.045)) - sp_w
@@ -1757,7 +2528,7 @@ def _render_screen_hud(
     draw_tracked_text(
         frame_rgba,
         (sp_x + int(round(14 * s)), sp_y + int(round(10 * s))),
-        f"ELEV PROFILE  |  {cur_alt:.0f}M ASL",
+        f"ALT PROFILE  |  {cur_alt:.0f}M ASL" if transport_mode == "flight" else f"ELEV PROFILE  |  {cur_alt:.0f}M ASL",
         font=f_sp,
         fill=sub_c,
         shadow=False,
@@ -1771,20 +2542,26 @@ def _render_screen_hud(
     alt_a = max(0.0, float(orig.alt_m))
     alt_b = max(0.0, float(dest.alt_m))
     alt_max = max(alt_a, alt_b, 200.0)
-    n_sp = 28
+    n_sp = 32
     prof_pts: list[tuple[float, float]] = []
     for k in range(n_sp):
         frac = k / float(n_sp - 1)
-        ridge = math.sin(math.pi * frac) * (0.28 if transport_mode == "flight" else 0.14)
-        e_norm = ((alt_a * (1.0 - frac) + alt_b * frac) / alt_max) * 0.72 + ridge
-        e_norm = max(0.08, min(0.95, e_norm))
+        if transport_mode == "flight":
+            e_norm = 0.14 + 0.78 * math.sin(math.pi * frac)
+        else:
+            ridge = math.sin(math.pi * frac) * 0.14
+            e_norm = max(0.08, min(0.95, ((alt_a * (1.0 - frac) + alt_b * frac) / alt_max) * 0.72 + ridge))
         prof_pts.append((gx0 + (gx1 - gx0) * frac, gy_base - (gy_base - gy_top) * e_norm))
 
     poly_fill = [(gx0, gy_base)] + prof_pts + [(gx1, gy_base)]
     draw.polygon(poly_fill, fill=(*spec["route_glow"], 54))
-    draw.line(prof_pts, fill=(*spec["route_future"], 145), width=max(1, int(round(2 * s))))
+    sp_layer = np.zeros((sp_h + 2, sp_w + 2, 4), dtype=np.uint8)
+    local_prof = [(px - sp_x, py - sp_y) for (px, py) in prof_pts]
+    _draw_aa_polyline(sp_layer, local_prof, (*spec["route_future"], 145), max(1, int(round(2.0 * s))))
     active_cnt = max(2, int(round(u * (len(prof_pts) - 1))) + 1)
-    draw.line(prof_pts[:active_cnt], fill=(*spec["route_core"], 250), width=max(2, int(round(3 * s))))
+    _draw_aa_polyline(sp_layer, local_prof[:active_cnt], (*spec["route_core"], 250), max(2, int(round(3.0 * s))))
+    frame_rgba.alpha_composite(Image.fromarray(sp_layer, mode="RGBA"), dest=(sp_x, sp_y))
+    draw = ImageDraw.Draw(frame_rgba, "RGBA")
     hx, hy = prof_pts[min(len(prof_pts) - 1, active_cnt - 1)]
     pr_r = max(3, int(round(4.5 * s)))
     draw.ellipse([hx - pr_r * 1.8, hy - pr_r * 1.8, hx + pr_r * 1.8, hy + pr_r * 1.8], fill=(*spec["accent"], 90))
@@ -1839,19 +2616,21 @@ def render_travel_map_frame(
     use_style = style if style in CART_THEME_SPECS else "midnight_vox_atlas"
     spec = CART_THEME_SPECS[use_style]
 
-    # Oversample world canvas by 1.45x so 2.5D perspective warp preserves razor-sharp detail
-    world_w = max(640, min(2880, int(round(width * 1.45))))
-    world_h = max(360, min(1620, int(round(height * 1.45))))
+    # Oversample world canvas up to 4608x2592 (true 4K supersampling; 1.45x at 1080p)
+    oversample = 1.25 if width > 2000 else 1.45
+    world_w = max(640, min(4608, int(round(width * oversample))))
+    world_h = max(360, min(2592, int(round(height * oversample))))
     wp_sig = tuple((round(w.lat, 5), round(w.lon, 5), round(w.alt_m, 1), w.label) for w in norm_wps)
 
     focus_leg = max(0, min(len(norm_wps) - 2, leg_index)) if len(norm_wps) >= 2 else -1
+    cache_dir_s = str(Path(cache_dir).resolve()) if cache_dir else ""
     base_rgb = _cached_world_baseplate(
         use_style,
         world_w,
         world_h,
         wp_sig,
         bool(allow_tile_fetch),
-        str(Path(cache_dir).resolve()) if cache_dir else "",
+        cache_dir_s,
         focus_leg,
     )
     vp = _compute_viewport(norm_wps, world_w, world_h, focus_leg_index=focus_leg)
@@ -1867,12 +2646,21 @@ def render_travel_map_frame(
     c_dir_p = Path(cache_dir).resolve() if cache_dir else None
     all_leg_splines: list[list[tuple[float, float]]] = []
     for k in range(len(px_stops) - 1):
+        leg_mode_k = resolved_mode if k == i0 else infer_transport_mode(
+            haversine_km(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon),
+            norm_wps[k].label,
+            norm_wps[k + 1].label,
+            hint=transport_mode,
+        )
         road_lls: Optional[list[tuple[float, float]]] = None
         if allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
-            if resolved_mode in ("drive", "walk", "train"):
+            if leg_mode_k in ("drive", "walk", "train"):
                 road_lls = _fetch_osrm_route_latlon(norm_wps[k], norm_wps[k + 1], cache_dir=c_dir_p)
         if road_lls:
             all_leg_splines.append([vp.latlon_to_px(lat, lon) for lat, lon in road_lls])
+        elif leg_mode_k == "flight":
+            gc_lls = _great_circle_latlon_pts(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon, n_samples=160)
+            all_leg_splines.append(_project_flight_latlons_to_px(vp, norm_wps[k], norm_wps[k + 1], gc_lls))
         else:
             all_leg_splines.append(_catmull_rom_xy([px_stops[k], px_stops[k + 1]], samples_per_seg=140))
 
@@ -1882,41 +2670,56 @@ def render_travel_map_frame(
     s_w = world_w / 1920.0
     stroke_w = max(2, int(round(5.0 * s_w)))
 
-    # 1. History legs (< i0) + subtle dashed remaining path on active/next leg
+    # 1. History legs (< i0) + subtle dashed remaining path on active leg
     for k, seg_pts in enumerate(all_leg_splines):
         if k < i0:
             _draw_aa_polyline(route_arr, seg_pts, (*spec["route_history"], 165), max(2, stroke_w - 1))
         elif k == i0:
             _draw_dashed_aa_polyline(route_arr, seg_pts, (*spec["route_future"], 145), max(1, stroke_w // 2 + 1), dash_px=11.0 * s_w, gap_px=8.0 * s_w)
 
-    # 2. Active animated leg progress (departure hold -> cubic travel -> arrival dwell)
+    # 2. Exact arc-length parameterized route animation + 4-pass cased shader
     u = _cartography_travel_progress(t_norm)
     active_pts = all_leg_splines[i0]
-    head_idx = max(1, min(len(active_pts) - 1, int(round(u * (len(active_pts) - 1)))))
-    prog_ground = active_pts[: head_idx + 1]
+    ground_arc_path = _ArcLengthPath(active_pts)
+    prog_ground = ground_arc_path.sample_prefix(u)
 
+    bank_factor = 0.0
+    ground_head_pt = ground_arc_path.point_at_s(u * ground_arc_path.total_len)
     if resolved_mode == "flight":
         span_px = math.hypot(active_pts[-1][0] - active_pts[0][0], active_pts[-1][1] - active_pts[0][1])
         lift_max = min(world_h * 0.22, max(28.0 * s_w, span_px * 0.24))
         arc_pts: list[tuple[float, float]] = []
-        n_total = max(1, len(active_pts) - 1)
+        prefix_arc_len = ground_arc_path.total_len * max(1e-6, u)
+        prefix_cum = 0.0
         for idx_p, (gx, gy) in enumerate(prog_ground):
-            frac = idx_p / float(n_total)
-            arc_pts.append((gx, gy - lift_max * math.sin(math.pi * frac)))
-        # Ground drop shadow beneath elevated flight arc
-        _draw_aa_polyline(route_arr, prog_ground, (8, 12, 18, 95), max(2, stroke_w))
-        _draw_aa_polyline(route_arr, arc_pts, (*spec["route_glow"], 115), max(4, stroke_w * 3))
-        _draw_aa_polyline(route_arr, arc_pts, (*spec["route_core"], 255), max(2, stroke_w + 1))
-        head_pt = arc_pts[-1]
-        prev_pt = arc_pts[max(0, len(arc_pts) - 3)]
+            if idx_p > 0:
+                prefix_cum += math.hypot(gx - prog_ground[idx_p - 1][0], gy - prog_ground[idx_p - 1][1])
+            global_frac = min(1.0, (prefix_cum / max(1e-6, ground_arc_path.total_len)))
+            arc_pts.append((gx, gy - lift_max * math.sin(math.pi * global_frac)))
+        _draw_cased_route(route_arr, arc_pts, spec, stroke_w, s_w, is_flight=True, ground_pts=prog_ground)
+        elev_arc_path = _ArcLengthPath(arc_pts)
+        head_pt = elev_arc_path.point_at_s(elev_arc_path.total_len)
+        heading, bank_factor = elev_arc_path.tangent_and_curvature(1.0, window_px=24.0 * s_w)
+        smooth_cam_pt = elev_arc_path.smoothed_camera_point(0.95, window_px=160.0 * s_w)
+        # Keep camera smoothly following ground chord + arc
+        cam_g = ground_arc_path.smoothed_camera_point(u, window_px=160.0 * s_w)
+        smooth_cam_pt = (cam_g[0], cam_g[1] - 0.55 * lift_max * math.sin(math.pi * u))
     else:
         arc_pts = prog_ground
-        _draw_aa_polyline(route_arr, prog_ground, (*spec["route_glow"], 115), max(4, stroke_w * 3))
-        _draw_aa_polyline(route_arr, prog_ground, (*spec["route_core"], 255), max(2, stroke_w + 1))
-        head_pt = prog_ground[-1]
-        prev_pt = prog_ground[max(0, len(prog_ground) - 3)]
+        _draw_cased_route(route_arr, prog_ground, spec, stroke_w, s_w, is_flight=False)
+        head_pt = ground_head_pt
+        heading, bank_factor = ground_arc_path.tangent_and_curvature(u, window_px=22.0 * s_w)
+        smooth_cam_pt = ground_arc_path.smoothed_camera_point(u, window_px=160.0 * s_w)
 
     world_rgba = Image.alpha_composite(world_rgba, Image.fromarray(route_arr))
+
+    # 2a. Composite crisp floating place labels above route casing when theme uses separate RGBA labels layer
+    labels_ov = _cached_labels_overlay(use_style, world_w, world_h, wp_sig, bool(allow_tile_fetch), cache_dir_s, focus_leg)
+    if labels_ov is not None:
+        l_alpha = labels_ov.getchannel("A").point(lambda v: int(round(v * 0.90)))
+        lbl_copy = labels_ov.copy()
+        lbl_copy.putalpha(l_alpha)
+        world_rgba.alpha_composite(lbl_copy)
 
     # 3. Waypoint pins + destination arrival pulse rings + hero thumbnail callout (active pins prioritized, collision-free labels)
     wd = ImageDraw.Draw(world_rgba, "RGBA")
@@ -2069,32 +2872,85 @@ def render_travel_map_frame(
             tilt_deg=2.0,
         )
 
-    # 4. Tangent-aligned vector transport silhouette
-    heading = math.atan2(head_pt[1] - prev_pt[1], head_pt[0] - prev_pt[0])
-    _draw_transport_icon(
-        world_rgba,
-        cx=head_pt[0],
-        cy=head_pt[1],
-        angle_rad=heading,
-        mode=resolved_mode,
-        fill_rgb=spec["route_core"],
-        stroke_rgb=spec["pin_fill"] if not spec["light_paper"] else (248, 244, 238),
-        scale=s_w * (0.92 if compact_hud else 1.05),
-    )
+    # 4. Physics-coupled secondary effects + 4x-supersampled vehicle + route-tethered camera
+    veh_scale = s_w * (0.90 if compact_hud else 1.05)
+    stroke_col = spec["pin_fill"] if not spec["light_paper"] else (248, 244, 238)
+    if resolved_mode == "flight":
+        alt_sin = math.sin(math.pi * u)
+        g_heading, _ = ground_arc_path.tangent_and_curvature(u, window_px=24.0 * s_w)
+        _draw_aircraft_ground_shadow(
+            world_rgba,
+            gx=ground_head_pt[0],
+            gy=ground_head_pt[1],
+            angle_rad=g_heading,
+            scale=veh_scale * (0.88 - 0.22 * alt_sin),
+            alpha=int(round(115 - 55 * alt_sin)),
+        )
+        _draw_flight_contrails(world_rgba, arc_pts, scale=veh_scale, alt_sin=alt_sin)
+        _draw_transport_icon(
+            world_rgba,
+            cx=head_pt[0],
+            cy=head_pt[1],
+            angle_rad=heading,
+            mode="flight",
+            fill_rgb=spec["route_core"],
+            stroke_rgb=stroke_col,
+            scale=veh_scale * (0.78 + 0.34 * alt_sin),
+            bank_factor=bank_factor,
+        )
+    elif resolved_mode == "train":
+        _draw_articulated_train(
+            world_rgba,
+            arc_path=ground_arc_path,
+            u=u,
+            fill_rgb=spec["route_core"],
+            stroke_rgb=stroke_col,
+            scale=veh_scale,
+        )
+    elif resolved_mode == "boat":
+        _draw_boat_kelvin_wake(world_rgba, arc_path=ground_arc_path, u=u, scale=veh_scale)
+        _draw_transport_icon(
+            world_rgba,
+            cx=head_pt[0],
+            cy=head_pt[1],
+            angle_rad=heading,
+            mode="boat",
+            fill_rgb=spec["route_core"],
+            stroke_rgb=stroke_col,
+            scale=veh_scale,
+            bank_factor=bank_factor,
+        )
+    else:
+        _draw_transport_icon(
+            world_rgba,
+            cx=head_pt[0],
+            cy=head_pt[1],
+            angle_rad=heading,
+            mode=resolved_mode,
+            fill_rgb=spec["route_core"],
+            stroke_rgb=stroke_col,
+            scale=veh_scale,
+            bank_factor=bank_factor,
+        )
 
-    # 5. Virtual camera pan/zoom projection (crisp low-tilt when real street/topo tiles are loaded)
+    # 5. Route-tethered Lanczos virtual camera projection (crisp gentle tilt with real tiles)
     orig_px = px_stops[i0]
     dest_px = px_stops[i1]
     mid_cam_x = 0.5 * (orig_px[0] + dest_px[0])
     mid_cam_y = 0.5 * (orig_px[1] + dest_px[1])
-    follow_x = orig_px[0] + (dest_px[0] - orig_px[0]) * u
-    follow_y = orig_px[1] + (dest_px[1] - orig_px[1]) * u
-    cam_cx = 0.42 * mid_cam_x + 0.58 * follow_x
-    cam_cy = 0.42 * mid_cam_y + 0.58 * follow_y
-    cam_zoom = 0.94 + 0.14 * math.sin(math.pi * u) + 0.08 * u
+    cam_cx = 0.36 * mid_cam_x + 0.64 * smooth_cam_pt[0]
+    cam_cy = 0.36 * mid_cam_y + 0.64 * smooth_cam_pt[1]
+    cam_zoom = 1.02 - 0.06 * math.sin(math.pi * u) + 0.08 * (u ** 2)
     crisp_real_tiles = bool(allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1")
-    pitch_deg = 0.0 if crisp_real_tiles else (16.0 if compact_hud else (21.0 + 5.0 * math.sin(math.pi * u)))
-    bank_deg = 0.0 if (compact_hud or crisp_real_tiles) else (-2.4 + 4.8 * u)
+    if compact_hud:
+        pitch_deg = 0.0 if crisp_real_tiles else 16.0
+        bank_deg = 0.0
+    elif crisp_real_tiles:
+        pitch_deg = 8.5 + 3.0 * math.sin(math.pi * u)
+        bank_deg = bank_factor * 1.8 if resolved_mode == "flight" else 0.0
+    else:
+        pitch_deg = 21.0 + 5.0 * math.sin(math.pi * u)
+        bank_deg = -2.4 + 4.8 * u + bank_factor * 1.4
 
     warped_rgb = _apply_camera_homography(
         world_rgba.convert("RGB"),
@@ -2200,94 +3056,128 @@ def render_travel_map_clip(
         wav_tmp = out_path.with_suffix(".tmp_sfx.wav")
         _synthesize_flyover_wav(wav_tmp, duration_sec=dur)
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "rawvideo",
-        "-vcodec",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{w_even}x{h_even}",
-        "-r",
-        str(fps),
-        "-i",
-        "-",
-    ]
-    if wav_tmp is not None and wav_tmp.exists():
-        cmd.extend(["-i", str(wav_tmp)])
-    else:
-        cmd.extend(["-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000:d={dur}"])
+    from ..hardware import detect_best_video_encoder, get_io_worker_count
 
-    cmd.extend(
-        [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
+    best_sdr = detect_best_video_encoder(hdr=False)
+
+    def _build_map_cmd(force_sw: bool) -> list[str]:
+        enc_args = (
+            ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19", "-b:v", "14M"]
+            if (best_sdr == "h264_nvenc" and not force_sw)
+            else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+        )
+        c = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
             "-pix_fmt",
-            "yuv420p",
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-colorspace",
-            "bt709",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-t",
-            f"{dur:.3f}",
-            "-shortest",
-            str(out_path),
+            "rgb24",
+            "-s",
+            f"{w_even}x{h_even}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
         ]
-    )
+        if wav_tmp is not None and wav_tmp.exists():
+            c.extend(["-i", str(wav_tmp)])
+        else:
+            c.extend(["-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000:d={dur}"])
+        c.extend(
+            [
+                *enc_args,
+                "-pix_fmt",
+                "yuv420p",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-t",
+                f"{dur:.3f}",
+                "-shortest",
+                str(out_path),
+            ]
+        )
+        return c
 
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdin is not None and proc.stderr is not None
-    try:
-        for f_idx in range(total_frames):
-            global_p = f_idx / float(max(1, total_frames - 1))
-            if leg_index is None and n_legs > 1:
-                scaled = global_p * n_legs
-                cur_leg = min(n_legs - 1, int(math.floor(scaled)))
-                leg_p = 1.0 if f_idx == total_frames - 1 else (scaled - cur_leg)
-            else:
-                cur_leg = max(0, min(n_legs - 1, int(leg_index or 0)))
-                leg_p = global_p
+    def _render_frame_bytes(f_idx: int) -> bytes:
+        global_p = f_idx / float(max(1, total_frames - 1))
+        if leg_index is None and n_legs > 1:
+            scaled = global_p * n_legs
+            cur_leg = min(n_legs - 1, int(math.floor(scaled)))
+            leg_p = 1.0 if f_idx == total_frames - 1 else (scaled - cur_leg)
+        else:
+            cur_leg = max(0, min(n_legs - 1, int(leg_index or 0)))
+            leg_p = global_p
 
-            im = render_travel_map_frame(
-                waypoints=waypoints,
-                style=style,
-                width=w_even,
-                height=h_even,
-                leg_index=cur_leg,
-                t_norm=leg_p,
-                transport_mode=transport_mode,
-                hdr_safe=hdr_safe,
-                compact_hud=False,
-                allow_tile_fetch=allow_tile_fetch,
-                cache_dir=cache_dir,
-                annotations=annotations,
-            )
-            if im.size != (w_even, h_even):
-                im = im.resize((w_even, h_even), Image.Resampling.BILINEAR)
-            proc.stdin.write(im.tobytes())
-        proc.stdin.close()
-    except Exception:
+        im = render_travel_map_frame(
+            waypoints=waypoints,
+            style=style,
+            width=w_even,
+            height=h_even,
+            leg_index=cur_leg,
+            t_norm=leg_p,
+            transport_mode=transport_mode,
+            hdr_safe=hdr_safe,
+            compact_hud=False,
+            allow_tile_fetch=allow_tile_fetch,
+            cache_dir=cache_dir,
+            annotations=annotations,
+        )
+        if im.size != (w_even, h_even):
+            im = im.resize((w_even, h_even), Image.Resampling.BILINEAR)
+        return im.tobytes()
+
+    # Pre-warm tile/font caches on frame 0, then render remaining frames in parallel chunks
+    frame0_bytes = _render_frame_bytes(0)
+    map_workers = max(1, min(get_io_worker_count(12), total_frames - 1))
+
+    def _encode_all(force_sw: bool) -> tuple[int, bytes]:
+        proc = subprocess.Popen(_build_map_cmd(force_sw=force_sw), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.stdin is not None and proc.stderr is not None
         try:
-            proc.kill()
+            proc.stdin.write(frame0_bytes)
+            if total_frames > 1:
+                if map_workers == 1:
+                    for f_i in range(1, total_frames):
+                        proc.stdin.write(_render_frame_bytes(f_i))
+                else:
+                    chunk_sz = max(map_workers * 2, 16)
+                    with ThreadPoolExecutor(max_workers=map_workers) as pool:
+                        for c_start in range(1, total_frames, chunk_sz):
+                            c_end = min(total_frames, c_start + chunk_sz)
+                            for fb in pool.map(_render_frame_bytes, range(c_start, c_end)):
+                                proc.stdin.write(fb)
+            proc.stdin.close()
         except Exception:
-            pass
-        raise
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise
+        err_b = proc.stderr.read()
+        rc_val = proc.wait()
+        return rc_val, err_b
+
+    from ..hardware import nvenc_encode_guard
+
+    try:
+        with nvenc_encode_guard(["-c:v", best_sdr]):
+            rc, stderr_bytes = _encode_all(force_sw=False)
+        if rc != 0 and best_sdr == "h264_nvenc":
+            rc, stderr_bytes = _encode_all(force_sw=True)
     finally:
         if wav_tmp is not None and wav_tmp.exists():
             try:
@@ -2295,8 +3185,6 @@ def render_travel_map_clip(
             except Exception:
                 pass
 
-    stderr_bytes = proc.stderr.read()
-    rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"Travel map FFmpeg encode failed (rc={rc}): {stderr_bytes.decode('utf-8', errors='ignore')}")
     return out_path

@@ -89,8 +89,11 @@ class MPSPhotoCompositor:
             with _MPS_LOCK:
                 if dev_idx not in _CUDA_MEM_FRACTION_SET:
                     try:
-                        # Bound PyTorch caching allocator so external FFmpeg NVENC/NVDEC sessions retain headroom
-                        torch.cuda.set_per_process_memory_fraction(0.32, dev_idx)
+                        # Bound PyTorch caching allocator while giving >=12GB cards higher throughput headroom
+                        props = torch.cuda.get_device_properties(dev_idx)
+                        vram_gb = float(props.total_memory) / float(1024 ** 3)
+                        frac = 0.42 if vram_gb >= 12.0 else 0.35
+                        torch.cuda.set_per_process_memory_fraction(frac, dev_idx)
                     except Exception:
                         pass
                     _CUDA_MEM_FRACTION_SET.add(dev_idx)
@@ -128,9 +131,11 @@ class MPSPhotoCompositor:
                     torch.mps.empty_cache()
                 except Exception:
                     pass
-            elif self._cuda_stream is not None:
+            elif self.device.type == "cuda":
                 try:
-                    self._cuda_stream.synchronize()
+                    if self._cuda_stream is not None:
+                        self._cuda_stream.synchronize()
+                    torch.cuda.empty_cache()
                 except Exception:
                     pass
 
@@ -1148,7 +1153,10 @@ def stream_photo_frames_to_pipe(
                 if item is None:
                     return
                 try:
-                    mv = memoryview(np.ascontiguousarray(item.numpy()))
+                    arr_np = item.numpy()
+                    if not arr_np.flags["C_CONTIGUOUS"]:
+                        arr_np = np.ascontiguousarray(arr_np)
+                    mv = memoryview(arr_np)
                     pipe_stdin.write(mv)
                 except (BrokenPipeError, OSError):
                     stop_event.set()
@@ -1165,7 +1173,7 @@ def stream_photo_frames_to_pipe(
     try:
         eff_batch = (
             min(max(1, batch_size), 4)
-            if int(ctx.get("width", 0)) >= 3840
+            if (comp.device.type != "cuda" and int(ctx.get("width", 0)) >= 3840)
             else max(1, batch_size)
         )
         for start_idx in range(0, total_frames, eff_batch):

@@ -127,6 +127,7 @@ TravelMapStyleType = Literal[
     "aerial_relief_hybrid",
     "kinfolk_minimal_monograph",
     "google_road_navigator",
+    "satellite_hybrid_4k",
 ]
 
 VALID_TRAVEL_MAP_STYLES: tuple[str, ...] = (
@@ -136,6 +137,7 @@ VALID_TRAVEL_MAP_STYLES: tuple[str, ...] = (
     "aerial_relief_hybrid",
     "kinfolk_minimal_monograph",
     "google_road_navigator",
+    "satellite_hybrid_4k",
 )
 
 TravelMapModeType = Literal[

@@ -266,7 +266,7 @@ def _build_chapter_items(
                 chapter.editing_mode == "hybrid"
                 and (
                     sid in candid_set
-                    or (bool(sc.transcript_excerpt.strip()) and 1.5 <= clip_dur <= 4.0)
+                    or (bool((sc.spoken_text or "").strip()) and 1.5 <= clip_dur <= 4.0)
                 )
             )
             eff_roll_type = "a_roll" if (sc.roll_type == "a_roll" or is_hybrid_candid) else sc.roll_type

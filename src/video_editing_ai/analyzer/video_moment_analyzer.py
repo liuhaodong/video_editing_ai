@@ -67,9 +67,17 @@ def _decode_lowres_gray_frames(
         "rawvideo",
         "pipe:1",
     ]
-    hw_prefix = ["-hwaccel", "videotoolbox"] if get_hardware_profile().has_videotoolbox_hwaccel else []
+    from ..hardware import cuda_nvdec_guard
+
+    hw = get_hardware_profile()
+    hw_prefix = (
+        ["-hwaccel", "videotoolbox"]
+        if hw.has_videotoolbox_hwaccel
+        else (["-hwaccel", "cuda"] if hw.has_cuda_hwaccel else [])
+    )
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *hw_prefix, *base_args]
-    proc = subprocess.run(cmd, capture_output=True, check=False)
+    with cuda_nvdec_guard(hw_prefix):
+        proc = subprocess.run(cmd, capture_output=True, check=False)
     frame_bytes = width * height
     if (proc.returncode != 0 or len(proc.stdout) < frame_bytes) and hw_prefix:
         cmd_sw = ["ffmpeg", "-hide_banner", "-loglevel", "error", *base_args]

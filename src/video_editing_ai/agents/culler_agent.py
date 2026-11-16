@@ -536,7 +536,7 @@ class CullerAgent(BaseEditingAgent):
 
         precomputed_vid_map: dict[str, tuple[list[str], Optional[dict[str, Any]], dict[str, Any]]] = {}
         if sorted_videos:
-            vid_workers = max(1, min(4, get_io_worker_count(8), len(sorted_videos)))
+            vid_workers = max(1, min(get_io_worker_count(12), len(sorted_videos)))
             if vid_workers == 1:
                 vid_rows = [_precompute_vid(v) for v in sorted_videos]
             else:

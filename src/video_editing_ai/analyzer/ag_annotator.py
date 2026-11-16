@@ -86,7 +86,7 @@ def apply_local_visual_enrichment(catalog: MediaCatalog) -> MediaCatalog:
 
     metrics_by_path: dict[str, dict[str, Any]] = {}
     if metric_targets:
-        workers = max(1, min(get_io_worker_count(8), len(metric_targets)))
+        workers = max(1, min(get_io_worker_count(16), len(metric_targets)))
         if workers == 1:
             metrics_list = [_compute_visual_metrics(p) for p in metric_targets]
         else:

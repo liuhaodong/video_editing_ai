@@ -23,6 +23,7 @@ from ..hardware import (
     get_io_worker_count,
     get_render_worker_count,
     has_ffmpeg_filter,
+    nvenc_encode_guard,
 )
 from ..models.schema import EditTimeline, EffectTrackItem, TitleOverlayItem, VisualTrackItem
 from .ken_burns import (
@@ -82,6 +83,17 @@ def _build_color_grade_filter(fx: EffectTrackItem) -> str:
     return ",".join(parts)
 
 
+def _build_video_stabilize_filter(fx: EffectTrackItem) -> str:
+    """Stabilize handheld clips and crop out mirrored deshake border margins."""
+    rx = max(4, min(32, int(fx.parameters.get("rx", 16)))) & ~1
+    ry = max(4, min(32, int(fx.parameters.get("ry", 16)))) & ~1
+    return (
+        f"deshake=rx={rx}:ry={ry}:edge=mirror,"
+        f"crop=iw-{rx * 2}:ih-{ry * 2}:{rx}:{ry},"
+        f"scale=iw+{rx * 2}:ih+{ry * 2}:flags=lanczos"
+    )
+
+
 # Extensible registry mapping Stage-40/32/42 EffectTrackItem.effect_type -> FFmpeg filter builder
 EFFECT_FILTER_BUILDERS: dict[str, Callable[[EffectTrackItem], str]] = {
     "warm_glow": lambda fx: (
@@ -94,9 +106,7 @@ EFFECT_FILTER_BUILDERS: dict[str, Callable[[EffectTrackItem], str]] = {
         f"saturation={float(fx.parameters.get('saturation', 1.05)):.2f}"
     ),
     "color_grade": _build_color_grade_filter,
-    "video_stabilize": lambda fx: (
-        f"deshake=rx={int(fx.parameters.get('rx', 16))}:ry={int(fx.parameters.get('ry', 16))}:edge=mirror"
-    ),
+    "video_stabilize": _build_video_stabilize_filter,
 }
 
 
@@ -273,7 +283,8 @@ def _concat_segments_safe(
                 str(target_mp4),
             ]
 
-        proc = subprocess.run(_cmd(force_sw=False), capture_output=True, text=True, check=False)
+        with nvenc_encode_guard(_video_encoder_args(hdr, force_software=False)):
+            proc = subprocess.run(_cmd(force_sw=False), capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             proc = subprocess.run(_cmd(force_sw=True), capture_output=True, text=True, check=False)
             if proc.returncode != 0:
@@ -290,7 +301,7 @@ def _concat_segments_safe(
     ]
     chunk_files = [cm for _, cm in chunk_specs]
     try:
-        chunk_workers = max(1, min(4, len(chunk_specs)))
+        chunk_workers = max(1, min(2, len(chunk_specs)))
         if chunk_workers > 1:
             with ThreadPoolExecutor(max_workers=chunk_workers) as pool:
                 futs = [pool.submit(_run_filter_concat, ci, cm) for ci, cm in chunk_specs]
@@ -646,9 +657,12 @@ def _render_video_segment(
 
     try:
         hw_enc_args = _video_encoder_args(hdr, force_software=False)
-        with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
+        # Keep VideoToolbox hwdecode on macOS; use deterministic CPU decode before CPU 10-bit filters on CUDA systems
+        # so multi-worker runs never trigger NVDEC OpenGOP -ss surface tears or WDDM VRAM contention.
+        prefer_hw_dec = bool(hw.has_videotoolbox_hwaccel)
+        with nvenc_encode_guard(hw_enc_args), videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
             proc = subprocess.run(
-                _build_cmd(force_sw=False, use_zero_copy_vt=can_zero_copy_vt, use_hw_decode=True),
+                _build_cmd(force_sw=False, use_zero_copy_vt=can_zero_copy_vt, use_hw_decode=prefer_hw_dec),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -656,13 +670,13 @@ def _render_video_segment(
             if proc.returncode != 0 and can_zero_copy_vt:
                 tmp_out.unlink(missing_ok=True)
                 proc = subprocess.run(
-                    _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=True),
+                    _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=prefer_hw_dec),
                     capture_output=True,
                     text=True,
                     check=False,
                 )
-            if proc.returncode != 0 and (hw.has_cuda_hwaccel or hw.has_videotoolbox_hwaccel):
-                # Retry hardware encode with CPU decode if source pixel format (e.g. 10-bit 4:2:2) rejects NVDEC
+            if proc.returncode != 0 and prefer_hw_dec:
+                # Retry hardware encode with CPU decode if source pixel format rejects hwaccel
                 tmp_out.unlink(missing_ok=True)
                 proc = subprocess.run(
                     _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=False),
@@ -1102,15 +1116,23 @@ def render_timeline(
             clip_fxs = effects_by_clip.get(item.id, [])
             b_assigned = v1_broll_entries[idx]
             t_assigned = v1_title_entries[idx]
+            has_stab = any(f.effect_type == "video_stabilize" for f in clip_fxs)
             sig_payload = json.dumps(
                 {
                     "v": 6,
                     "mux_norm": "tv_norot_v2",
+                    "stab_v": "crop_v2" if has_stab else "",
+                    **({"dec_v": "sw_clean_v1"} if item.type == "video" else {}),
                     "item": item.model_dump(mode="json"),
                     "fx": [f.model_dump(mode="json") for f in clip_fxs],
                     "seg_broll": [
-                        {"item": bi.model_dump(mode="json"), "st": lst, "dur": ldur}
-                        for bi, _, lst, ldur in b_assigned
+                        {
+                            "item": bi.model_dump(mode="json"),
+                            "st": lst,
+                            "dur": ldur,
+                            "mtime_ns": int(bmp.stat().st_mtime_ns) if bmp.exists() else 0,
+                        }
+                        for bi, bmp, lst, ldur in b_assigned
                     ],
                     "seg_titles": [
                         {
@@ -1450,7 +1472,8 @@ def render_timeline(
                 )
             return final_cmd
 
-        proc = subprocess.run(_build_final_cmd(force_sw=False), capture_output=True, text=True, check=False)
+        with nvenc_encode_guard(_video_encoder_args(hdr, force_software=False) if has_step4_video_ops else ()):
+            proc = subprocess.run(_build_final_cmd(force_sw=False), capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             proc = subprocess.run(_build_final_cmd(force_sw=True), capture_output=True, text=True, check=False)
             if proc.returncode != 0:

@@ -425,3 +425,57 @@ def test_hdr_uniform_tv_range_and_zero_displaymatrix_across_mixed_sources(tmp_pa
         extradata_sigs.append(s.get("extradata"))
 
     assert len(set(extradata_sigs)) == 1, "All mixed-source HDR segments must share identical hvcC extradata"
+
+
+def test_nvenc_and_nvdec_guards_enforce_concurrency_bounds() -> None:
+    """Verify global NVENC and CUDA NVDEC guards cap concurrent hardware sessions at 4 without blocking SW."""
+    import threading
+    import time
+
+    def _measure_peak(guard_fn, arg_list: list[str], n_threads: int = 8) -> int:
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+        barrier = threading.Barrier(n_threads)
+
+        def _worker() -> None:
+            nonlocal active, peak
+            barrier.wait(timeout=2.0)
+            with guard_fn(arg_list):
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+
+        threads = [threading.Thread(target=_worker) for _ in range(n_threads)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=5.0)
+        return peak
+
+    assert _measure_peak(hardware.nvenc_encode_guard, ["-c:v", "hevc_nvenc"]) <= 4
+    assert _measure_peak(hardware.nvenc_encode_guard, ["-c:v", "libx265"]) == 8
+    assert _measure_peak(hardware.cuda_nvdec_guard, ["-hwaccel", "cuda"]) <= 4
+    assert _measure_peak(hardware.cuda_nvdec_guard, []) == 8
+
+
+def test_video_stabilize_filter_crops_mirrored_borders() -> None:
+    """Verify video_stabilize crops even mirrored deshake margins and restores input dimensions."""
+    from video_editing_ai.models.schema import EffectTrackItem
+
+    fx = EffectTrackItem(
+        id="fx_test_stab",
+        effect_type="video_stabilize",
+        target_clip_id="clip_001",
+        timeline_start=0.0,
+        duration=2.0,
+        intensity=0.35,
+        parameters={"rx": 15, "ry": 17},
+    )
+    flt = ffmpeg_composer.EFFECT_FILTER_BUILDERS["video_stabilize"](fx)
+    assert "deshake=rx=14:ry=16:edge=mirror" in flt
+    assert "crop=iw-28:ih-32:14:16" in flt
+    assert "scale=iw+28:ih+32:flags=lanczos" in flt

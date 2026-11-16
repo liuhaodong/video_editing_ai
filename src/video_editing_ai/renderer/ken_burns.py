@@ -2774,66 +2774,76 @@ def render_photo_clip(
     v_enc = get_video_encoder_args(hdr=hdr, force_software=False)
     cmd = _build_photo_cmd(force_sw=False)
 
-    from ..hardware import videotoolbox_hdr_encode_guard
+    from ..hardware import nvenc_encode_guard, videotoolbox_hdr_encode_guard
 
     try:
         hw = get_hardware_profile()
         if hw.has_cuda and total_frames > 0:
-            cuda_batch = (8 if hw.cuda_vram_gb >= 12.0 else 4) if width >= 3840 else 12
+            cuda_batch = (6 if hw.cuda_vram_gb >= 12.0 else 3) if width >= 3840 else 12
             cuda_ok = False
-            cuda_sem_held = False
             stderr_bytes = b""
             ret = 1
             proc: Optional[subprocess.Popen[bytes]] = None
-            try:
-                _CUDA_PHOTO_SEM.acquire()
-                cuda_sem_held = True
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-                assert proc.stdin is not None
-                from .mps_photo_compositor import stream_photo_frames_to_pipe
-
-                stream_photo_frames_to_pipe(
-                    ctx=ctx,
-                    total_frames=total_frames,
-                    duration=duration,
-                    fps=fps,
-                    pipe_stdin=proc.stdin,
-                    batch_size=cuda_batch,
-                    device_override="cuda",
-                )
-                cuda_ok = True
-            except Exception as exc:
-                print(f"[ken_burns] CUDA photo compositor fallback to CPU: {exc}", file=sys.stderr)
-                if proc is not None:
+            with nvenc_encode_guard(v_enc):
+                for attempt_batch in (cuda_batch, max(2, cuda_batch // 2)):
+                    cuda_ok = False
+                    cuda_sem_held = False
+                    proc = None
                     try:
-                        proc.kill()
-                        proc.wait(timeout=5)
-                    except Exception:
-                        pass
-                tmp_out.unlink(missing_ok=True)
-                try:
-                    import torch
+                        _CUDA_PHOTO_SEM.acquire()
+                        cuda_sem_held = True
+                        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                        assert proc.stdin is not None
+                        from .mps_photo_compositor import stream_photo_frames_to_pipe
 
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
-            finally:
-                if proc is not None and proc.stdin is not None:
-                    try:
-                        proc.stdin.close()
-                    except (BrokenPipeError, OSError, ValueError):
-                        pass
-                if cuda_sem_held:
-                    _CUDA_PHOTO_SEM.release()
+                        stream_photo_frames_to_pipe(
+                            ctx=ctx,
+                            total_frames=total_frames,
+                            duration=duration,
+                            fps=fps,
+                            pipe_stdin=proc.stdin,
+                            batch_size=attempt_batch,
+                            device_override="cuda",
+                        )
+                        cuda_ok = True
+                        break
+                    except Exception as exc:
+                        if proc is not None:
+                            try:
+                                proc.kill()
+                                proc.wait(timeout=5)
+                            except Exception:
+                                pass
+                        tmp_out.unlink(missing_ok=True)
+                        try:
+                            import torch
 
-            if cuda_ok and proc is not None:
-                stderr_bytes = proc.stderr.read() if proc.stderr else b""
-                ret = proc.wait()
-                if ret == 0:
-                    os.replace(tmp_out, out_path)
-                    return out_path
-                tmp_out.unlink(missing_ok=True)
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                        is_oom = "out of memory" in str(exc).lower()
+                        if is_oom and attempt_batch > max(2, cuda_batch // 2):
+                            continue
+                        print(f"[ken_burns] CUDA photo compositor fallback to CPU: {exc}", file=sys.stderr)
+                        break
+                    finally:
+                        if proc is not None and proc.stdin is not None:
+                            try:
+                                proc.stdin.close()
+                            except (BrokenPipeError, OSError, ValueError):
+                                pass
+                        if cuda_sem_held:
+                            _CUDA_PHOTO_SEM.release()
+
+                if cuda_ok and proc is not None:
+                    stderr_bytes = proc.stderr.read() if proc.stderr else b""
+                    ret = proc.wait()
+                    if ret == 0:
+                        os.replace(tmp_out, out_path)
+                        return out_path
+                    tmp_out.unlink(missing_ok=True)
+            if cuda_ok and ret != 0:
                 sw_cmd = _build_photo_cmd(force_sw=True)
                 sw_proc: Optional[subprocess.Popen[bytes]] = None
                 sw_sem_held = False

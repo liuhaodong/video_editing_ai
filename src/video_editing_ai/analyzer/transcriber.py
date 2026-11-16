@@ -86,31 +86,51 @@ def _decode_audio_pcm_16k(video_path: Path):
 
 
 def _get_whisper_model(model_size: str = "small"):
-    if model_size not in _WHISPER_MODEL_CACHE:
-        from faster_whisper import WhisperModel
-        from ..hardware import get_io_worker_count
+    from ..hardware import get_io_worker_count, select_torch_device
 
-        cpu_threads = max(2, min(8, get_io_worker_count(8)))
-        for compute_type in ("int8", "default", "float32"):
-            try:
+    use_cuda = False
+    if select_torch_device() == "cuda":
+        try:
+            import ctranslate2
+
+            use_cuda = ctranslate2.get_cuda_device_count() > 0
+        except Exception:
+            use_cuda = False
+
+    target_dev = "cuda" if use_cuda else "cpu"
+    cache_key = f"{model_size}:{target_dev}"
+    if cache_key not in _WHISPER_MODEL_CACHE:
+        from faster_whisper import WhisperModel
+
+        cpu_threads = max(2, min(16, get_io_worker_count(16)))
+        attempts: list[tuple[str, tuple[str, ...]]] = (
+            [("cuda", ("float16", "int8_float16", "int8")), ("cpu", ("int8", "default", "float32"))]
+            if use_cuda
+            else [("cpu", ("int8", "default", "float32"))]
+        )
+        last_exc: Optional[Exception] = None
+        for dev, compute_types in attempts:
+            loaded = False
+            for compute_type in compute_types:
                 try:
-                    _WHISPER_MODEL_CACHE[model_size] = WhisperModel(
-                        model_size,
-                        device="cpu",
-                        compute_type=compute_type,
-                        cpu_threads=cpu_threads,
-                    )
-                except TypeError:
-                    _WHISPER_MODEL_CACHE[model_size] = WhisperModel(
-                        model_size,
-                        device="cpu",
-                        compute_type=compute_type,
-                    )
+                    kwargs: dict[str, Any] = {"device": dev, "compute_type": compute_type}
+                    if dev == "cpu":
+                        kwargs["cpu_threads"] = cpu_threads
+                    try:
+                        _WHISPER_MODEL_CACHE[cache_key] = WhisperModel(model_size, **kwargs)
+                    except TypeError:
+                        kwargs.pop("cpu_threads", None)
+                        _WHISPER_MODEL_CACHE[cache_key] = WhisperModel(model_size, **kwargs)
+                    loaded = True
+                    break
+                except Exception as exc:
+                    last_exc = exc
+            if loaded:
                 break
-            except Exception:
-                if compute_type == "float32":
-                    raise
-    return _WHISPER_MODEL_CACHE[model_size]
+        if cache_key not in _WHISPER_MODEL_CACHE:
+            assert last_exc is not None
+            raise last_exc
+    return _WHISPER_MODEL_CACHE[cache_key]
 
 
 def _transcribe_pcm_raw(

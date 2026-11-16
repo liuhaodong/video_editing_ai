@@ -16,6 +16,8 @@ from typing import Iterator, Optional
 
 _LOCK = threading.RLock()
 _VT_HDR_ENCODE_LOCK = threading.Lock()
+_NVENC_ENCODE_SEM = threading.BoundedSemaphore(4)
+_CUDA_NVDEC_SEM = threading.BoundedSemaphore(4)
 
 _VALID_ACCEL_POLICIES = frozenset({"auto", "cuda", "mps", "opencl", "cpu"})
 
@@ -518,6 +520,31 @@ def videotoolbox_hdr_encode_guard(hdr: bool, v_enc_args: list[str]) -> Iterator[
     """
     if sys.platform == "darwin" and hdr and "hevc_videotoolbox" in v_enc_args:
         with _VT_HDR_ENCODE_LOCK:
+            yield
+    else:
+        yield
+
+
+@contextlib.contextmanager
+def nvenc_encode_guard(v_enc_args: list[str] | tuple[str, ...]) -> Iterator[None]:
+    """
+    Bound GPU-wide concurrent NVENC sessions across photo, video, map, and concat workers.
+
+    Prevents simultaneous PyTorch CUDA workloads + FFmpeg NVENC/WDDM buffer allocations
+    from exceeding VRAM or hardware session limits and causing silent frame/slice tears.
+    """
+    if any("nvenc" in str(arg).lower() for arg in v_enc_args):
+        with _NVENC_ENCODE_SEM:
+            yield
+    else:
+        yield
+
+
+@contextlib.contextmanager
+def cuda_nvdec_guard(hw_prefix: list[str] | tuple[str, ...]) -> Iterator[None]:
+    """Bound concurrent `-hwaccel cuda` NVDEC decode workers so 12-16 thread analyzers stay within VRAM/NVDEC limits."""
+    if any(str(tok).lower() == "cuda" for tok in hw_prefix):
+        with _CUDA_NVDEC_SEM:
             yield
     else:
         yield

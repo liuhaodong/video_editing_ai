@@ -336,10 +336,16 @@ def detect_scenes_and_extract_keyframes(
     # Detect scene change timestamps via FFmpeg showinfo
     cut_times: list[float] = [0.0]
     keyframes_dir.mkdir(parents=True, exist_ok=True)
-    use_vt = get_hardware_profile().has_videotoolbox_hwaccel
-    hw_prefix = ["-hwaccel", "videotoolbox"] if use_vt else []
+    hw = get_hardware_profile()
+    hw_prefix = (
+        ["-hwaccel", "videotoolbox"]
+        if hw.has_videotoolbox_hwaccel
+        else (["-hwaccel", "cuda"] if hw.has_cuda_hwaccel else [])
+    )
 
     if duration > 3.5:
+        from ..hardware import cuda_nvdec_guard
+
         sc_tail = [
             "-i",
             str(video_path),
@@ -350,7 +356,8 @@ def detect_scenes_and_extract_keyframes(
             "null",
             "-",
         ]
-        proc = subprocess.run(["ffmpeg", "-hide_banner", *hw_prefix, *sc_tail], capture_output=True, text=True, check=False)
+        with cuda_nvdec_guard(hw_prefix):
+            proc = subprocess.run(["ffmpeg", "-hide_banner", *hw_prefix, *sc_tail], capture_output=True, text=True, check=False)
         if proc.returncode != 0 and hw_prefix:
             proc = subprocess.run(["ffmpeg", "-hide_banner", *sc_tail], capture_output=True, text=True, check=False)
         pts_pattern = re.compile(r"pts_time:([0-9.]+)")
@@ -1042,7 +1049,7 @@ def build_initial_catalog(
 
     if files:
         indexed_files = list(enumerate(files))
-        workers = max(1, min(get_io_worker_count(8), len(indexed_files)))
+        workers = max(1, min(get_io_worker_count(16), len(indexed_files)))
         if workers == 1:
             built_rows = [_build_one(it) for it in indexed_files]
         else:

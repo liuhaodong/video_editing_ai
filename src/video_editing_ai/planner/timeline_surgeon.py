@@ -356,13 +356,18 @@ def apply_surgical_edit(
             wp_dest = _parse_geo_stop(op.get("destination"), 35.0116, 135.7681, "Destination")
             wp_dest.waypoint_id = "wp_02"
             req_style = str(op.get("style") or op.get("map_style") or "auto").strip().lower()
+            dist_km = haversine_km(wp_orig.lat, wp_orig.lon, wp_dest.lat, wp_dest.lon)
+            t_mode = infer_transport_mode(dist_km, wp_orig.label, wp_dest.label, hint=str(op.get("transport_mode") or "auto"))
             tm_style = (
                 req_style
                 if req_style in VALID_TRAVEL_MAP_STYLES and req_style != "auto"
-                else resolve_travel_map_style("auto", timeline.subtitles.theme or "apple_tv_glass", f"{wp_orig.label} {wp_dest.label}")
+                else resolve_travel_map_style(
+                    "auto",
+                    timeline.subtitles.theme or "apple_tv_glass",
+                    f"{wp_orig.label} {wp_dest.label}",
+                    transport_mode=t_mode,
+                )
             )
-            dist_km = haversine_km(wp_orig.lat, wp_orig.lon, wp_dest.lat, wp_dest.lon)
-            t_mode = infer_transport_mode(dist_km, wp_orig.label, wp_dest.label, hint=str(op.get("transport_mode") or "auto"))
             placement = str(op.get("placement") or "v2_flyover").strip().lower()
             req_dur = max(1.4, min(6.0, float(op.get("duration") or op.get("new_duration") or 3.0)))
 
