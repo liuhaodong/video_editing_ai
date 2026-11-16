@@ -15,6 +15,7 @@ import sys
 import threading
 from typing import Any, Callable, Iterator, Optional
 
+from ..analyzer.live_photo_filter import is_live_photo_video
 from ..analyzer.media_probe import probe_video_file
 from ..hardware import (
     caffeinate_guard,
@@ -359,6 +360,13 @@ def _render_video_segment(
         and item.paired_visual_source
         and Path(item.paired_visual_source).exists()
     )
+    has_bottom_seg_title = any(
+        isinstance(t_ent, dict)
+        and isinstance(t_ent.get("item"), TitleOverlayItem)
+        and getattr(t_ent["item"], "style", "")
+        in ("lower_third", "magazine_chapter_plate", "curved_gps_ribbon", "act_banner", "opening_card")
+        for t_ent in (segment_titles or [])
+    )
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = output_mp4.with_name(f".{output_mp4.stem}.tmp_{os.getpid()}_{threading.get_ident()}.mp4")
     card_png: Optional[Path] = None
@@ -385,14 +393,16 @@ def _render_video_segment(
 
                 base_ov = Image.open(card_png).convert("RGBA")
                 p_img = ImageOps.exif_transpose(Image.open(item.paired_visual_source)).convert("RGB")
+                p_max_h = int(height * (0.68 if has_bottom_seg_title else (0.74 if has_doc_card else 0.80)))
                 p_card = _build_double_matte_card(
                     p_img,
                     max_w=int(width * 0.40),
-                    max_h=int(height * (0.74 if has_doc_card else 0.80)),
+                    max_h=p_max_h,
                     scale_factor=width / 1920.0,
                 )
                 rx = int(width * 0.72) - p_card.width // 2
-                ry = int(height * (0.43 if has_doc_card else 0.48)) - p_card.height // 2
+                ry_anchor = 0.40 if has_bottom_seg_title else (0.43 if has_doc_card else 0.48)
+                ry = int(height * ry_anchor) - p_card.height // 2
                 base_ov.paste(p_card, (rx, max(8, ry)), p_card)
                 base_ov.save(card_png, "PNG")
             except Exception:
@@ -469,11 +479,11 @@ def _render_video_segment(
     # Build filtergraph: handles portrait 9:16 ambient blurred backdrop (+ optional Live Video+Photo Diptych) + frosted card
     filter_complex_parts: list[str] = []
     if is_portrait:
-        fg_h = int(round(height * (0.74 if (has_doc_card or has_paired_photo) else 0.84)))
+        fg_h = int(round(height * (0.68 if has_bottom_seg_title else (0.74 if (has_doc_card or has_paired_photo) else 0.84))))
         fg_h = fg_h - (fg_h % 2)
         pad_px = max(6, int(round(12 * (width / 1920.0))))
         pad_px = pad_px - (pad_px % 2)
-        y_pos = int(round(height * (0.05 if (has_doc_card or has_paired_photo) else 0.08)))
+        y_pos = int(round(height * (0.05 if (has_doc_card or has_paired_photo or has_bottom_seg_title) else 0.08)))
         x_expr = "(W*28/100)-(w/2)" if has_paired_photo else "(W-w)/2"
         filter_complex_parts.append(
             f"[0:v]{speed_prefix}split=2[vbg][vfg];"
@@ -817,6 +827,14 @@ def render_timeline(
     if not timeline.visual_track:
         raise ValueError("Cannot render an empty visual_track.")
 
+    for track_item in (*timeline.visual_track, *timeline.broll_track):
+        if track_item.type == "video" and is_live_photo_video(track_item.source):
+            raise ValueError(
+                f"Live Photo / Motion Photo video '{track_item.source}' (clip '{track_item.id}') "
+                "is prohibited due to low resolution and pre-shutter motion blur; use the full-resolution "
+                "still photo or a standalone camera video instead."
+            )
+
     out_path = Path(output_mp4).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     w_dir = Path(work_dir).resolve() if work_dir else (out_path.parent / "render_cache")
@@ -856,7 +874,7 @@ def render_timeline(
         for b_idx, b_item in enumerate(active_broll):
             sig_payload = json.dumps(
                 {
-                    "v": 4,
+                    "v": 5,
                     "mux_norm": "tv_norot_v2",
                     "b_item": b_item.model_dump(mode="json"),
                     "w": width,
@@ -916,7 +934,7 @@ def render_timeline(
             item_dict = t_item.model_dump(mode="json")
             t_sig_payload = json.dumps(
                 {
-                    "v": "kin_v2",
+                    "v": "kin_v3",
                     "item": item_dict,
                     "w": width,
                     "h": height,
@@ -1064,7 +1082,7 @@ def render_timeline(
             t_assigned = v1_title_entries[idx]
             sig_payload = json.dumps(
                 {
-                    "v": 5,
+                    "v": 6,
                     "mux_norm": "tv_norot_v2",
                     "item": item.model_dump(mode="json"),
                     "fx": [f.model_dump(mode="json") for f in clip_fxs],
@@ -1235,7 +1253,7 @@ def render_timeline(
 
             filter_parts: list[str] = []
             cur_v = "[0:v]"
-            ov_fmt = "yuv420p10" if hdr else "auto"
+            ov_fmt = "yuv444p10" if hdr else "yuv444"
 
             # Composite cross-segment Track V2 B-Roll Cutaways over Track V1
             for b_idx, b_item in enumerate(step4_broll):
@@ -1265,20 +1283,21 @@ def render_timeline(
                 if ent["glass_rect"] is not None and ent["mask_in_idx"] is not None:
                     gx, gy, gw, gh, _ = ent["glass_rect"]
                     mask_idx = int(ent["mask_in_idx"])
-                    sigma = max(2.0, float(getattr(t_item, "backdrop_blur_sigma", 18.0)))
+                    sigma = max(4.0, float(getattr(t_item, "backdrop_blur_sigma", 18.0)) * 0.65)
                     filter_parts.append(f"{cur_v}split=2[v_main{idx}][v_src{idx}]")
                     filter_parts.append(
-                        f"[v_src{idx}]crop={gw}:{gh}:{gx}:{gy},"
-                        f"gblur=sigma={sigma:.1f}:enable='between(t,{st:.3f},{end_t:.3f})',"
-                        f"format=rgba[v_blur{idx}]"
+                        f"[v_src{idx}]trim=start={st:.3f}:end={end_t:.3f},setpts=PTS-STARTPTS,"
+                        f"crop={gw}:{gh}:{gx}:{gy},"
+                        f"scale=w=max(16\\,trunc(iw/8)*2):h=max(16\\,trunc(ih/8)*2):flags=bilinear,"
+                        f"gblur=sigma={sigma:.1f},scale={gw}:{gh}:flags=bicubic,"
+                        f"lutyuv=y='max(16,(val-16)*0.74+16)',format=yuva444p[v_blur{idx}]"
                     )
                     filter_parts.append(
                         f"[{mask_idx}:v]format=gray,"
                         f"fade=t=in:st=0:d={fi:.3f},"
-                        f"fade=t=out:st={fo_st:.3f}:d={fo:.3f},"
-                        f"setpts=PTS+{st:.3f}/TB[v_gmask{idx}]"
+                        f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}[v_gmask{idx}]"
                     )
-                    filter_parts.append(f"[v_blur{idx}][v_gmask{idx}]alphamerge[v_glass{idx}]")
+                    filter_parts.append(f"[v_blur{idx}][v_gmask{idx}]alphamerge,setpts=PTS+{st:.3f}/TB[v_glass{idx}]")
                     filter_parts.append(
                         f"[v_main{idx}][v_glass{idx}]overlay=x={gx}:y={gy}:format={ov_fmt}:"
                         f"eof_action=pass:enable='between(t,{st:.3f},{end_t:.3f})'[v_pg{idx}]"
@@ -1308,11 +1327,16 @@ def render_timeline(
                 filter_parts.append(f"{cur_v}ass=filename='{esc_ass}'[vsub]")
                 cur_v = "[vsub]"
 
-            if hdr and has_step4_video_ops:
-                filter_parts.append(
-                    f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv[vhdr]"
-                )
-                cur_v = "[vhdr]"
+            if has_step4_video_ops:
+                if hdr:
+                    filter_parts.append(
+                        f"{cur_v}scale=flags=lanczos+accurate_rnd,format=p010le,"
+                        f"setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv[vhdr]"
+                    )
+                    cur_v = "[vhdr]"
+                else:
+                    filter_parts.append(f"{cur_v}scale=flags=lanczos+accurate_rnd,format=yuv420p[vsdr]")
+                    cur_v = "[vsdr]"
 
             # Audio mixing & smart auto-ducking
             if active_bgm:

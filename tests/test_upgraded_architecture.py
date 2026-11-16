@@ -1648,7 +1648,7 @@ def test_gate10_uniform_sei_stripping_segment_baking_and_stream_copy_mux(
     assert extra_in[:2] == ["-i", str(b_dummy)]
     assert "-loop" in extra_in and str(t_dummy) in extra_in
     joined_fc = ";".join(f_parts)
-    assert "overlay=0:0:format=yuv420p10" in joined_fc
+    assert "overlay=0:0:format=yuv444p10" in joined_fc
     assert "between(t,0.250,1.000)" in joined_fc
     assert "between(t,0.500,1.500)" in joined_fc
     assert out_lbl == "[svhdr]"

@@ -41,6 +41,7 @@ def find_decodable_audio_stream_pos(media_path: Path) -> Optional[int]:
 
 
 from ..hardware import get_hardware_profile, get_io_worker_count
+from .live_photo_filter import is_live_photo_video
 from ..models.schema import (
     AudioAsset,
     DITIngestEntry,
@@ -833,11 +834,16 @@ def build_initial_catalog(
                 pass
 
     files = iter_media_files_recursive(media_root)
+    folder_filenames: dict[Path, set[str]] = {}
+    for p in files:
+        folder_filenames.setdefault(p.parent, set()).add(p.name)
 
     def _build_one(item: tuple[int, Path]) -> Optional[tuple[int, str, object]]:
         idx, f = item
         ext = f.suffix.lower()
         if ext not in VIDEO_EXTENSIONS and ext not in PHOTO_EXTENSIONS and ext not in AUDIO_EXTENSIONS:
+            return None
+        if ext in VIDEO_EXTENSIONS and is_live_photo_video(f, sibling_filenames=folder_filenames.get(f.parent)):
             return None
 
         resolved_str = str(f.resolve())

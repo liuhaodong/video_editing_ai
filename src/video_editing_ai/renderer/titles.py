@@ -41,9 +41,9 @@ THEME_SPECS: dict[str, dict[str, Any]] = {
         "accent_hex": "#E8E4DC",
         "title_rgb": (250, 248, 244),
         "sub_rgb": (206, 210, 218),
-        "card_fill": (12, 13, 17, 148),
-        "glass_tint": (18, 20, 26, 62),
-        "border_rgba": (232, 228, 220, 56),
+        "card_fill": (12, 13, 17, 152),
+        "glass_tint": (12, 14, 18, 152),
+        "border_rgba": (232, 228, 220, 72),
         "stencil_matte": (46, 48, 54, 228),
         "glass_default": False,
         "fcpxml_font": "Georgia",
@@ -58,9 +58,9 @@ THEME_SPECS: dict[str, dict[str, Any]] = {
         "accent_hex": "#EFECE6",
         "title_rgb": (252, 250, 246),
         "sub_rgb": (196, 202, 210),
-        "card_fill": (10, 11, 14, 132),
-        "glass_tint": (16, 18, 22, 54),
-        "border_rgba": (245, 243, 238, 42),
+        "card_fill": (10, 11, 14, 150),
+        "glass_tint": (10, 12, 16, 148),
+        "border_rgba": (245, 243, 238, 60),
         "stencil_matte": (48, 49, 53, 232),
         "glass_default": False,
         "fcpxml_font": "Avenir Next",
@@ -75,9 +75,9 @@ THEME_SPECS: dict[str, dict[str, Any]] = {
         "accent_hex": "#DCE6F2",
         "title_rgb": (250, 250, 252),
         "sub_rgb": (212, 220, 230),
-        "card_fill": (14, 16, 22, 142),
-        "glass_tint": (22, 26, 36, 66),
-        "border_rgba": (255, 255, 255, 58),
+        "card_fill": (14, 16, 22, 152),
+        "glass_tint": (14, 16, 22, 152),
+        "border_rgba": (255, 255, 255, 72),
         "stencil_matte": (48, 52, 62, 224),
         "glass_default": True,
         "fcpxml_font": "PingFang SC",
@@ -92,9 +92,9 @@ THEME_SPECS: dict[str, dict[str, Any]] = {
         "accent_hex": "#E2D2BA",
         "title_rgb": (248, 242, 232),
         "sub_rgb": (214, 204, 188),
-        "card_fill": (20, 18, 15, 144),
-        "glass_tint": (28, 25, 21, 64),
-        "border_rgba": (226, 210, 186, 60),
+        "card_fill": (20, 18, 15, 152),
+        "glass_tint": (20, 18, 15, 150),
+        "border_rgba": (226, 210, 186, 74),
         "stencil_matte": (156, 148, 138, 226),
         "glass_default": False,
         "fcpxml_font": "Georgia",
@@ -109,9 +109,9 @@ THEME_SPECS: dict[str, dict[str, Any]] = {
         "accent_hex": "#DFB472",
         "title_rgb": (246, 238, 222),
         "sub_rgb": (208, 196, 172),
-        "card_fill": (16, 14, 12, 146),
-        "glass_tint": (24, 21, 18, 66),
-        "border_rgba": (223, 180, 114, 62),
+        "card_fill": (16, 14, 12, 152),
+        "glass_tint": (16, 14, 12, 152),
+        "border_rgba": (223, 180, 114, 76),
         "stencil_matte": (50, 46, 42, 228),
         "glass_default": False,
         "fcpxml_font": "Consolas",
@@ -126,9 +126,9 @@ THEME_SPECS: dict[str, dict[str, Any]] = {
         "accent_hex": "#BCE0D4",
         "title_rgb": (250, 250, 248),
         "sub_rgb": (206, 218, 214),
-        "card_fill": (12, 16, 20, 144),
-        "glass_tint": (18, 24, 30, 64),
-        "border_rgba": (188, 224, 212, 58),
+        "card_fill": (12, 16, 20, 152),
+        "glass_tint": (12, 16, 20, 152),
+        "border_rgba": (188, 224, 212, 74),
         "stencil_matte": (46, 54, 58, 226),
         "glass_default": True,
         "fcpxml_font": "Avenir Next",
@@ -530,17 +530,16 @@ def _draw_tracked_on_draw(
     fallback = cjk_font or _load_font_tier(_resolve_font_size(font), tier="cjk", bold=True)
     fg_fill = clamp_rgba_for_hdr(fill, hdr_safe=hdr_safe)
     alpha_ratio = float(fg_fill[3]) / 255.0
-    sh_outer = clamp_rgba_for_hdr((0, 0, 0, int(round(115 * alpha_ratio))), hdr_safe=hdr_safe)
-    sh_inner = clamp_rgba_for_hdr((0, 0, 0, int(round(185 * alpha_ratio))), hdr_safe=hdr_safe)
-    off1 = max(1, int(round(1.5 * scale)))
-    off2 = max(2, int(round(3.0 * scale)))
+    # Single tight cinema shadow (2px at 4K) avoids muddy double-shadow halos around serif strokes
+    sh_col = clamp_rgba_for_hdr((0, 0, 0, int(round(145 * alpha_ratio))), hdr_safe=hdr_safe)
+    sh_off = max(1, int(round(1.0 * scale)))
 
     has_cjk = any(_is_cjk_codepoint(ord(ch)) for ch in text)
     if abs(letter_spacing_px) < 0.05 and not has_cjk:
-        if shadow:
-            draw.text((int(round(x)) + off2, int(round(y)) + off2), text, font=font, fill=sh_outer)
-            draw.text((int(round(x)) + off1, int(round(y)) + off1), text, font=font, fill=sh_inner)
-        draw.text((int(round(x)), int(round(y))), text, font=font, fill=fg_fill)
+        ix, iy = int(round(x)), int(round(y))
+        if shadow and sh_col[3] > 2:
+            draw.text((ix + sh_off, iy + sh_off), text, font=font, fill=sh_col)
+        draw.text((ix, iy), text, font=font, fill=fg_fill)
         bb = draw.textbbox((0, 0), text, font=font)
         return max(0, int(bb[2] - bb[0]))
 
@@ -549,9 +548,8 @@ def _draw_tracked_on_draw(
         for run, is_cjk in _split_script_runs(text):
             f_use = fallback if is_cjk else font
             ix, iy = int(round(cursor)), int(round(y))
-            if shadow:
-                draw.text((ix + off2, iy + off2), run, font=f_use, fill=sh_outer)
-                draw.text((ix + off1, iy + off1), run, font=f_use, fill=sh_inner)
+            if shadow and sh_col[3] > 2:
+                draw.text((ix + sh_off, iy + sh_off), run, font=f_use, fill=sh_col)
             draw.text((ix, iy), run, font=f_use, fill=fg_fill)
             try:
                 cursor += float(draw.textlength(run, font=f_use))
@@ -563,9 +561,8 @@ def _draw_tracked_on_draw(
     for idx, ch in enumerate(text):
         f_use = fallback if _is_cjk_codepoint(ord(ch)) else font
         ix, iy = int(round(cursor)), int(round(y))
-        if shadow:
-            draw.text((ix + off2, iy + off2), ch, font=f_use, fill=sh_outer)
-            draw.text((ix + off1, iy + off1), ch, font=f_use, fill=sh_inner)
+        if shadow and sh_col[3] > 2:
+            draw.text((ix + sh_off, iy + sh_off), ch, font=f_use, fill=sh_col)
         draw.text((ix, iy), ch, font=f_use, fill=fg_fill)
         try:
             adv = float(draw.textlength(ch, font=f_use))
@@ -591,13 +588,21 @@ def draw_tracked_text(
     cjk_font: Optional[ImageFont.FreeTypeFont | ImageFont.ImageFont] = None,
     clip_box: Optional[tuple[int, int, int, int]] = None,
 ) -> int:
-    """Draw tracked mixed-script text with optional baseline clip masking."""
+    """Draw tracked mixed-script text cleanly via Porter-Duff alpha compositing so antialiased edges stay razor-sharp."""
     if not text:
         return 0
-    if clip_box is None:
-        return _draw_tracked_on_draw(
-            ImageDraw.Draw(img),
-            xy,
+    if clip_box is not None:
+        cx1, cy1, cx2, cy2 = clip_box
+        cx1 = max(0, min(img.width, int(cx1)))
+        cy1 = max(0, min(img.height, int(cy1)))
+        cx2 = max(cx1 + 1, min(img.width, int(cx2)))
+        cy2 = max(cy1 + 1, min(img.height, int(cy2)))
+        bw = cx2 - cx1
+        bh = cy2 - cy1
+        layer = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+        w_px = _draw_tracked_on_draw(
+            ImageDraw.Draw(layer),
+            (xy[0] - cx1, xy[1] - cy1),
             text,
             font=font,
             fill=fill,
@@ -607,17 +612,29 @@ def draw_tracked_text(
             hdr_safe=hdr_safe,
             cjk_font=cjk_font,
         )
-    cx1, cy1, cx2, cy2 = clip_box
-    cx1 = max(0, min(img.width, int(cx1)))
-    cy1 = max(0, min(img.height, int(cy1)))
-    cx2 = max(cx1 + 1, min(img.width, int(cx2)))
-    cy2 = max(cy1 + 1, min(img.height, int(cy2)))
-    bw = cx2 - cx1
-    bh = cy2 - cy1
-    layer = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+        region = img.crop((cx1, cy1, cx2, cy2))
+        region = Image.alpha_composite(region, layer)
+        img.paste(region, (cx1, cy1))
+        return w_px
+
+    # Render onto a tightly cropped transparent layer and alpha-composite rather than overwriting card alpha
+    dummy = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    tw, th = measure_tracked_text(
+        ImageDraw.Draw(dummy),
+        text,
+        font=font,
+        letter_spacing_px=letter_spacing_px,
+        cjk_font=cjk_font,
+    )
+    pad = max(8, int(round(10 * scale)))
+    bx1 = max(0, min(img.width - 1, int(xy[0]) - pad))
+    by1 = max(0, min(img.height - 1, int(xy[1]) - pad))
+    bx2 = max(bx1 + 1, min(img.width, int(xy[0]) + tw + pad * 2))
+    by2 = max(by1 + 1, min(img.height, int(xy[1]) + th + pad * 3))
+    layer = Image.new("RGBA", (bx2 - bx1, by2 - by1), (0, 0, 0, 0))
     w_px = _draw_tracked_on_draw(
         ImageDraw.Draw(layer),
-        (xy[0] - cx1, xy[1] - cy1),
+        (int(xy[0]) - bx1, int(xy[1]) - by1),
         text,
         font=font,
         fill=fill,
@@ -627,9 +644,9 @@ def draw_tracked_text(
         hdr_safe=hdr_safe,
         cjk_font=cjk_font,
     )
-    region = img.crop((cx1, cy1, cx2, cy2))
+    region = img.crop((bx1, by1, bx2, by2))
     region = Image.alpha_composite(region, layer)
-    img.paste(region, (cx1, cy1))
+    img.paste(region, (bx1, by1))
     return w_px
 
 
@@ -885,11 +902,13 @@ def _compute_kinetic_envelope(item: TitleOverlayItem, t_norm: float) -> tuple[fl
     fi = min(dur * 0.42, max(0.04, float(item.fade_in)))
     fo = min(dur * 0.42, max(0.04, float(item.fade_out)))
 
-    e_raw = min(1.0, t_sec / max(0.04, fi))
+    # Smooth entrance completes by entry_span so held frames remain 100% static without pixel jitter
+    entry_span = min(dur * 0.44, max(0.72, fi * 1.8))
+    e_raw = min(1.0, t_sec / max(0.04, entry_span))
     enter_p = _ease_out_cubic(e_raw)
     exit_alpha = _smoothstep(min(1.0, max(0.0, (dur - t_sec) / max(0.04, fo))))
-    hold_p = max(0.0, min(1.0, (t_sec - fi * 0.25) / max(0.2, dur - fi * 0.25)))
-    master_alpha = min(1.0, e_raw * 1.35) * exit_alpha
+    hold_p = max(0.0, min(1.0, (t_sec - entry_span * 0.25) / max(0.2, dur - entry_span * 0.25)))
+    master_alpha = _smoothstep(min(1.0, t_sec / max(0.04, fi))) * exit_alpha
     return (enter_p, exit_alpha, hold_p, master_alpha)
 
 
@@ -952,19 +971,27 @@ def _draw_card_container(
     transparent_glass_body: bool,
     backdrop_blur: bool,
 ) -> None:
-    """Draw either a smoked glass fill or a subtle specular rim over live FFmpeg blurred backdrop."""
+    """Alpha-composite an anti-aliased smoked-glass pill container onto `img` without erasing underlying scrims."""
     rx, ry, rw, rh, rad = rect
-    draw = ImageDraw.Draw(img)
     if transparent_glass_body or backdrop_blur:
         fill_raw = spec["glass_tint"] if transparent_glass_body else spec["card_fill"]
     else:
         fill_raw = spec["card_fill"]
     fill_col = clamp_rgba_for_hdr(_scale_rgba_alpha(fill_raw, master_alpha), hdr_safe=hdr_safe)
     border_col = clamp_rgba_for_hdr(_scale_rgba_alpha(spec["border_rgba"], master_alpha), hdr_safe=hdr_safe)
-    draw.rounded_rectangle([rx, ry, rx + rw, ry + rh], radius=rad, fill=fill_col, outline=border_col, width=max(1, rw // 420))
-    # Subtle inner specular top highlight rim for tactile acrylic depth
-    inner_rim = clamp_rgba_for_hdr(_scale_rgba_alpha((255, 255, 255, 48), master_alpha), hdr_safe=hdr_safe)
-    draw.line([(rx + rad, ry + 1), (rx + rw - rad, ry + 1)], fill=inner_rim, width=1)
+    inner_rim = clamp_rgba_for_hdr(_scale_rgba_alpha((255, 255, 255, 52), master_alpha), hdr_safe=hdr_safe)
+
+    # 2x supersample pill shape so rounded corners stay crisp at 4K
+    cw, ch = rw + 1, rh + 1
+    ss_w, ss_h = cw * 2, ch * 2
+    card_ss = Image.new("RGBA", (ss_w, ss_h), (0, 0, 0, 0))
+    ss_draw = ImageDraw.Draw(card_ss)
+    b_w = max(2, (rw // 420) * 2)
+    ss_draw.rounded_rectangle([0, 0, ss_w - 1, ss_h - 1], radius=rad * 2, fill=fill_col, outline=border_col, width=b_w)
+    card = card_ss.resize((cw, ch), Image.Resampling.LANCZOS)
+    c_draw = ImageDraw.Draw(card)
+    c_draw.line([(rad, 1), (rw - rad, 1)], fill=inner_rim, width=1)
+    img.alpha_composite(card, dest=(rx, ry))
 
 
 def render_title_frame(
@@ -985,25 +1012,30 @@ def render_title_frame(
     spec = get_theme_spec(theme_name)
     s = width / 1920.0
 
+    dur = max(0.25, float(item.duration))
+    fi = min(dur * 0.42, max(0.04, float(item.fade_in)))
+    entry_span = min(dur * 0.44, max(0.72, fi * 1.8))
+    t_sec = max(0.0, min(dur, float(t_norm) * dur))
+    e_span = min(1.0, t_sec / max(0.04, entry_span)) if getattr(item, "motion_preset", "masked_rise") != "static" else 1.0
+
     enter_p, exit_alpha, hold_p, master_alpha = _compute_kinetic_envelope(item, t_norm)
-    sub_e = _ease_out_cubic(max(0.0, min(1.0, (enter_p - 0.15) / 0.85)))
-    rule_e = _smoothstep(min(1.0, enter_p * 1.15))
+    # Smooth staggered opacity curve (finishes at entry_span) without integer y/tracking jitter
+    sub_e = _smoothstep(max(0.0, min(1.0, (e_span - 0.14) / 0.86)))
+    rule_e = _smoothstep(min(1.0, e_span * 1.05))
 
     accent_hex = item.accent_color if item.accent_color and item.accent_color != "#E8E4DC" else spec["accent_hex"]
-    accent_rgba = _scale_rgba_alpha(_parse_rgba(accent_hex, 215, hdr_safe=use_hdr_safe), master_alpha)
+    accent_rgba = _scale_rgba_alpha(_parse_rgba(accent_hex, 220, hdr_safe=use_hdr_safe), master_alpha)
     title_rgb = spec["title_rgb"]
     sub_rgb = spec["sub_rgb"]
-    title_fill = (*title_rgb, int(round(255 * master_alpha)))
-    sub_fill = (*sub_rgb, int(round(234 * sub_e * exit_alpha)))
+    title_alpha_e = _smoothstep(min(1.0, e_span * 1.15)) if getattr(item, "motion_preset", "masked_rise") != "static" else 1.0
+    title_fill = (*title_rgb, int(round(255 * master_alpha * title_alpha_e)))
+    sub_fill = (*sub_rgb, int(round(238 * sub_e * exit_alpha)))
 
     sub_text = (item.subtitle or "").strip()
     overline_text = (getattr(item, "overline", "") or getattr(item, "eyebrow", None) or "").strip()
     track_override = float(getattr(item, "letter_spacing_px", 0.0) or 0.0)
-    base_track = track_override if track_override != 0.0 else float(spec["default_tracking_px"])
-    if getattr(item, "motion_preset", "masked_rise") == "tracking_expand":
-        dyn_track = (base_track * (0.4 + 0.85 * enter_p) + 2.8 * hold_p) * s
-    else:
-        dyn_track = (base_track * 0.55 + 1.2 * hold_p) * s
+    # Keep headline & subtitle kerning constant on every frame so glyphs never twitch horizontally
+    dyn_track = (track_override * s) if track_override != 0.0 else 0.0
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
@@ -1027,9 +1059,9 @@ def render_title_frame(
         # Clean editorial inner frame outline inside the matte
         pad_x = int(round(width * 0.07))
         pad_y = int(round(height * 0.14))
-        stencil_size = int(round((84 if len(item.text) <= 22 else 66) * s * (1.0 + 0.04 * hold_p)))
+        stencil_size = int(round((84 if len(item.text) <= 22 else 66) * s))
         f_stencil = _load_font_tier(stencil_size, tier="sans" if theme_name != "criterion_atelier" else "serif", bold=True)
-        stencil_track = max(5.0, base_track) * s * (0.9 + 0.25 * hold_p)
+        stencil_track = max(5.0, float(spec["default_tracking_px"])) * s
         tw, th = measure_tracked_text(s_draw, item.text.upper(), f_stencil, letter_spacing_px=stencil_track)
 
         # If long title, wrap neatly into 2 lines so every glyph sits inside [0.08..0.92, 0.22..0.78]
@@ -1061,7 +1093,7 @@ def render_title_frame(
         draw = ImageDraw.Draw(img)
         draw.rectangle(
             [pad_x, pad_y, width - pad_x, height - pad_y],
-            outline=clamp_rgba_for_hdr(_scale_rgba_alpha((*title_rgb, 68), master_alpha), hdr_safe=use_hdr_safe),
+            outline=clamp_rgba_for_hdr(_scale_rgba_alpha((*title_rgb, 68), sub_e * exit_alpha), hdr_safe=use_hdr_safe),
             width=max(1, int(round(1.5 * s))),
         )
         over_txt = overline_text or "A CURATED DOCUMENTARY FILM"
@@ -1072,7 +1104,7 @@ def render_title_frame(
             ((width - otw) // 2, (height - total_h) // 2 - int(round(56 * s))),
             over_txt.upper(),
             font=f_over,
-            fill=_scale_rgba_alpha((*title_rgb, 215), master_alpha),
+            fill=_scale_rgba_alpha((*title_rgb, 215), title_alpha_e * exit_alpha),
             letter_spacing_px=spec["overline_tracking_px"] * s,
             shadow=False,
             hdr_safe=use_hdr_safe,
@@ -1132,11 +1164,10 @@ def render_title_frame(
 
         tw, th = measure_tracked_text(draw, item.text, f_title, letter_spacing_px=dyn_track)
         base_ty = cy - int(round((24 if sub_text else 10) * s))
-        rise_off = int(round(24.0 * s * (1.0 - enter_p)))
-        clip_h = max(th + int(round(18 * s)), int(round(title_pt * 1.45 * s)))
+        clip_h = max(th + int(round(28 * s)), int(round(title_pt * 1.60 * s)))
         draw_tracked_text(
             img,
-            (cx - tw // 2, base_ty + rise_off),
+            (cx - tw // 2, base_ty),
             item.text,
             font=f_title,
             fill=title_fill,
@@ -1148,15 +1179,14 @@ def render_title_frame(
 
         cur_y = base_ty + int(round((title_pt + 14) * s))
         if sub_text:
-            sw, _ = measure_tracked_text(draw, sub_text, f_sub, letter_spacing_px=2.0 * s)
-            sub_rise = int(round(12.0 * s * (1.0 - sub_e)))
+            sw, _ = measure_tracked_text(draw, sub_text, f_sub, letter_spacing_px=1.0 * s)
             draw_tracked_text(
                 img,
-                (cx - sw // 2, cur_y + sub_rise),
+                (cx - sw // 2, cur_y),
                 sub_text,
                 font=f_sub,
                 fill=sub_fill,
-                letter_spacing_px=2.0 * s,
+                letter_spacing_px=1.0 * s,
                 scale=s,
                 hdr_safe=use_hdr_safe,
             )
@@ -1176,15 +1206,15 @@ def render_title_frame(
             )
             cur_y += int(round(18 * s))
             for idx_c, c_ln in enumerate(lines_c[:5]):
-                line_e = _ease_out_cubic(max(0.0, min(1.0, (enter_p - 0.12 * idx_c) / 0.75)))
-                cw_ln, _ = measure_tracked_text(draw, c_ln, f_col, letter_spacing_px=1.6 * s)
+                line_e = _smoothstep(max(0.0, min(1.0, (e_span - 0.10 * idx_c) / 0.65)))
+                cw_ln, _ = measure_tracked_text(draw, c_ln, f_col, letter_spacing_px=1.2 * s)
                 draw_tracked_text(
                     img,
-                    (cx - cw_ln // 2, cur_y + int(round(8 * s * (1.0 - line_e)))),
+                    (cx - cw_ln // 2, cur_y),
                     c_ln,
                     font=f_col,
-                    fill=_scale_rgba_alpha((*sub_rgb, 215), line_e * exit_alpha),
-                    letter_spacing_px=1.6 * s,
+                    fill=_scale_rgba_alpha((*sub_rgb, 220), line_e * exit_alpha),
+                    letter_spacing_px=1.2 * s,
                     scale=s,
                     hdr_safe=use_hdr_safe,
                 )
@@ -1204,7 +1234,7 @@ def render_title_frame(
             num_str = (getattr(item, "chapter_numeral", "") or "I").strip()
             f_num = _load_font_tier(int(round(90 * s)), tier="serif", bold=False, italic=True)
             num_w, _ = measure_tracked_text(draw, num_str, f_num)
-            num_fill = clamp_rgba_for_hdr(_scale_rgba_alpha((*accent_rgba[:3], 58), master_alpha), hdr_safe=use_hdr_safe)
+            num_fill = clamp_rgba_for_hdr(_scale_rgba_alpha((*accent_rgba[:3], 64), master_alpha), hdr_safe=use_hdr_safe)
             draw.text((rx + int(round(22 * s)), ry + int(round(10 * s))), num_str, font=f_num, fill=num_fill)
 
             tx = rx + max(int(round(116 * s)), int(round(48 * s)) + num_w)
@@ -1228,26 +1258,25 @@ def render_title_frame(
             draw.line([(tx, rule_y), (tx + rule_len, rule_y)], fill=accent_rgba, width=max(1, int(round(1.5 * s))))
 
             ty = ry + int(round(48 * s))
-            rise_off = int(round(20 * s * (1.0 - enter_p)))
             draw_tracked_text(
                 img,
-                (tx, ty + rise_off),
+                (tx, ty),
                 item.text,
                 font=f_title,
                 fill=title_fill,
                 letter_spacing_px=dyn_track * 0.65,
                 scale=s,
                 hdr_safe=use_hdr_safe,
-                clip_box=(tx - 4, ty - 4, rx + rw - 16, ty + int(round(46 * s))),
+                clip_box=(tx - 4, ty - 4, rx + rw - 16, ty + int(round(58 * s))),
             )
             if sub_text:
                 draw_tracked_text(
                     img,
-                    (tx, ty + int(round(42 * s + 10 * s * (1.0 - sub_e)))),
+                    (tx, ty + int(round(42 * s))),
                     sub_text[:72],
                     font=f_sub,
                     fill=sub_fill,
-                    letter_spacing_px=1.0 * s,
+                    letter_spacing_px=0.5 * s,
                     scale=s,
                     hdr_safe=use_hdr_safe,
                 )
@@ -1401,8 +1430,7 @@ def render_title_frame(
                     is_comp = bool(wp.get("completed")) or is_act
                     rad_o = int(round((8 if is_act else 5) * s))
                     if is_act:
-                        pulse = 1.0 + 0.35 * abs(math.sin(hold_p * math.pi * 2.0))
-                        hr = int(round((rad_o + 5 * s) * pulse))
+                        hr = int(round(rad_o + 5 * s))
                         draw.ellipse(
                             [wx - hr, wy - hr, wx + hr, wy + hr],
                             fill=clamp_rgba_for_hdr(_scale_rgba_alpha((*accent_rgba[:3], 76), master_alpha), hdr_safe=use_hdr_safe),
@@ -1466,7 +1494,7 @@ def render_title_frame(
             tw, _ = measure_tracked_text(draw, item.text, f_title, letter_spacing_px=dyn_track * 0.4)
             draw_tracked_text(
                 img,
-                (pl + (pw - tw) // 2, ty + int(round(12 * s * (1.0 - enter_p)))),
+                (pl + (pw - tw) // 2, ty),
                 item.text,
                 font=f_title,
                 fill=title_fill,
@@ -1475,14 +1503,14 @@ def render_title_frame(
                 hdr_safe=use_hdr_safe,
             )
             if sub_text:
-                sw, _ = measure_tracked_text(draw, sub_text, f_sub, letter_spacing_px=1.2 * s)
+                sw, _ = measure_tracked_text(draw, sub_text, f_sub, letter_spacing_px=1.0 * s)
                 draw_tracked_text(
                     img,
                     (pl + (pw - sw) // 2, ty + int(round(30 * s))),
                     sub_text,
                     font=f_sub,
                     fill=sub_fill,
-                    letter_spacing_px=1.2 * s,
+                    letter_spacing_px=1.0 * s,
                     scale=s,
                     hdr_safe=use_hdr_safe,
                 )
@@ -1530,11 +1558,10 @@ def render_title_frame(
                     hdr_safe=use_hdr_safe,
                 )
                 ty += eye_h + int(round(5 * s))
-            rise_off = int(round(12 * s * (1.0 - enter_p)))
             for ln in title_lines:
                 draw_tracked_text(
                     img,
-                    (tx, ty + rise_off),
+                    (tx, ty),
                     ln,
                     font=f_title,
                     fill=title_fill,
@@ -1548,7 +1575,7 @@ def render_title_frame(
                 for ln in sub_lines:
                     draw_tracked_text(
                         img,
-                        (tx, ty + int(round(6 * s * (1.0 - sub_e)))),
+                        (tx, ty),
                         ln,
                         font=f_sub,
                         fill=sub_fill,
@@ -1578,14 +1605,14 @@ def render_title_frame(
             ty = pt + int(round(14 * s))
             draw_tracked_text(
                 img,
-                (tx, ty + int(round(14 * s * (1.0 - enter_p)))),
+                (tx, ty),
                 item.text,
                 font=f_title,
                 fill=title_fill,
                 letter_spacing_px=dyn_track * 0.3,
                 scale=s,
                 hdr_safe=use_hdr_safe,
-                clip_box=(tx - 2, ty - 2, pl + pw - 10, ty + int(round(34 * s))),
+                clip_box=(tx - 2, ty - 2, pl + pw - 10, ty + int(round(40 * s))),
             )
             if sub_text:
                 draw_tracked_text(
@@ -1681,17 +1708,16 @@ def render_title_frame(
                 )
                 ty += int(round(18 * s))
 
-            rise_off = int(round(18 * s * (1.0 - enter_p)))
             draw_tracked_text(
                 img,
-                (tx, ty + rise_off),
+                (tx, ty),
                 item.text,
                 font=f_title,
                 fill=title_fill,
                 letter_spacing_px=dyn_track * 0.45,
                 scale=s,
                 hdr_safe=use_hdr_safe,
-                clip_box=(tx - 4, ty - 4, pl + pw - 14, ty + int(round(38 * s))),
+                clip_box=(tx - 4, ty - 4, pl + pw - 14, ty + int(round(52 * s))),
             )
             ty += max(14, int(round(35 * s)))
             if sub_lines:
@@ -1699,7 +1725,7 @@ def render_title_frame(
                 for ln in sub_lines:
                     draw_tracked_text(
                         img,
-                        (tx, ty + int(round(8 * s * (1.0 - sub_e)))),
+                        (tx, ty),
                         ln,
                         font=f_sub,
                         fill=sub_fill,

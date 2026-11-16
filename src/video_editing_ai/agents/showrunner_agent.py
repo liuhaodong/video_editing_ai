@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..analyzer.live_photo_filter import is_live_photo_video
 from ..models.schema import PacingAuditEntry, PacingAuditReport
 from ..planner.story_director import generate_storyboard_markdown
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
@@ -55,8 +56,30 @@ class ShowrunnerAgent(BaseEditingAgent):
         long_broll_violations = 0
         consec_stills_violations = 0
         gap_overlap_violations = 0
+        live_photo_violations = 0
         directives_emitted_before = len(blackboard.revision_directives)
         flagged_chapters: dict[str, dict[str, Any]] = {}
+
+        # Rule 0: Prohibit Live Photo / Motion Photo video clips on V1/V2 due to low resolution & blur
+        for item in (*timeline.visual_track, *timeline.broll_track):
+            if item.type == "video" and is_live_photo_video(item.source):
+                live_photo_violations += 1
+                ch_id = chap_id_by_title.get(item.act or "")
+                entries.append(
+                    PacingAuditEntry(
+                        rule_name="prohibit_live_photo_video",
+                        action_taken="requested_revision",
+                        target_clip_id=item.id,
+                        chapter_id=ch_id,
+                        details=(
+                            f"Live Photo / Motion Photo video '{Path(item.source).name}' on clip {item.id} "
+                            "is prohibited; replace with the full-resolution still photo or standalone camera video."
+                        ),
+                    )
+                )
+                if ch_id:
+                    c_map = flagged_chapters.setdefault(ch_id, {})
+                    c_map["prohibit_live_photo_video"] = True
 
         # Rule 1: Flag pure B-roll video clips exceeding max_broll_duration_sec (unless covered by V2 cutaway)
         for item in timeline.visual_track:
@@ -213,7 +236,8 @@ class ShowrunnerAgent(BaseEditingAgent):
         new_directives = list(blackboard.revision_directives[directives_emitted_before:])
         directives_emitted_now = len(new_directives)
         passed_compliance = (
-            long_broll_violations == 0
+            live_photo_violations == 0
+            and long_broll_violations == 0
             and consec_stills_violations == 0
             and gap_overlap_violations == 0
             and not (missing_aroll_ids and blackboard.revision_round == 0)

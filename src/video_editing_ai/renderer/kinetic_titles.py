@@ -174,9 +174,28 @@ def render_kinetic_title_mov(
     assert proc.stdin is not None and proc.stderr is not None
 
     crop_arg = (rx, ry, rw, rh) if crop_needed else None
+    dur = max(0.25, float(item.duration))
+    fi = min(dur * 0.42, max(0.04, float(item.fade_in)))
+    fo = min(dur * 0.42, max(0.04, float(item.fade_out)))
+    entry_span = min(dur * 0.44, max(0.72, fi * 1.8))
+    is_static_hold_style = (
+        getattr(item, "style", "") != "travel_map_pip_card"
+        and getattr(item, "motion_preset", "masked_rise") != "static"
+    )
+    settled_bytes: Optional[bytes] = None
     try:
         for f_idx in range(n_frames):
             t_norm = float(f_idx) / float(max(1, n_frames - 1))
+            t_sec = t_norm * dur
+            is_settled = (
+                is_static_hold_style
+                and (t_sec >= entry_span + 0.02)
+                and (t_sec <= dur - fo - 0.02)
+                and not (getattr(item, "motion_preset", "") == "typewriter_telemetry" and t_norm < 0.45)
+            )
+            if is_settled and settled_bytes is not None:
+                proc.stdin.write(settled_bytes)
+                continue
             frame = render_title_frame(
                 item=item,
                 width=width,
@@ -188,7 +207,10 @@ def render_kinetic_title_mov(
             )
             if frame.size != (rw, rh):
                 frame = frame.resize((rw, rh), Image.Resampling.BILINEAR)
-            proc.stdin.write(frame.tobytes())
+            raw_bytes = frame.tobytes()
+            if is_settled:
+                settled_bytes = raw_bytes
+            proc.stdin.write(raw_bytes)
         proc.stdin.close()
     except Exception:
         try:

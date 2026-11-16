@@ -645,7 +645,11 @@ def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> li
                 "-rc",
                 "vbr",
                 "-cq",
-                "19",
+                "18",
+                "-spatial_aq",
+                "1",
+                "-aq-strength",
+                "12",
                 "-b:v",
                 "28M",
                 *hdr_tags,
@@ -714,7 +718,11 @@ def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> li
             "-preset",
             "p4",
             "-cq",
-            "19",
+            "18",
+            "-spatial_aq",
+            "1",
+            "-aq-strength",
+            "12",
             "-pix_fmt",
             "yuv420p",
         ]
@@ -2522,7 +2530,8 @@ def build_segment_overlay_filtergraph(
     filter_parts: list[str] = []
     cur_v = base_label
     in_idx = next_input_idx
-    ov_fmt = "yuv420p10" if hdr else "auto"
+    # Blend overlays in full 4:4:4 chroma before final Lanczos 4:2:0 conversion so text edges stay razor-sharp
+    ov_fmt = "yuv444p10" if hdr else "yuv444"
 
     for b_idx, (b_mp4, local_st, b_dur) in enumerate(segment_broll or []):
         extra_inputs.extend(["-i", str(b_mp4)])
@@ -2549,21 +2558,25 @@ def build_segment_overlay_filtergraph(
             glass_mask_path = t_ent.get("glass_mask_path")
             if glass_rect is not None and glass_mask_path is not None:
                 gx, gy, gw, gh, _ = glass_rect
-                sigma = max(2.0, float(t_ent.get("blur_sigma", 18.0)))
+                sigma = max(4.0, float(t_ent.get("blur_sigma", 18.0)) * 0.65)
                 extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(glass_mask_path)])
                 filter_parts.append(f"{cur_v}split=2[v_smain{t_idx}][v_ssrc{t_idx}]")
+                # Trim & align timestamps BEFORE alphamerge, blur at 1/4 scale in YUV (no bt601 RGB drop), and dim highlights cleanly
                 filter_parts.append(
-                    f"[v_ssrc{t_idx}]crop={gw}:{gh}:{gx}:{gy},"
-                    f"gblur=sigma={sigma:.1f}:enable='between(t,{local_st:.3f},{end_t:.3f})',"
-                    f"format=rgba[v_sblur{t_idx}]"
+                    f"[v_ssrc{t_idx}]trim=start={local_st:.3f}:end={end_t:.3f},setpts=PTS-STARTPTS,"
+                    f"crop={gw}:{gh}:{gx}:{gy},"
+                    f"scale=w=max(16\\,trunc(iw/8)*2):h=max(16\\,trunc(ih/8)*2):flags=bilinear,"
+                    f"gblur=sigma={sigma:.1f},scale={gw}:{gh}:flags=bicubic,"
+                    f"lutyuv=y='max(16,(val-16)*0.74+16)',format=yuva444p[v_sblur{t_idx}]"
                 )
                 filter_parts.append(
                     f"[{in_idx}:v]format=gray,"
                     f"fade=t=in:st=0:d={fi:.3f},"
-                    f"fade=t=out:st={fo_st:.3f}:d={fo:.3f},"
-                    f"setpts=PTS+{local_st:.3f}/TB[v_sgmask{t_idx}]"
+                    f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}[v_sgmask{t_idx}]"
                 )
-                filter_parts.append(f"[v_sblur{t_idx}][v_sgmask{t_idx}]alphamerge[v_sglass{t_idx}]")
+                filter_parts.append(
+                    f"[v_sblur{t_idx}][v_sgmask{t_idx}]alphamerge,setpts=PTS+{local_st:.3f}/TB[v_sglass{t_idx}]"
+                )
                 filter_parts.append(
                     f"[v_smain{t_idx}][v_sglass{t_idx}]overlay=x={gx}:y={gy}:format={ov_fmt}:"
                     f"eof_action=pass:enable='between(t,{local_st:.3f},{end_t:.3f})'[v_spg{t_idx}]"
@@ -2614,11 +2627,16 @@ def build_segment_overlay_filtergraph(
             cur_v = next_v
             in_idx += 1
 
-    if hdr and (segment_broll or segment_titles):
-        filter_parts.append(
-            f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv[svhdr]"
-        )
-        cur_v = "[svhdr]"
+    if segment_broll or segment_titles:
+        if hdr:
+            filter_parts.append(
+                f"{cur_v}scale=flags=lanczos+accurate_rnd,format=p010le,"
+                f"setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv[svhdr]"
+            )
+            cur_v = "[svhdr]"
+        else:
+            filter_parts.append(f"{cur_v}scale=flags=lanczos+accurate_rnd,format=yuv420p[svsdr]")
+            cur_v = "[svsdr]"
 
     return extra_inputs, filter_parts, cur_v
 
