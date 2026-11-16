@@ -135,7 +135,7 @@ class DITIngestAgent(BaseEditingAgent):
             ext = f.suffix.lower()
             resolved_str = str(f.resolve())
             size_b, mtime_ns, f_hash = compute_file_fingerprint(f)
-            cache_key = f"v2|{resolved_str}|{size_b}|{mtime_ns}|{f_hash}"
+            cache_key = f"v3|{resolved_str}|{size_b}|{mtime_ns}|{f_hash}"
 
             cached_payload = disk_cache.get(cache_key)
             if isinstance(cached_payload, dict):
@@ -193,6 +193,7 @@ class DITIngestAgent(BaseEditingAgent):
                     has_diegetic_music=bool(aud_sig["has_diegetic_music"]),
                     gps_lat=v_info.get("gps_lat"),
                     gps_lon=v_info.get("gps_lon"),
+                    gps_alt=v_info.get("gps_alt"),
                     camera_make_model=v_info.get("camera_make_model"),
                 )
             elif ext in PHOTO_EXTENSIONS:
@@ -227,6 +228,7 @@ class DITIngestAgent(BaseEditingAgent):
                     has_diegetic_music=False,
                     gps_lat=ph.gps_lat,
                     gps_lon=ph.gps_lon,
+                    gps_alt=ph.gps_alt,
                     camera_make_model=ph.camera_make_model,
                     exif_summary=ph.exif_summary,
                     preview_path=ph.preview_path,

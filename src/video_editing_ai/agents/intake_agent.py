@@ -700,6 +700,43 @@ def _resolve_title_typography_answers(
     return title_theme, burn_in, subtitle_style, rec_theme, rec_rationale, notes
 
 
+def _resolve_travel_map_answers(raw_msg: str, answers: dict[str, Any]) -> tuple[str, str]:
+    """Resolve CreativeBrief.travel_map_mode and travel_map_style from client prompt & intake answers."""
+    from ..models.schema import VALID_TRAVEL_MAP_MODES, VALID_TRAVEL_MAP_STYLES
+
+    raw_mode = str(answers.get("travel_map_mode") or "").strip().lower()
+    raw_style = str(answers.get("travel_map_style") or "").strip().lower()
+    msg_low = (raw_msg or "").lower()
+
+    if raw_mode in VALID_TRAVEL_MAP_MODES:
+        tm_mode = raw_mode
+    elif any(k in msg_low for k in ("no travel map", "no map", "disable map", "skip map", "without travel map")):
+        tm_mode = "off"
+    elif any(k in msg_low for k in ("hybrid map", "flyover and pip", "flyover + pip")):
+        tm_mode = "hybrid"
+    elif any(k in msg_low for k in ("pip map", "picture-in-picture map", "picture in picture map", "corner map")):
+        tm_mode = "picture_in_picture"
+    elif any(k in msg_low for k in ("flyover", "route map", "travel map", "expedition map", "journey map", "animated map")):
+        tm_mode = "flyover_interlude"
+    else:
+        tm_mode = "auto"
+
+    if raw_style in VALID_TRAVEL_MAP_STYLES:
+        tm_style = raw_style
+    elif any(k in msg_low for k in ("parchment", "archival map", "vintage map", "expedition atlas")):
+        tm_style = "archival_expedition_parchment"
+    elif any(k in msg_low for k in ("aerial relief", "topographic relief", "relief map", "terrain map")):
+        tm_style = "aerial_relief_hybrid"
+    elif any(k in msg_low for k in ("kinfolk map", "minimal monograph map", "minimalist map")):
+        tm_style = "kinfolk_minimal_monograph"
+    elif any(k in msg_low for k in ("vox", "midnight atlas", "midnight map")):
+        tm_style = "midnight_vox_atlas"
+    else:
+        tm_style = "auto"
+
+    return tm_mode, tm_style
+
+
 def refine_intake_interactively(
     media_dir: str | Path,
     user_message: str = "",
@@ -916,6 +953,7 @@ def refine_intake_interactively(
         },
     }
 
+    tm_mode, tm_style = _resolve_travel_map_answers(raw_msg, answers)
     project_title = info["display_title"].replace(" ", "_")
     draft_brief = CreativeBrief(
         project_title=project_title,
@@ -932,6 +970,8 @@ def refine_intake_interactively(
         enabled_photo_modes=enabled_modes,  # type: ignore[arg-type]
         enabled_overlay_fx=enabled_overlays,  # type: ignore[arg-type]
         title_theme=title_theme,  # type: ignore[arg-type]
+        travel_map_mode=tm_mode,  # type: ignore[arg-type]
+        travel_map_style=tm_style,  # type: ignore[arg-type]
         burn_in_subtitles=burn_in_subtitles,
         subtitle_style=subtitle_style,  # type: ignore[arg-type]
         max_broll_duration_sec=3.5 if chosen_dur <= 75 else 4.5,
@@ -1128,6 +1168,7 @@ class ClientIntakeAgent(BaseEditingAgent):
             },
         }
 
+        tm_mode, tm_style = _resolve_travel_map_answers(blackboard.user_prompt, answers)
         brief = CreativeBrief(
             project_title=project_title,
             raw_user_prompt=blackboard.user_prompt,
@@ -1143,6 +1184,8 @@ class ClientIntakeAgent(BaseEditingAgent):
             enabled_photo_modes=enabled_modes,  # type: ignore[arg-type]
             enabled_overlay_fx=enabled_overlays,  # type: ignore[arg-type]
             title_theme=title_theme,  # type: ignore[arg-type]
+            travel_map_mode=tm_mode,  # type: ignore[arg-type]
+            travel_map_style=tm_style,  # type: ignore[arg-type]
             burn_in_subtitles=burn_in_subtitles,
             subtitle_style=subtitle_style,  # type: ignore[arg-type]
             max_broll_duration_sec=3.5 if target_dur <= 65 else 4.5,

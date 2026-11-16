@@ -591,6 +591,7 @@ class CullerAgent(BaseEditingAgent):
             v_diegetic = bool(dit_ent.has_diegetic_music if dit_ent else vid.has_diegetic_music)
             v_lat = dit_ent.gps_lat if dit_ent and dit_ent.gps_lat is not None else vid.gps_lat
             v_lon = dit_ent.gps_lon if dit_ent and dit_ent.gps_lon is not None else vid.gps_lon
+            v_alt = dit_ent.gps_alt if dit_ent and dit_ent.gps_alt is not None else vid.gps_alt
 
             aroll_seq = 0
             broll_seq = 0
@@ -685,6 +686,7 @@ class CullerAgent(BaseEditingAgent):
                             is_filler_utterance=False,
                             gps_lat=v_lat,
                             gps_lon=v_lon,
+                            gps_alt=v_alt,
                             words=m_words,
                         )
                     )
@@ -762,6 +764,7 @@ class CullerAgent(BaseEditingAgent):
                             is_filler_utterance=False,
                             gps_lat=v_lat,
                             gps_lon=v_lon,
+                            gps_alt=v_alt,
                             words=[],
                         )
                     )
@@ -794,6 +797,7 @@ class CullerAgent(BaseEditingAgent):
             )
             ph_lat = dit_ph.gps_lat if dit_ph and dit_ph.gps_lat is not None else ph.gps_lat
             ph_lon = dit_ph.gps_lon if dit_ph and dit_ph.gps_lon is not None else ph.gps_lon
+            ph_alt = dit_ph.gps_alt if dit_ph and dit_ph.gps_alt is not None else ph.gps_alt
             ph_focal = perc["focal_point"] if ph.focal_point == (0.5, 0.5) else ph.focal_point
             photo_candidates.append(
                 CulledSubClip(
@@ -837,6 +841,7 @@ class CullerAgent(BaseEditingAgent):
                     prosody_excitement_score=0.0,
                     gps_lat=ph_lat,
                     gps_lon=ph_lon,
+                    gps_alt=ph_alt,
                     words=[],
                 )
             )

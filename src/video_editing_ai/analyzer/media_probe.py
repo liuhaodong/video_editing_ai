@@ -127,6 +127,7 @@ def probe_video_file(video_path: Path) -> dict:
             "camera_make_model": None,
             "gps_lat": None,
             "gps_lon": None,
+            "gps_alt": None,
         }
 
     data = json.loads(proc.stdout)
@@ -181,13 +182,16 @@ def probe_video_file(video_path: Path) -> dict:
 
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
+    gps_alt: Optional[float] = None
     iso_loc = str(fmt_tags.get("com.apple.quicktime.location.ISO6709") or fmt_tags.get("location") or "")
     if iso_loc:
-        m_gps = re.match(r"^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", iso_loc)
+        m_gps = re.match(r"^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)?", iso_loc)
         if m_gps:
             try:
                 gps_lat = round(float(m_gps.group(1)), 6)
                 gps_lon = round(float(m_gps.group(2)), 6)
+                if m_gps.group(3):
+                    gps_alt = round(float(m_gps.group(3)), 2)
             except ValueError:
                 pass
 
@@ -208,6 +212,7 @@ def probe_video_file(video_path: Path) -> dict:
         "camera_make_model": cam_make_model,
         "gps_lat": gps_lat,
         "gps_lon": gps_lon,
+        "gps_alt": gps_alt,
     }
 
 
@@ -548,31 +553,61 @@ def _extract_exif_camera_info(img: Image.Image, photo_path: Optional[Path] = Non
     return cam_badge, exif_summary or ""
 
 
-def _extract_exif_gps(img: Image.Image) -> tuple[Optional[float], Optional[float]]:
-    """Mechanically extract signed decimal (latitude, longitude) from EXIF GPSInfo (0x8825)."""
+def _parse_exif_rational(val: Any) -> Optional[float]:
+    """Convert Pillow IFDRational, (num, den) tuple, or float into a float."""
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (tuple, list)) and len(val) == 2:
+            den = float(val[1])
+            return float(val[0]) / den if abs(den) > 1e-9 else None
+        return float(val)
+    except Exception:
+        return None
+
+
+def _extract_exif_gps_and_alt(img: Image.Image) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Mechanically extract signed (latitude, longitude, altitude_m) from EXIF GPSInfo (0x8825)."""
     try:
         exif = img.getexif()
         if not exif:
-            return None, None
+            return None, None, None
         gps_ifd = exif.get_ifd(0x8825)
         if not gps_ifd:
-            return None, None
+            return None, None, None
 
         def _dms_to_deg(dms: Any, ref: str) -> Optional[float]:
             if not dms or len(dms) < 3:
                 return None
-            deg = float(dms[0]) + float(dms[1]) / 60.0 + float(dms[2]) / 3600.0
+            d0 = _parse_exif_rational(dms[0])
+            d1 = _parse_exif_rational(dms[1])
+            d2 = _parse_exif_rational(dms[2])
+            if d0 is None or d1 is None or d2 is None:
+                return None
+            deg = d0 + d1 / 60.0 + d2 / 3600.0
             if str(ref).upper().strip() in ("S", "W"):
                 deg = -deg
             return round(deg, 6)
 
         lat = _dms_to_deg(gps_ifd.get(2), str(gps_ifd.get(1, "N")))
         lon = _dms_to_deg(gps_ifd.get(4), str(gps_ifd.get(3, "E")))
+        alt_val = _parse_exif_rational(gps_ifd.get(6))
+        alt_ref = gps_ifd.get(5, 0)
+        gps_alt: Optional[float] = None
+        if alt_val is not None:
+            is_below = alt_ref in (1, "1", b"\x01") or (isinstance(alt_ref, (bytes, bytearray)) and len(alt_ref) > 0 and alt_ref[0] == 1)
+            gps_alt = round(-abs(alt_val) if is_below else alt_val, 2)
         if lat is not None and lon is not None:
-            return lat, lon
+            return lat, lon, gps_alt
     except Exception:
         pass
-    return None, None
+    return None, None, None
+
+
+def _extract_exif_gps(img: Image.Image) -> tuple[Optional[float], Optional[float]]:
+    """Mechanically extract signed decimal (latitude, longitude) from EXIF GPSInfo (0x8825)."""
+    lat, lon, _ = _extract_exif_gps_and_alt(img)
+    return lat, lon
 
 
 def compute_image_color_stats(img: Image.Image) -> dict[str, float]:
@@ -615,7 +650,7 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
     img = Image.open(photo_path)
     creation_time = _extract_exif_datetime(img, photo_path)
     camera_make_model, exif_summary = _extract_exif_camera_info(img, photo_path)
-    gps_lat, gps_lon = _extract_exif_gps(img)
+    gps_lat, gps_lon, gps_alt = _extract_exif_gps_and_alt(img)
     orig_w, orig_h = img.size
     try:
         exif_orient = img.getexif().get(274, 1)
@@ -664,6 +699,7 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
         exif_summary=exif_summary or None,
         gps_lat=gps_lat,
         gps_lon=gps_lon,
+        gps_alt=gps_alt,
         color_stats=color_stats,
         caption=f"Photo {photo_path.name} ({orientation}, {w}x{h})",
         subjects=[],
@@ -836,6 +872,7 @@ def build_initial_catalog(
                 creation_time = dit_ent.creation_time_raw
                 gps_lat = dit_ent.gps_lat
                 gps_lon = dit_ent.gps_lon
+                gps_alt = dit_ent.gps_alt
             else:
                 info = probe_video_file(f)
                 _, _, f_hash = compute_file_fingerprint(f)
@@ -860,6 +897,7 @@ def build_initial_catalog(
                 creation_time = info["creation_time"]
                 gps_lat = info["gps_lat"]
                 gps_lon = info["gps_lon"]
+                gps_alt = info.get("gps_alt")
 
             scenes = detect_scenes_and_extract_keyframes(f, duration, keyframes_dir)
             v_color_stats: dict[str, float] = {}
@@ -895,6 +933,7 @@ def build_initial_catalog(
                     creation_time=creation_time,
                     gps_lat=gps_lat,
                     gps_lon=gps_lon,
+                    gps_alt=gps_alt,
                     color_stats=v_color_stats,
                     overall_summary=f"Video clip {f.name} ({duration:.1f}s, {width}x{height})",
                     scenes=scenes,
@@ -928,6 +967,7 @@ def build_initial_catalog(
                         exif_summary=dit_ent.exif_summary,
                         gps_lat=dit_ent.gps_lat,
                         gps_lon=dit_ent.gps_lon,
+                        gps_alt=dit_ent.gps_alt,
                         color_stats=dict(dit_ent.color_stats),
                         focal_point=dit_ent.focal_point,
                     ),

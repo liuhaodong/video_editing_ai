@@ -12,6 +12,7 @@ import numpy as np
 
 from ..analyzer.semantic_intelligence import SemanticEmbeddingEngine
 from ..models.schema import ChapterPlan, ColdOpenHookSlot, CreativeBrief, CulledSubClip, PaperEdit
+from ..renderer.travel_map import infer_transport_mode, lookup_gazetteer_place
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
 
 
@@ -800,6 +801,31 @@ class StoryProducerAgent(BaseEditingAgent):
             else:
                 editing_mode = "music_montage"
 
+            wp_lats = sorted(float(sc.gps_lat) for sc in ordered_selects if sc.gps_lat is not None and sc.gps_lon is not None)
+            wp_lons = sorted(float(sc.gps_lon) for sc in ordered_selects if sc.gps_lat is not None and sc.gps_lon is not None)
+            wp_alts = sorted(float(sc.gps_alt) for sc in ordered_selects if sc.gps_alt is not None)
+            wp_lat: Optional[float] = wp_lats[len(wp_lats) // 2] if wp_lats else None
+            wp_lon: Optional[float] = wp_lons[len(wp_lons) // 2] if wp_lons else None
+            wp_alt: Optional[float] = wp_alts[len(wp_alts) // 2] if wp_alts else None
+            if wp_lat is None or wp_lon is None:
+                gaz_hit = lookup_gazetteer_place(f"{loc_tag} {title_en} {sub_en}")
+                if gaz_hit is not None:
+                    wp_lat, wp_lon, gaz_alt, _ = gaz_hit
+                    if wp_alt is None:
+                        wp_alt = gaz_alt
+            wp_transport: Any = "auto"
+            prev_wp = next(
+                (ch for ch in reversed(chapters) if ch.waypoint_lat is not None and ch.waypoint_lon is not None),
+                None,
+            )
+            if prev_wp is not None and wp_lat is not None and wp_lon is not None:
+                leg_km = _haversine_km(prev_wp.waypoint_lat or 0.0, prev_wp.waypoint_lon or 0.0, wp_lat, wp_lon)
+                wp_transport = infer_transport_mode(
+                    leg_km,
+                    prev_wp.location_tag or prev_wp.title,
+                    loc_tag or title_en,
+                )
+
             chapters.append(
                 ChapterPlan(
                     chapter_id=cid,
@@ -816,6 +842,10 @@ class StoryProducerAgent(BaseEditingAgent):
                     target_energy=target_energy,
                     shot_grammar_sequence=grammar_seq,
                     narrative_goal=summary,
+                    waypoint_lat=wp_lat,
+                    waypoint_lon=wp_lon,
+                    waypoint_alt=wp_alt,
+                    transport_mode=wp_transport,
                 )
             )
 

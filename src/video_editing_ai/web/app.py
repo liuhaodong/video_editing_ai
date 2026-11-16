@@ -80,6 +80,8 @@ class MultiAgentRunRequest(BaseModel):
     use_antigravity: bool = True
     render_video: bool = True
     title_theme: Optional[str] = None
+    travel_map_mode: Optional[str] = None
+    travel_map_style: Optional[str] = None
     burn_in_subtitles: Optional[bool] = None
     subtitle_style: Optional[str] = None
 
@@ -88,6 +90,10 @@ def _merge_run_answers(req: MultiAgentRunRequest) -> dict[str, str]:
     merged = dict(req.interview_answers)
     if req.title_theme:
         merged["title_theme"] = req.title_theme
+    if req.travel_map_mode:
+        merged["travel_map_mode"] = req.travel_map_mode
+    if req.travel_map_style:
+        merged["travel_map_style"] = req.travel_map_style
     if req.burn_in_subtitles is not None:
         merged["burn_in_subtitles"] = "true" if req.burn_in_subtitles else "false"
     if req.subtitle_style:

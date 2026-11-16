@@ -26,6 +26,7 @@ LOCALIZED_CARD_STYLES: tuple[str, ...] = (
     "route_map_card",
     "curved_gps_ribbon",
     "magazine_chapter_plate",
+    "travel_map_pip_card",
 )
 
 # Art-directed visual design tokens for all 6 Cinema Title Themes
@@ -736,6 +737,8 @@ def compute_overlay_bbox_norm(style: str) -> list[float]:
         return [0.05, 0.07, 0.62, 0.23]
     if style in ("route_map_card", "curved_gps_ribbon"):
         return [0.11, 0.80, 0.89, 0.96]
+    if style == "travel_map_pip_card":
+        return [0.62, 0.06, 0.95, 0.40]
     if style == "dialogue_badge":
         return [0.06, 0.10, 0.58, 0.25]
     if style == "exif_stamp":
@@ -771,6 +774,12 @@ def compute_glass_pill_rect(
         ph = int(round((142 if item.style == "curved_gps_ribbon" else 128) * s))
         pl = (width - pw) // 2
         pt = height - ph - int(round(34 * s))
+        rad = int(round(16 * s))
+    elif item.style == "travel_map_pip_card":
+        pw = max(int(round(360 * s)), int(round(width * 0.33)))
+        ph = max(int(round(220 * s)), int(round(height * 0.34)))
+        pl = width - int(round(width * 0.05)) - pw
+        pt = int(round(height * 0.06))
         rad = int(round(16 * s))
     elif item.style == "editorial_caption":
         eyebrow_str = _format_tracked_eyebrow(overline_text)
@@ -1241,6 +1250,96 @@ def render_title_frame(
                     scale=s,
                     hdr_safe=use_hdr_safe,
                 )
+
+    # ------------------------------------------------------------------
+    # Archetype 3b: Upper-Right Corner Animated Travel Map PiP Card
+    # ------------------------------------------------------------------
+    elif item.style == "travel_map_pip_card":
+        rect = compute_glass_pill_rect(item, width, height)
+        if rect is not None:
+            pl, pt, pw, ph, rad = rect
+            _draw_card_container(img, rect, spec, use_hdr_safe, master_alpha, transparent_glass_body, item.backdrop_blur)
+            draw = ImageDraw.Draw(img)
+
+            f_hdr_over = _load_font_tier(int(round(12 * s)), tier=spec["overline_tier"], bold=True)
+            f_hdr_title = _load_font_tier(int(round(19 * s)), tier=spec["primary_tier"], bold=spec["primary_bold"])
+            f_hdr_sub = _load_font_tier(int(round(13 * s)), tier=spec["overline_tier"], bold=False)
+
+            pad_x = int(round(14 * s))
+            hdr_h = int(round(48 * s))
+            ov_lbl = (overline_text or "LIVE ROUTE TELEMETRY").upper()[:26]
+            draw_tracked_text(
+                img,
+                (pl + pad_x, pt + int(round(9 * s))),
+                ov_lbl,
+                font=f_hdr_over,
+                fill=accent_rgba,
+                letter_spacing_px=1.6 * s,
+                scale=s,
+                hdr_safe=use_hdr_safe,
+            )
+            draw_tracked_text(
+                img,
+                (pl + pad_x, pt + int(round(23 * s))),
+                item.text[:28],
+                font=f_hdr_title,
+                fill=title_fill,
+                letter_spacing_px=0.5 * s,
+                scale=s,
+                hdr_safe=use_hdr_safe,
+                clip_box=(pl + pad_x - 2, pt + int(round(20 * s)), pl + pw - pad_x, pt + hdr_h + 2),
+            )
+            if sub_text:
+                sub_len = int(draw.textlength(sub_text[:24], font=f_hdr_sub))
+                draw_tracked_text(
+                    img,
+                    (max(pl + pad_x + 120, pl + pw - pad_x - sub_len - int(round(4 * s))), pt + int(round(9 * s))),
+                    sub_text[:24],
+                    font=f_hdr_sub,
+                    fill=sub_fill,
+                    letter_spacing_px=0.5 * s,
+                    scale=s,
+                    hdr_safe=use_hdr_safe,
+                )
+
+            map_x = pl + pad_x
+            map_y = pt + hdr_h
+            map_w = max(120, pw - 2 * pad_x)
+            map_h = max(80, ph - hdr_h - int(round(12 * s)))
+
+            from .travel_map import render_travel_map_frame, resolve_travel_map_style
+
+            raw_wps = item.map_waypoints or [
+                {"label": "Origin", "lat": 37.7749, "lon": -122.4194, "completed": True, "active": False},
+                {"label": (item.text or "Destination")[:18], "lat": 35.6762, "lon": 139.6503, "completed": True, "active": True},
+            ]
+            active_idx = next((idx_w for idx_w, w in enumerate(raw_wps) if isinstance(w, dict) and w.get("active")), len(raw_wps) - 1)
+            leg_i = max(0, min(len(raw_wps) - 2, active_idx - 1))
+            t_map_prog = min(0.98, max(0.08, 0.14 + 0.82 * hold_p))
+            map_style = resolve_travel_map_style("auto", theme_name, f"{item.text} {sub_text}")
+
+            map_rgba = render_travel_map_frame(
+                waypoints=raw_wps,
+                style=map_style,
+                width=map_w,
+                height=map_h,
+                leg_index=leg_i,
+                t_norm=t_map_prog,
+                transport_mode="auto",
+                hdr_safe=use_hdr_safe,
+                compact_hud=True,
+                allow_tile_fetch=False,
+            )
+            inner_rad = max(6, rad - int(round(5 * s)))
+            mask_l = Image.new("L", (map_w, map_h), 0)
+            m_draw = ImageDraw.Draw(mask_l)
+            m_draw.rounded_rectangle([0, 0, map_w - 1, map_h - 1], radius=inner_rad, fill=int(round(248 * master_alpha)))
+            map_rgba.putalpha(mask_l)
+            img.alpha_composite(map_rgba, dest=(map_x, map_y))
+
+            inner_border = clamp_rgba_for_hdr(_scale_rgba_alpha(spec["border_rgba"], master_alpha), hdr_safe=use_hdr_safe)
+            draw = ImageDraw.Draw(img)
+            draw.rounded_rectangle([map_x, map_y, map_x + map_w - 1, map_y + map_h - 1], radius=inner_rad, outline=inner_border, width=1)
 
     # ------------------------------------------------------------------
     # Archetype 4: Curved Bezier GPS Journey Ribbon & Linear Route Map

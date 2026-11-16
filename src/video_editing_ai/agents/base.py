@@ -29,6 +29,7 @@ from ..models.schema import (
     PaperEdit,
     PhotoCurationReport,
     RevisionDirective,
+    TravelMapManifest,
     VisualQCReport,
 )
 
@@ -112,6 +113,7 @@ class PipelineBlackboard:
         self.color_transform_manifest: Optional[ColorTransformManifest] = None
         self.audio_mix_manifest: Optional[AudioMixManifest] = None
         self.graphics_manifest: Optional[GraphicsManifest] = None
+        self.travel_map_manifest: Optional[TravelMapManifest] = None
         self.pacing_audit: Optional[PacingAuditReport] = None
         self.visual_qc_report: Optional[VisualQCReport] = None
         self.director_review: Optional[DirectorReviewReport] = None
@@ -364,6 +366,11 @@ class PipelineBlackboard:
                 self.graphics_manifest = GraphicsManifest.from_json_file(p / "graphics_manifest.json")
             except Exception:
                 pass
+        if (p / "travel_map_manifest.json").exists() and self.travel_map_manifest is None:
+            try:
+                self.travel_map_manifest = TravelMapManifest.from_json_file(p / "travel_map_manifest.json")
+            except Exception:
+                pass
         if (p / "pacing_audit.json").exists() and self.pacing_audit is None:
             try:
                 self.pacing_audit = PacingAuditReport.from_json_file(p / "pacing_audit.json")
@@ -388,6 +395,7 @@ class PipelineBlackboard:
             "cinematography_report.json",
             "motion_graphics_plan.json",
             "graphics_manifest.json",
+            "travel_map_manifest.json",
             "color_grade_plan.json",
             "color_transform_manifest.json",
             "sound_design_plan.json",

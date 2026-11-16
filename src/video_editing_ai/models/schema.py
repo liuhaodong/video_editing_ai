@@ -96,6 +96,7 @@ TitleStyleType = Literal[
     "dialogue_badge",
     "closing_card",
     "route_map_card",
+    "travel_map_pip_card",
     "exif_stamp",
     "knockout_stencil_opening",
     "magazine_chapter_plate",
@@ -111,11 +112,62 @@ VALID_TITLE_STYLES: tuple[str, ...] = (
     "dialogue_badge",
     "closing_card",
     "route_map_card",
+    "travel_map_pip_card",
     "exif_stamp",
     "knockout_stencil_opening",
     "magazine_chapter_plate",
     "curved_gps_ribbon",
     "credits_colophon_card",
+)
+
+TravelMapStyleType = Literal[
+    "auto",
+    "midnight_vox_atlas",
+    "archival_expedition_parchment",
+    "aerial_relief_hybrid",
+    "kinfolk_minimal_monograph",
+]
+
+VALID_TRAVEL_MAP_STYLES: tuple[str, ...] = (
+    "auto",
+    "midnight_vox_atlas",
+    "archival_expedition_parchment",
+    "aerial_relief_hybrid",
+    "kinfolk_minimal_monograph",
+)
+
+TravelMapModeType = Literal[
+    "auto",
+    "flyover_interlude",
+    "picture_in_picture",
+    "hybrid",
+    "off",
+]
+
+VALID_TRAVEL_MAP_MODES: tuple[str, ...] = (
+    "auto",
+    "flyover_interlude",
+    "picture_in_picture",
+    "hybrid",
+    "off",
+)
+
+TransportModeType = Literal[
+    "auto",
+    "flight",
+    "train",
+    "drive",
+    "boat",
+    "walk",
+]
+
+VALID_TRANSPORT_MODES: tuple[str, ...] = (
+    "auto",
+    "flight",
+    "train",
+    "drive",
+    "boat",
+    "walk",
 )
 
 TitleMotionPresetType = Literal[
@@ -194,6 +246,7 @@ class VideoAsset(BaseModel):
     creation_time: Optional[str] = Field(default=None)
     gps_lat: Optional[float] = Field(default=None, description="Decimal latitude extracted from metadata")
     gps_lon: Optional[float] = Field(default=None, description="Decimal longitude extracted from metadata")
+    gps_alt: Optional[float] = Field(default=None, description="Optional GPS altitude in meters above sea level")
     color_stats: dict[str, float] = Field(
         default_factory=dict,
         description="Mechanically measured RGB means, luminance percentiles (p05, p50, p95), and estimated Kelvin",
@@ -222,6 +275,7 @@ class PhotoAsset(BaseModel):
     )
     gps_lat: Optional[float] = Field(default=None, description="Decimal latitude extracted from EXIF GPSInfo")
     gps_lon: Optional[float] = Field(default=None, description="Decimal longitude extracted from EXIF GPSInfo")
+    gps_alt: Optional[float] = Field(default=None, description="Optional GPS altitude in meters above sea level")
     color_stats: dict[str, float] = Field(
         default_factory=dict,
         description="Mechanically measured RGB means, luminance percentiles (p05, p50, p95), and estimated Kelvin",
@@ -412,6 +466,20 @@ class CreativeBrief(BaseModel):
         default="cinema_editorial",
         description="Subtitle rendering style preset ('cinema_editorial', 'minimal_glass', 'kinetic_word_highlight')",
     )
+    travel_map_mode: TravelMapModeType = Field(
+        default="auto",
+        description=(
+            "2.5D Travel Map choreography mode: 'auto' (injects flyover when >=2 geographic stops exist), "
+            "'flyover_interlude', 'picture_in_picture', 'hybrid', or 'off'"
+        ),
+    )
+    travel_map_style: TravelMapStyleType = Field(
+        default="auto",
+        description=(
+            "Cinema cartography style: 'auto', 'midnight_vox_atlas', "
+            "'archival_expedition_parchment', 'aerial_relief_hybrid', or 'kinfolk_minimal_monograph'"
+        ),
+    )
     interview_qa: list[dict[str, Any]] = Field(default_factory=list)
 
     def to_json_file(self, path: str | Path) -> None:
@@ -524,6 +592,7 @@ class CulledSubClip(BaseModel):
     )
     gps_lat: Optional[float] = Field(default=None, description="Optional GPS latitude in decimal degrees")
     gps_lon: Optional[float] = Field(default=None, description="Optional GPS longitude in decimal degrees")
+    gps_alt: Optional[float] = Field(default=None, description="Optional GPS altitude in meters above sea level")
     words: list[WordTimestamp] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -735,6 +804,10 @@ class ChapterPlan(BaseModel):
         default_factory=list,
         description="Assigned Five-Shot cinematic grammar role per subclip (e.g., 'establishing_wide', 'aroll_anchor', 'detail_weave', 'resolving_button')",
     )
+    waypoint_lat: Optional[float] = Field(default=None, description="Resolved chapter GPS latitude centroid or gazetteer stop")
+    waypoint_lon: Optional[float] = Field(default=None, description="Resolved chapter GPS longitude centroid or gazetteer stop")
+    waypoint_alt: Optional[float] = Field(default=None, description="Resolved chapter elevation in meters")
+    transport_mode: TransportModeType = Field(default="auto", description="Inferred or selected transit mode entering this chapter")
     narrative_goal: str = ""
 
 
@@ -1284,6 +1357,7 @@ class SoundDesignCue(BaseModel):
         "velvet_whoosh",
         "polaroid_shutter",
         "optical_loupe_chime",
+        "cartography_flyover_whoosh",
     ] = "warm_room_tone"
     timeline_start: float = Field(default=0.0, ge=0.0)
     duration: float = Field(default=4.0, gt=0.2)
@@ -1460,6 +1534,7 @@ class DITIngestEntry(BaseModel):
     has_diegetic_music: bool = False
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
+    gps_alt: Optional[float] = None
     camera_make_model: Optional[str] = None
     exif_summary: Optional[str] = None
     preview_path: Optional[str] = None
@@ -1825,4 +1900,57 @@ class VisualQCReport(BaseModel):
 
     @classmethod
     def from_json_file(cls, path: str | Path) -> "VisualQCReport":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class MapWaypointSpec(BaseModel):
+    """Geographic waypoint stop resolved from chapter EXIF GPS, offline gazetteer, or user brief."""
+
+    waypoint_id: str
+    chapter_id: str = ""
+    label: str
+    subtitle: str = ""
+    lat: float
+    lon: float
+    alt_m: float = 0.0
+    source: Literal["exif_gps", "gazetteer", "synthetic"] = "exif_gps"
+    hero_thumbnail_path: Optional[str] = None
+
+
+class TravelMapSegmentSpec(BaseModel):
+    """A single animated 2.5D cartography leg rendered to Track V2 (.mp4) or Track V3 PiP card."""
+
+    segment_id: str
+    leg_index: int = 0
+    origin: MapWaypointSpec
+    destination: MapWaypointSpec
+    transport_mode: TransportModeType = "drive"
+    distance_km: float = 0.0
+    bearing_deg: float = 0.0
+    style: str = "midnight_vox_atlas"
+    placement: Literal["v2_flyover", "v3_pip"] = "v2_flyover"
+    timeline_start: float = Field(default=0.0, ge=0.0)
+    duration: float = Field(default=3.2, gt=0.2)
+    rendered_clip_path: str = ""
+    overlay_id: str = ""
+
+
+class TravelMapManifest(BaseModel):
+    """Stage 40 Output (travel_map_manifest.json): Resolved geographic waypoints & 2.5D cartography segments."""
+
+    project_title: str
+    enabled: bool = False
+    travel_map_mode: TravelMapModeType = "auto"
+    resolved_style: str = "midnight_vox_atlas"
+    total_distance_km: float = 0.0
+    waypoints: list[MapWaypointSpec] = Field(default_factory=list)
+    segments: list[TravelMapSegmentSpec] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "TravelMapManifest":
         return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))

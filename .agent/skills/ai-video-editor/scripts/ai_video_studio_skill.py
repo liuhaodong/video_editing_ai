@@ -172,6 +172,10 @@ def cmd_intake_refine(args: argparse.Namespace) -> int:
         answers["dialogue_preference"] = args.dialogue_preference
     if args.duration:
         answers["target_duration_sec"] = str(args.duration)
+    if getattr(args, "travel_map_mode", None):
+        answers["travel_map_mode"] = args.travel_map_mode
+    if getattr(args, "travel_map_style", None):
+        answers["travel_map_style"] = args.travel_map_style
     if args.prompt:
         answers["must_include_topics"] = args.prompt
 
@@ -304,6 +308,10 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
     )
     if args.duration:
         interview_answers["target_duration_sec"] = str(args.duration)
+    if getattr(args, "travel_map_mode", None):
+        interview_answers["travel_map_mode"] = args.travel_map_mode
+    if getattr(args, "travel_map_style", None):
+        interview_answers["travel_map_style"] = args.travel_map_style
 
     extra_audio = [Path(args.bgm).resolve()] if args.bgm and Path(args.bgm).exists() else None
 
@@ -626,6 +634,16 @@ def cmd_edit_cut(args: argparse.Namespace) -> int:
             op["bgm_volume"] = args.bgm_volume
         if args.duck_volume is not None:
             op["duck_volume"] = args.duck_volume
+        if getattr(args, "origin", None):
+            op["origin"] = args.origin
+        if getattr(args, "destination", None):
+            op["destination"] = args.destination
+        if getattr(args, "map_style", None):
+            op["style"] = args.map_style
+        if getattr(args, "placement", None):
+            op["placement"] = args.placement
+        if getattr(args, "transport_mode", None):
+            op["transport_mode"] = args.transport_mode
         ops.append(op)
 
     result = apply_surgical_edit(project_dir=project_dir, operations=ops)
@@ -901,6 +919,73 @@ def cmd_preview_photo_effects(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_preview_travel_maps(args: argparse.Namespace) -> int:
+    """Mechanically render a 2x2 high-resolution cartography comparison sheet across all 4 Travel Map styles."""
+    from video_editing_ai.renderer.travel_map import render_travel_map_showcase_sheet
+
+    proj = Path(args.project_dir).resolve()
+    proj.mkdir(parents=True, exist_ok=True)
+    out_jpg = Path(args.output).resolve() if args.output else (proj / "contact_sheets" / "travel_map_showcase.jpg")
+
+    parsed_wps = None
+    if getattr(args, "waypoints_json", None):
+        raw_wp = args.waypoints_json
+        wp_p = Path(raw_wp)
+        parsed_wps = json.loads(wp_p.read_text(encoding="utf-8")) if wp_p.exists() else json.loads(raw_wp)
+
+    res_jpg = render_travel_map_showcase_sheet(output_jpg=out_jpg, waypoints=parsed_wps)
+    print(f"Success! Rendered 4-Style Cinema 2.5D Travel Map Showcase Sheet to: {res_jpg}")
+    return 0
+
+
+def cmd_render_travel_map(args: argparse.Namespace) -> int:
+    """Mechanically render a standalone animated Cinema 2.5D Travel Map flyover MP4 clip."""
+    import re
+    from video_editing_ai.renderer.travel_map import (
+        lookup_gazetteer_place,
+        render_travel_map_clip,
+        resolve_travel_map_style,
+    )
+
+    proj = Path(args.project_dir).resolve()
+    proj.mkdir(parents=True, exist_ok=True)
+    out_mp4 = Path(args.output).resolve() if args.output else (proj / "cache" / "maps" / "travel_map_preview.mp4")
+
+    wps: list[dict[str, Any]] = []
+    if getattr(args, "waypoints_json", None):
+        raw_wp = args.waypoints_json
+        wp_p = Path(raw_wp)
+        wps = json.loads(wp_p.read_text(encoding="utf-8")) if wp_p.exists() else json.loads(raw_wp)
+    else:
+        for idx_s, raw_place, def_lat, def_lon, def_lbl in [
+            (0, args.origin or "Tokyo", 35.6762, 139.6503, "Departure"),
+            (1, args.destination or "Kyoto", 35.0116, 135.7681, "Destination"),
+        ]:
+            m_c = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*(?:,\s*(.*))?$", str(raw_place))
+            if m_c:
+                wps.append({"label": (m_c.group(3) or def_lbl), "lat": float(m_c.group(1)), "lon": float(m_c.group(2)), "alt_m": 40.0})
+            else:
+                hit = lookup_gazetteer_place(str(raw_place))
+                if hit is not None:
+                    wps.append({"label": hit[3], "lat": hit[0], "lon": hit[1], "alt_m": hit[2], "source": "gazetteer"})
+                else:
+                    wps.append({"label": str(raw_place) or def_lbl, "lat": def_lat, "lon": def_lon, "alt_m": 40.0, "source": "synthetic"})
+
+    tm_style = resolve_travel_map_style(args.style or "auto", prompt_text=f"{args.origin or ''} {args.destination or ''}")
+    res_mp4 = render_travel_map_clip(
+        waypoints=wps,
+        output_mp4=out_mp4,
+        style=tm_style,
+        duration=float(args.duration or 3.2),
+        leg_index=None if len(wps) > 2 else 0,
+        transport_mode=args.transport_mode or "auto",
+        with_audio=bool(args.with_audio),
+        cache_dir=proj / "cache" / "maps" / "tiles",
+    )
+    print(f"Success! Rendered Cinema 2.5D Travel Map flyover ({tm_style}) to: {res_mp4}")
+    return 0
+
+
 def cmd_apply_video_curation(args: argparse.Namespace) -> int:
     """Persist AI Agent video clip selection, golden-window [in_tc, out_tc] trims, transitions & captions."""
     proj = Path(args.project_dir).resolve()
@@ -992,6 +1077,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_int.add_argument("--bgm-mood", default=None, help="auto_match | classical_chamber | acoustic_warm | cinematic_orchestral")
     p_int.add_argument("--dialogue-preference", default=None, help="keep_full_sentences_with_broll_cutaways | highlights_only | music_mostly")
     p_int.add_argument("--duration", type=int, default=None, help="Target duration in seconds (30 to 600)")
+    p_int.add_argument("--travel-map-mode", default=None, help="auto | flyover_interlude | picture_in_picture | hybrid | off")
+    p_int.add_argument("--travel-map-style", default=None, help="auto | midnight_vox_atlas | archival_expedition_parchment | aerial_relief_hybrid | kinfolk_minimal_monograph")
     p_int.add_argument("--answers-json", default=None, help="Optional JSON string of interview answers")
     p_int.add_argument("--output", default=None, help="Output consultation JSON path")
     p_int.set_defaults(func=cmd_intake_refine)
@@ -1015,6 +1102,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--duration", type=int, default=None, help="Target duration in seconds (30 to 600)")
     p_pipe.add_argument("--photo-mode", default="parallax_gallery", help="Primary fallback photo mode (any of the 16 PhotoModeType modes)")
     p_pipe.add_argument("--narrative-style", default="family_keepsake_4act", help="Narrative style")
+    p_pipe.add_argument("--travel-map-mode", default=None, help="auto | flyover_interlude | picture_in_picture | hybrid | off")
+    p_pipe.add_argument("--travel-map-style", default=None, help="auto | midnight_vox_atlas | archival_expedition_parchment | aerial_relief_hybrid | kinfolk_minimal_monograph")
     p_pipe.add_argument("--bgm-mood", default="auto_match", help="BGM mood preference")
     p_pipe.add_argument("--bgm", default=None, help="Optional custom audio file path")
     p_pipe.add_argument("--width", type=int, default=3840, help="Video width (default 3840)")
@@ -1113,7 +1202,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("--project-dir", required=True, help="Project workspace directory")
     p_ec.add_argument(
         "--action",
-        choices=["update-plaque", "set-photo-effect", "trim", "drop", "swap", "move", "set-cold-open", "audio-mix"],
+        choices=["update-plaque", "set-photo-effect", "trim", "drop", "swap", "move", "set-cold-open", "audio-mix", "insert-travel-map"],
         default=None,
         help="Surgical operation type (or pass a batch via --ops-json)",
     )
@@ -1159,6 +1248,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("--subclip-id", default=None, help="Subclip ID for --action set-cold-open")
     p_ec.add_argument("--bgm-volume", type=float, default=None, help="BGM base volume (0.05-1.0) for --action audio-mix")
     p_ec.add_argument("--duck-volume", type=float, default=None, help="BGM ducking volume (0.02-0.5) for --action audio-mix")
+    p_ec.add_argument("--origin", default=None, help="Departure city/place or 'lat,lon' for --action insert-travel-map")
+    p_ec.add_argument("--destination", default=None, help="Arrival city/place or 'lat,lon' for --action insert-travel-map")
+    p_ec.add_argument("--map-style", default=None, help="Cartography style for --action insert-travel-map")
+    p_ec.add_argument("--placement", default=None, help="Placement mode: v2_flyover or v3_pip for --action insert-travel-map")
+    p_ec.add_argument("--transport-mode", default=None, help="Transport mode: auto | flight | train | drive | walk | boat")
     p_ec.add_argument("--ops-json", default=None, help="JSON string or file path containing a list of surgical operations")
     p_ec.add_argument("--output", default=None, help="Optional output report JSON path")
     p_ec.set_defaults(func=cmd_edit_cut)
@@ -1262,6 +1356,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_rss.add_argument("--force", action="store_true", default=False, help="Force re-render even if timeline SHA-1 matches cached screening sheet")
     p_rss.add_argument("--output", default=None, help="Optional output JPEG path")
     p_rss.set_defaults(func=cmd_render_screening_sheet)
+
+    # 19. preview-travel-maps
+    p_ptm = sub.add_parser(
+        "preview-travel-maps",
+        help="Mechanically render a 2x2 showcase JPEG comparing all 4 Cinema 2.5D Travel Map cartography styles",
+    )
+    p_ptm.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_ptm.add_argument("--waypoints-json", default=None, help="Optional JSON string or file path of waypoint dicts")
+    p_ptm.add_argument("--output", default=None, help="Optional output JPEG path")
+    p_ptm.set_defaults(func=cmd_preview_travel_maps)
+
+    # 20. render-travel-map
+    p_rtm = sub.add_parser(
+        "render-travel-map",
+        help="Mechanically render a standalone animated Cinema 2.5D Travel Map flyover MP4 clip",
+    )
+    p_rtm.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_rtm.add_argument("--origin", default=None, help="Departure city/place or 'lat,lon'")
+    p_rtm.add_argument("--destination", default=None, help="Arrival city/place or 'lat,lon'")
+    p_rtm.add_argument("--waypoints-json", default=None, help="Optional multi-stop waypoints JSON string or file")
+    p_rtm.add_argument("--style", default="auto", help="auto | midnight_vox_atlas | archival_expedition_parchment | aerial_relief_hybrid | kinfolk_minimal_monograph")
+    p_rtm.add_argument("--transport-mode", default="auto", help="auto | flight | train | drive | walk | boat")
+    p_rtm.add_argument("--duration", type=float, default=3.2, help="Animation duration in seconds (default 3.2)")
+    p_rtm.add_argument("--with-audio", action="store_true", default=False, help="Synthesize stereo flyover sweep + landing chime audio")
+    p_rtm.add_argument("--output", default=None, help="Optional output MP4 path")
+    p_rtm.set_defaults(func=cmd_render_travel_map)
 
     return parser
 

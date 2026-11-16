@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
+
+from PIL import Image, ImageOps
 
 from ...models.schema import (
     EditTimeline,
     GraphicsManifest,
     GraphicsOverlaySpec,
+    MapWaypointSpec,
     MotionGraphicItem,
     MotionGraphicsReport,
     NarrationScriptReport,
     TitleOverlayItem,
+    TravelMapManifest,
+    TravelMapSegmentSpec,
+    VisualTrackItem,
     WordTimestamp,
 )
 from ...renderer.subtitles import resolve_subtitle_font_stack
@@ -22,6 +29,15 @@ from ...renderer.titles import (
     compute_overlay_bbox_norm,
     get_theme_spec,
     sample_shot_accent_hex,
+)
+from ...renderer.travel_map import (
+    CART_THEME_SPECS,
+    haversine_km,
+    infer_transport_mode,
+    initial_bearing_deg,
+    render_travel_map_clip,
+    resolve_journey_waypoints,
+    resolve_travel_map_style,
 )
 from ..base import BaseEditingAgent, PipelineBlackboard, register_agent
 
@@ -243,9 +259,10 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
     substage_priority = 0
     description = (
         "Art-directs and consolidates Track V3 overlays across 6 Cinema Title Themes and 12 kinetic qtrle/card archetypes "
-        "(knockout stencil opening, magazine chapter plates, curved GPS ribbons, editorial wall-notes, credits colophon, "
-        "frosted glass lower-thirds & quote badges with live backdrop blur), configures bilingual/word-highlighted subtitles, "
-        "and clamps RGBA peak white to ~203-nit HDR diffuse white."
+        "(knockout stencil opening, magazine chapter plates, curved GPS ribbons, travel map PiP telemetry cards, "
+        "editorial wall-notes, credits colophon, frosted glass lower-thirds & quote badges with live backdrop blur), "
+        "renders Cinema 2.5D Travel Map flyover cutaways onto Track V2 when multi-stop journeys exist, "
+        "configures bilingual/word-highlighted subtitles, and clamps RGBA peak white to ~203-nit HDR diffuse white."
     )
     enabled_by_default = True
     requires_artifacts = ["creative_brief.json", "paper_edit.json", "timeline.yaml"]
@@ -364,6 +381,312 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 hdr_safe=is_hdr,
             )
         ]
+
+        # 1b. Cinema 2.5D Travel Map & Cartography Engine (V2 Flyover Cutaways + V3 PiP Telemetry Cards)
+        tm_mode = getattr(brief, "travel_map_mode", "auto") if brief is not None else "auto"
+        tm_raw_style = getattr(brief, "travel_map_style", "auto") if brief is not None else "auto"
+        tm_style = resolve_travel_map_style(
+            requested_style=tm_raw_style,
+            title_theme=theme,
+            prompt_text=(getattr(brief, "raw_user_prompt", "") if brief is not None else blackboard.user_prompt),
+        )
+        subclip_by_id = (
+            {sc.subclip_id: sc for sc in blackboard.media_index.subclips}
+            if blackboard.media_index is not None
+            else {}
+        )
+        force_syn = tm_mode in ("flyover_interlude", "picture_in_picture", "hybrid")
+        waypoints = resolve_journey_waypoints(
+            chapters=paper.chapters,
+            subclip_by_id=subclip_by_id,
+            catalog=catalog,
+            user_prompt=blackboard.user_prompt,
+            force_synthetic_if_missing=force_syn,
+        )
+
+        # Populate per-waypoint destination hero thumbnails for polaroid/badge map callouts
+        kf_by_vid_path: dict[str, str] = {}
+        photo_by_asset_id: dict[str, str] = {}
+        selected_photos: list[str] = []
+        if catalog is not None:
+            for p in getattr(catalog, "photos", []):
+                cand_p = p.preview_path or p.path
+                if cand_p and Path(cand_p).exists():
+                    photo_by_asset_id[p.id] = str(cand_p)
+            for v in getattr(catalog, "videos", []):
+                for sc_obj in getattr(v, "scenes", []):
+                    kp = getattr(sc_obj, "keyframe_path", None)
+                    if kp and Path(kp).exists():
+                        kf_by_vid_path[str(v.path)] = str(kp)
+                        break
+        if blackboard.photo_curation is not None:
+            for pc_it in getattr(blackboard.photo_curation, "items", []):
+                if getattr(pc_it, "is_selected", False) and Path(pc_it.source_path).exists():
+                    selected_photos.append(str(pc_it.source_path))
+
+        thumbs_dir = blackboard.project_dir / "cache" / "maps" / "thumbs"
+        thumbs_dir.mkdir(parents=True, exist_ok=True)
+        for wp_idx, wp in enumerate(waypoints):
+            hero_src: Optional[str] = None
+            ch_obj = chap_by_id.get(wp.chapter_id)
+            if ch_obj is not None:
+                for sid in ch_obj.selected_subclip_ids:
+                    sc = subclip_by_id.get(sid)
+                    if sc is None:
+                        continue
+                    if sc.media_type == "photo" and Path(sc.source_path).exists():
+                        hero_src = str(sc.source_path)
+                        break
+                    if sc.source_asset_id in photo_by_asset_id:
+                        hero_src = photo_by_asset_id[sc.source_asset_id]
+                        break
+                    if str(sc.source_path) in kf_by_vid_path:
+                        hero_src = kf_by_vid_path[str(sc.source_path)]
+                        break
+                if hero_src is None:
+                    for vc in timeline.visual_track:
+                        if vc.act == ch_obj.title:
+                            if vc.type == "photo" and Path(vc.source).exists():
+                                hero_src = str(vc.source)
+                                break
+                            if str(vc.source) in kf_by_vid_path:
+                                hero_src = kf_by_vid_path[str(vc.source)]
+                                break
+            if hero_src is None and wp_idx < len(selected_photos):
+                hero_src = selected_photos[wp_idx]
+            if hero_src:
+                try:
+                    with Image.open(hero_src) as raw_im:
+                        fit_im = ImageOps.fit(
+                            ImageOps.exif_transpose(raw_im).convert("RGB"),
+                            (320, 200),
+                            method=Image.Resampling.LANCZOS,
+                        )
+                        thumb_p = thumbs_dir / f"{wp.waypoint_id}.jpg"
+                        fit_im.save(thumb_p, "JPEG", quality=88)
+                        wp.hero_thumbnail_path = str(thumb_p)
+                except Exception:
+                    pass
+
+        leg_kms = [
+            haversine_km(waypoints[i].lat, waypoints[i].lon, waypoints[i + 1].lat, waypoints[i + 1].lon)
+            for i in range(max(0, len(waypoints) - 1))
+        ]
+        total_route_km = round(sum(leg_kms), 2)
+        max_leg_km = max(leg_kms, default=0.0)
+        map_active = (tm_mode != "off") and (len(waypoints) >= 2) and (force_syn or max_leg_km >= 0.35)
+
+        map_segments: list[TravelMapSegmentSpec] = []
+        v2_map_windows: list[tuple[float, float]] = []
+        pip_windows: list[tuple[float, float]] = []
+        busy_v2: list[tuple[float, float]] = [
+            (float(b.timeline_start), float(b.timeline_start) + float(b.duration))
+            for b in timeline.broll_track
+        ]
+        act_start_by_cid = {c.chapter_id: act_start_times.get(c.title) for c in paper.chapters}
+
+        def _overlaps_intervals(st_val: float, en_val: float, ivs: list[tuple[float, float]]) -> bool:
+            return any(st_val < (iv_en - 0.04) and en_val > (iv_st + 0.04) for iv_st, iv_en in ivs)
+
+        if map_active and timeline.visual_track:
+            n_total_legs = len(waypoints) - 1
+            if n_total_legs <= 3:
+                chosen_legs = list(range(n_total_legs))
+            else:
+                chosen_legs = sorted({0, n_total_legs // 2, n_total_legs - 1})
+
+            allow_tiles = os.environ.get("AI_EDITOR_ENABLE_ONLINE_TILES", "0") == "1"
+            maps_dir = blackboard.project_dir / "cache" / "maps"
+            tiles_cache_dir = maps_dir / "tiles"
+            map_w = max(640, min(int(timeline.settings.width), 1920))
+            map_h = max(360, min(int(timeline.settings.height), 1080))
+
+            for leg_pos, leg_i in enumerate(chosen_legs):
+                orig_wp = waypoints[leg_i]
+                dest_wp = waypoints[leg_i + 1]
+                leg_km = leg_kms[leg_i]
+                bearing = round(initial_bearing_deg(orig_wp.lat, orig_wp.lon, dest_wp.lat, dest_wp.lon), 1)
+                ch_dest = chap_by_id.get(dest_wp.chapter_id)
+                mode_hint = getattr(ch_dest, "transport_mode", "auto") if ch_dest is not None else "auto"
+                t_mode = infer_transport_mode(leg_km, orig_wp.label, dest_wp.label, hint=mode_hint)
+
+                if tm_mode == "picture_in_picture":
+                    want_place = "v3_pip"
+                elif tm_mode == "flyover_interlude":
+                    want_place = "v2_flyover"
+                elif tm_mode == "hybrid":
+                    want_place = "v2_flyover" if leg_pos == 0 else "v3_pip"
+                else:
+                    want_place = "v2_flyover" if max_leg_km >= 1.0 else "v3_pip"
+
+                dest_t = act_start_by_cid.get(dest_wp.chapter_id)
+                if dest_t is None:
+                    dest_t = ((leg_i + 1) / float(max(2, len(waypoints)))) * timeline.total_duration
+                dest_t = max(open_st + open_dur + 0.35 if timeline.total_duration > 10.0 else hook_end + 0.2, float(dest_t))
+
+                placed_v2 = False
+                if want_place == "v2_flyover":
+                    cands = [
+                        vc
+                        for vc in timeline.visual_track
+                        if vc.id != "clip_000_hook"
+                        and float(vc.duration) >= 2.0
+                        and not _overlaps_intervals(float(vc.timeline_start), float(vc.timeline_start) + float(vc.duration), busy_v2)
+                    ]
+                    # Prefer candidates away from opening card and preferring B-roll / photo plates first
+                    non_open = [
+                        vc for vc in cands if (float(vc.timeline_start) + float(vc.duration) <= open_st) or (float(vc.timeline_start) >= open_st + open_dur)
+                    ]
+                    pool = non_open if non_open else cands
+                    if pool:
+                        host_v1 = min(
+                            pool,
+                            key=lambda vc: (
+                                0 if (vc.roll_type == "b_roll" or vc.type == "photo") else 1,
+                                abs(float(vc.timeline_start) - dest_t),
+                            ),
+                        )
+                        seg_dur = round(min(3.2, max(1.8, float(host_v1.duration) - 0.12)), 2)
+                        seg_start = round(float(host_v1.timeline_start) + 0.06, 2)
+                        map_mp4 = maps_dir / f"flyover_leg_{leg_i + 1:02d}.mp4"
+                        render_travel_map_clip(
+                            waypoints=waypoints,
+                            output_mp4=map_mp4,
+                            style=tm_style,
+                            duration=seg_dur,
+                            width=map_w,
+                            height=map_h,
+                            fps=int(timeline.settings.fps),
+                            leg_index=leg_i,
+                            transport_mode=t_mode,
+                            hdr_safe=is_hdr,
+                            allow_tile_fetch=allow_tiles,
+                            with_audio=False,
+                            cache_dir=tiles_cache_dir,
+                        )
+                        broll_id = f"broll_map_{len(v2_map_windows) + 1:02d}"
+                        timeline.broll_track.append(
+                            VisualTrackItem(
+                                id=broll_id,
+                                type="video",
+                                track_lane=2,
+                                roll_type="b_roll",
+                                shot_scale="wide",
+                                act=host_v1.act,
+                                timeline_start=seg_start,
+                                duration=seg_dur,
+                                source=str(map_mp4),
+                                source_in=0.0,
+                                source_out=seg_dur,
+                                volume=0.0,
+                                audio_crossfade_sec=0.33,
+                                narrative_note=f"2.5D Travel Map Flyover ({orig_wp.label} -> {dest_wp.label}, {leg_km:.1f} km, {t_mode})",
+                            )
+                        )
+                        busy_v2.append((seg_start, seg_start + seg_dur))
+                        v2_map_windows.append((seg_start, seg_start + seg_dur))
+                        map_segments.append(
+                            TravelMapSegmentSpec(
+                                segment_id=f"tm_seg_{len(map_segments) + 1:02d}",
+                                leg_index=leg_i,
+                                origin=orig_wp,
+                                destination=dest_wp,
+                                transport_mode=t_mode,  # type: ignore[arg-type]
+                                distance_km=round(leg_km, 2),
+                                bearing_deg=bearing,
+                                style=tm_style,
+                                placement="v2_flyover",
+                                timeline_start=seg_start,
+                                duration=seg_dur,
+                                rendered_clip_path=str(map_mp4),
+                                overlay_id=broll_id,
+                            )
+                        )
+                        placed_v2 = True
+
+                if not placed_v2:
+                    # Place non-colliding upper-right travel_map_pip_card on Track V3
+                    pip_cands = sorted(timeline.visual_track, key=lambda vc: abs(float(vc.timeline_start) - dest_t))
+                    chosen_st: Optional[float] = None
+                    chosen_dur: Optional[float] = None
+                    for vc in pip_cands:
+                        cand_st, cand_dur = _clamp_to_v1_segment(timeline, max(float(vc.timeline_start), dest_t), 3.4)
+                        if _overlaps_intervals(cand_st, cand_st + cand_dur, [*v2_map_windows, *pip_windows, (open_st, open_st + open_dur)]):
+                            cand_st2, cand_dur2 = _clamp_to_v1_segment(timeline, float(vc.timeline_start) + 0.25, 3.2)
+                            if _overlaps_intervals(cand_st2, cand_st2 + cand_dur2, [*v2_map_windows, *pip_windows, (open_st, open_st + open_dur)]):
+                                continue
+                            cand_st, cand_dur = cand_st2, cand_dur2
+                        chosen_st, chosen_dur = cand_st, cand_dur
+                        break
+                    if chosen_st is not None and chosen_dur is not None:
+                        pip_id = f"title_map_pip_{leg_i + 1:02d}"
+                        km_txt = f"{leg_km:.0f} km" if leg_km >= 2.0 else f"{leg_km * 1000.0:.0f} m"
+                        wp_dicts = [
+                            {
+                                "waypoint_id": w.waypoint_id,
+                                "chapter_id": w.chapter_id,
+                                "label": w.label,
+                                "subtitle": w.subtitle,
+                                "lat": w.lat,
+                                "lon": w.lon,
+                                "alt_m": w.alt_m,
+                                "source": w.source,
+                                "active": (idx_w == (leg_i + 1)),
+                                "completed": (idx_w <= (leg_i + 1)),
+                            }
+                            for idx_w, w in enumerate(waypoints)
+                        ]
+                        consolidated_overlays.append(
+                            TitleOverlayItem(
+                                id=pip_id,
+                                style="travel_map_pip_card",
+                                theme=theme,  # type: ignore[arg-type]
+                                motion_preset="masked_rise",
+                                eyebrow="ROUTE TELEMETRY",
+                                overline="ROUTE TELEMETRY",
+                                text=f"{orig_wp.label} -> {dest_wp.label}"[:28],
+                                subtitle=f"{km_txt} | {t_mode.upper()}",
+                                timeline_start=chosen_st,
+                                duration=chosen_dur,
+                                fade_in=0.35,
+                                fade_out=0.35,
+                                accent_color=open_accent,
+                                backdrop_blur=True,
+                                map_waypoints=wp_dicts,
+                                hdr_safe=is_hdr,
+                            )
+                        )
+                        pip_windows.append((chosen_st, chosen_st + chosen_dur))
+                        map_segments.append(
+                            TravelMapSegmentSpec(
+                                segment_id=f"tm_seg_{len(map_segments) + 1:02d}",
+                                leg_index=leg_i,
+                                origin=orig_wp,
+                                destination=dest_wp,
+                                transport_mode=t_mode,  # type: ignore[arg-type]
+                                distance_km=round(leg_km, 2),
+                                bearing_deg=bearing,
+                                style=tm_style,
+                                placement="v3_pip",
+                                timeline_start=chosen_st,
+                                duration=chosen_dur,
+                                overlay_id=pip_id,
+                            )
+                        )
+
+        timeline.broll_track.sort(key=lambda c: float(c.timeline_start))
+        tm_manifest = TravelMapManifest(
+            project_title=clean_proj_title,
+            enabled=bool(map_segments),
+            travel_map_mode=tm_mode,  # type: ignore[arg-type]
+            resolved_style=tm_style,
+            total_distance_km=total_route_km,
+            waypoints=waypoints,
+            segments=map_segments,
+        )
+        blackboard.travel_map_manifest = tm_manifest
+        blackboard.set_custom_artifact("travel_map_manifest.json", tm_manifest.model_dump(mode="json"))
+        tm_manifest.to_json_file(blackboard.project_dir / "travel_map_manifest.json")
 
         # 2. Route progression cards on alternate chapter transitions + alternating chapter plates / frosted lower-thirds
         mg_items: list[MotionGraphicItem] = []
@@ -728,12 +1051,24 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 )
             )
 
+        # Ensure Track V3 localized plaques/ribbons never cover active Track V2 travel map flyovers
+        if v2_map_windows:
+            consolidated_overlays = [
+                ov
+                for ov in consolidated_overlays
+                if ov.style in ("opening_card", "knockout_stencil_opening", "closing_card", "credits_colophon_card")
+                or not any(
+                    ov.timeline_start < (w_en + 0.20) and (ov.timeline_start + ov.duration) > (w_st - 0.20)
+                    for w_st, w_en in v2_map_windows
+                )
+            ]
+
         # De-conflict overlays: never overlap full-canvas knockout stencil opening, and keep 3-zone spatial discipline
         def _zone_for(style_name: str) -> str:
             x1, y1, x2, y2 = compute_overlay_bbox_norm(style_name)
             if y2 < 0.32 and x2 < 0.65:
                 return "upper_left"
-            if y2 < 0.32 and x1 >= 0.55:
+            if y2 <= 0.44 and x1 >= 0.55:
                 return "upper_right"
             return "bottom_center"
 

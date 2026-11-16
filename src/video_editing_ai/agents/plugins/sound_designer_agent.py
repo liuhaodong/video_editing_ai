@@ -19,6 +19,7 @@ from ...models.schema import (
     MediaIndex,
     SoundDesignCue,
     SoundDesignReport,
+    TravelMapManifest,
 )
 from ..base import BaseEditingAgent, PipelineBlackboard, register_agent
 
@@ -237,6 +238,23 @@ def _synthesize_sound_design_wav(
         sub_tone = np.sin(2.0 * math.pi * (65.0 + 35.0 * (t / dur)) * t)
         sig_l = (warm_l * 0.4 + sub_tone * 0.2) * swell * 0.22
         sig_r = (warm_r * 0.4 + sub_tone * 0.2) * swell * 0.22
+    elif cue_type == "cartography_flyover_whoosh":
+        # Wide stereo jetstream/breeze pan across travel map arc + delicate crystal waypoint radar chime on landing
+        u = np.clip(t / max(0.05, dur), 0.0, 1.0)
+        pan_l = np.sqrt(1.0 - 0.72 * u)
+        pan_r = np.sqrt(0.28 + 0.72 * u)
+        air_env = np.exp(-((t - dur * 0.42) ** 2) / (2.0 * (dur * 0.24) ** 2))
+        jet_sub = np.sin(2.0 * math.pi * (58.0 + 48.0 * u) * t)
+        arrival_t0 = dur * 0.76
+        arrival_dt = np.maximum(0.0, t - arrival_t0)
+        ping_env = np.where(t >= arrival_t0, np.exp(-arrival_dt * 6.5), 0.0)
+        ping = (
+            0.55 * np.sin(2.0 * math.pi * 880.0 * t)
+            + 0.30 * np.sin(2.0 * math.pi * 1318.5 * t)
+            + 0.15 * np.sin(2.0 * math.pi * 1760.0 * t)
+        ) * ping_env
+        sig_l = (warm_l * 0.42 + jet_sub * 0.16) * air_env * 0.22 * pan_l + ping * 0.14
+        sig_r = (warm_r * 0.42 + jet_sub * 0.16) * air_env * 0.22 * pan_r + ping * 0.14
     else:
         mod_l = 0.75 + 0.25 * np.sin(2.0 * math.pi * 0.22 * t)
         mod_r = 0.75 + 0.25 * np.cos(2.0 * math.pi * 0.22 * t)
@@ -351,6 +369,32 @@ class SoundDesignerMixerAgent(BaseEditingAgent):
                             rationale=f"Diegetic '{amb_type}' spatial acoustic bed under still plate ({clip.id}).",
                         )
                     )
+
+        # Pair stereo cartography flyover swooshes + landing pings with Stage 40 travel map V2 flyovers
+        tm_manifest = blackboard.travel_map_manifest
+        if tm_manifest is None and (blackboard.project_dir / "travel_map_manifest.json").exists():
+            try:
+                tm_manifest = TravelMapManifest.from_json_file(blackboard.project_dir / "travel_map_manifest.json")
+            except Exception:
+                tm_manifest = None
+        if tm_manifest is not None and tm_manifest.enabled:
+            for seg in tm_manifest.segments:
+                if seg.placement != "v2_flyover" or foley_count >= 12:
+                    continue
+                foley_count += 1
+                cues.append(
+                    SoundDesignCue(
+                        cue_id=f"sfx_map_{foley_count:02d}",
+                        cue_type="cartography_flyover_whoosh",
+                        timeline_start=round(float(seg.timeline_start), 2),
+                        duration=round(min(3.5, max(0.8, float(seg.duration))), 2),
+                        volume=0.08,
+                        rationale=(
+                            f"Stereo cartography flyover sweep & waypoint arrival chime "
+                            f"({seg.origin.label} -> {seg.destination.label}, {seg.transport_mode})."
+                        ),
+                    )
+                )
 
         ai_resp = self.ask_ai_creative_json(
             blackboard=blackboard,

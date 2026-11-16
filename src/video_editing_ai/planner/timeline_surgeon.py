@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Optional
 
 from ..analyzer.media_probe import PHOTO_EXTENSIONS
@@ -10,10 +11,13 @@ from ..exporters.nle_export import export_all_nle_formats
 from ..models.schema import (
     VALID_PHOTO_MODES,
     VALID_PHOTO_OVERLAY_FX,
+    VALID_TRAVEL_MAP_STYLES,
     CulledSubClip,
     EditTimeline,
     KenBurnsConfig,
+    MapWaypointSpec,
     MediaIndex,
+    TitleOverlayItem,
     TransitionConfig,
     VisualTrackItem,
 )
@@ -305,6 +309,146 @@ def apply_surgical_edit(
                     if v.type == "video" and v.roll_type == "b_roll":
                         v.volume = nat_v
             applied_logs.append("Updated timeline audio mix parameters")
+
+        elif action in ("insert-travel-map", "insert_travel_map", "travel-map"):
+            from ..renderer.travel_map import (
+                haversine_km,
+                infer_transport_mode,
+                lookup_gazetteer_place,
+                render_travel_map_clip,
+                resolve_travel_map_style,
+            )
+
+            def _parse_geo_stop(raw_place: Any, default_lat: float, default_lon: float, default_lbl: str) -> MapWaypointSpec:
+                txt = str(raw_place or "").strip()
+                m_coord = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*(?:,\s*(.*))?$", txt)
+                if m_coord:
+                    return MapWaypointSpec(
+                        waypoint_id="wp",
+                        label=(m_coord.group(3) or default_lbl)[:28],
+                        lat=float(m_coord.group(1)),
+                        lon=float(m_coord.group(2)),
+                        alt_m=40.0,
+                        source="exif_gps",
+                    )
+                if txt:
+                    hit = lookup_gazetteer_place(txt)
+                    if hit is not None:
+                        return MapWaypointSpec(
+                            waypoint_id="wp",
+                            label=hit[3][:28],
+                            lat=hit[0],
+                            lon=hit[1],
+                            alt_m=hit[2],
+                            source="gazetteer",
+                        )
+                return MapWaypointSpec(
+                    waypoint_id="wp",
+                    label=(txt or default_lbl)[:28],
+                    lat=default_lat,
+                    lon=default_lon,
+                    alt_m=40.0,
+                    source="synthetic",
+                )
+
+            wp_orig = _parse_geo_stop(op.get("origin"), 35.6762, 139.6503, "Departure")
+            wp_orig.waypoint_id = "wp_01"
+            wp_dest = _parse_geo_stop(op.get("destination"), 35.0116, 135.7681, "Destination")
+            wp_dest.waypoint_id = "wp_02"
+            req_style = str(op.get("style") or op.get("map_style") or "auto").strip().lower()
+            tm_style = (
+                req_style
+                if req_style in VALID_TRAVEL_MAP_STYLES and req_style != "auto"
+                else resolve_travel_map_style("auto", timeline.subtitles.theme or "apple_tv_glass", f"{wp_orig.label} {wp_dest.label}")
+            )
+            dist_km = haversine_km(wp_orig.lat, wp_orig.lon, wp_dest.lat, wp_dest.lon)
+            t_mode = infer_transport_mode(dist_km, wp_orig.label, wp_dest.label, hint=str(op.get("transport_mode") or "auto"))
+            placement = str(op.get("placement") or "v2_flyover").strip().lower()
+            req_dur = max(1.4, min(6.0, float(op.get("duration") or op.get("new_duration") or 3.0)))
+
+            host_v1 = None
+            if clip_id:
+                host_v1 = next((v for v in timeline.visual_track if v.id == clip_id), None)
+            elif op.get("timeline_start") is not None:
+                tgt_t = float(op["timeline_start"])
+                host_v1 = min(timeline.visual_track, key=lambda v: abs(float(v.timeline_start) - tgt_t), default=None)
+            elif timeline.visual_track:
+                cands = [v for v in timeline.visual_track if v.id != "clip_000_hook" and float(v.duration) >= 1.6]
+                host_v1 = cands[0] if cands else timeline.visual_track[0]
+
+            if host_v1 is None:
+                raise ValueError("Cannot insert travel map onto an empty timeline")
+
+            if placement == "v3_pip":
+                st = round(max(float(host_v1.timeline_start) + 0.05, float(op.get("timeline_start") or (host_v1.timeline_start + 0.15))), 2)
+                dur = round(min(req_dur, max(1.2, float(host_v1.timeline_start) + float(host_v1.duration) - st - 0.05)), 2)
+                km_lbl = f"{dist_km:.0f} km" if dist_km >= 2.0 else f"{dist_km * 1000.0:.0f} m"
+                pip_id = f"title_map_pip_{len(timeline.title_track) + 1:02d}"
+                timeline.title_track.append(
+                    TitleOverlayItem(
+                        id=pip_id,
+                        style="travel_map_pip_card",
+                        theme=timeline.subtitles.theme or "apple_tv_glass",  # type: ignore[arg-type]
+                        motion_preset="masked_rise",
+                        eyebrow="ROUTE TELEMETRY",
+                        overline="ROUTE TELEMETRY",
+                        text=f"{wp_orig.label} -> {wp_dest.label}"[:28],
+                        subtitle=f"{km_lbl} | {t_mode.upper()}",
+                        timeline_start=st,
+                        duration=dur,
+                        fade_in=0.35,
+                        fade_out=0.35,
+                        backdrop_blur=True,
+                        map_waypoints=[
+                            {**wp_orig.model_dump(mode="json"), "active": False, "completed": True},
+                            {**wp_dest.model_dump(mode="json"), "active": True, "completed": True},
+                        ],
+                        hdr_safe=bool(timeline.settings.hdr),
+                    )
+                )
+                timeline.title_track.sort(key=lambda t: t.timeline_start)
+                applied_logs.append(f"Inserted travel_map_pip_card '{pip_id}' ({wp_orig.label} -> {wp_dest.label}) at {st:.2f}s")
+            else:
+                dur = round(min(req_dur, max(1.2, float(host_v1.duration) - 0.10)), 2)
+                raw_st = float(op.get("timeline_start") if op.get("timeline_start") is not None else (host_v1.timeline_start + 0.05))
+                st = round(max(float(host_v1.timeline_start) + 0.04, min(raw_st, float(host_v1.timeline_start) + float(host_v1.duration) - dur - 0.04)), 2)
+                map_mp4 = proj / "cache" / "maps" / f"surgical_flyover_{len(timeline.broll_track) + 1:02d}.mp4"
+                render_travel_map_clip(
+                    waypoints=[wp_orig, wp_dest],
+                    output_mp4=map_mp4,
+                    style=tm_style,
+                    duration=dur,
+                    width=max(640, min(int(timeline.settings.width), 1920)),
+                    height=max(360, min(int(timeline.settings.height), 1080)),
+                    fps=int(timeline.settings.fps),
+                    leg_index=0,
+                    transport_mode=t_mode,
+                    hdr_safe=bool(timeline.settings.hdr),
+                    allow_tile_fetch=False,
+                    with_audio=False,
+                    cache_dir=proj / "cache" / "maps" / "tiles",
+                )
+                broll_id = f"broll_map_{len(timeline.broll_track) + 1:02d}"
+                timeline.broll_track.append(
+                    VisualTrackItem(
+                        id=broll_id,
+                        type="video",
+                        track_lane=2,
+                        roll_type="b_roll",
+                        shot_scale="wide",
+                        act=host_v1.act,
+                        timeline_start=st,
+                        duration=dur,
+                        source=str(map_mp4),
+                        source_in=0.0,
+                        source_out=dur,
+                        volume=0.0,
+                        audio_crossfade_sec=0.33,
+                        narrative_note=f"Surgical 2.5D Travel Map Flyover ({wp_orig.label} -> {wp_dest.label}, {dist_km:.1f} km)",
+                    )
+                )
+                timeline.broll_track.sort(key=lambda c: float(c.timeline_start))
+                applied_logs.append(f"Inserted 2.5D V2 travel map '{broll_id}' ({wp_orig.label} -> {wp_dest.label}) at {st:.2f}s ({dur:.2f}s)")
 
     # Sync BGM duration and closing cards with updated total timeline duration
     total_dur = round(timeline.total_duration, 3)

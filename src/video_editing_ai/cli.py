@@ -71,6 +71,16 @@ def cmd_agents_run(
         "--title-theme",
         help="Cinema title theme: criterion_atelier, a24_minimal, apple_tv_glass, kinfolk_magazine, archival_35mm, or kinetic_travelogue",
     ),
+    travel_map_mode: Optional[str] = typer.Option(
+        None,
+        "--travel-map-mode",
+        help="Travel map mode: auto, flyover_interlude, picture_in_picture, hybrid, or off",
+    ),
+    travel_map_style: Optional[str] = typer.Option(
+        None,
+        "--travel-map-style",
+        help="Cartography style: auto, midnight_vox_atlas, archival_expedition_parchment, aerial_relief_hybrid, or kinfolk_minimal_monograph",
+    ),
     burn_in_subtitles: Optional[bool] = typer.Option(
         None,
         "--burn-in-subtitles/--no-burn-in-subtitles",
@@ -108,6 +118,10 @@ def cmd_agents_run(
         answers["story_arc_mode"] = story_arc_mode
     if title_theme:
         answers["title_theme"] = title_theme
+    if travel_map_mode:
+        answers["travel_map_mode"] = travel_map_mode
+    if travel_map_style:
+        answers["travel_map_style"] = travel_map_style
     if burn_in_subtitles is not None:
         answers["burn_in_subtitles"] = "true" if burn_in_subtitles else "false"
     if interactive_intake:
