@@ -59,6 +59,29 @@ def _unlink_on_exit(paths: list[Path]) -> Iterator[None]:
                 pass
 
 
+def _build_color_grade_filter(fx: EffectTrackItem) -> str:
+    """Build DI color_grade filter chain, adding 10-bit HLG highlight roll-off when source highlights run hot."""
+    parts: list[str] = []
+    if fx.parameters.get("hlg_rolloff"):
+        # Smooth 10-bit limited-range YUV shoulder knee (compresses blown Pixel HLG highlights to ~203 nits)
+        parts.append(
+            "format=p010le,"
+            "lutyuv=y='clip(64+(val-64)*0.78-if(gt(val,520),0.26*(val-520),0),64,760)':"
+            "u='512+(val-512)*0.94':v='512+(val-512)*0.94'"
+        )
+    parts.append(
+        f"colorbalance=rs={float(fx.parameters.get('rs', 0.0)):.3f}:"
+        f"gs={float(fx.parameters.get('gs', 0.0)):.3f}:"
+        f"bs={float(fx.parameters.get('bs', 0.0)):.3f}"
+    )
+    parts.append(
+        f"eq=contrast={float(fx.parameters.get('contrast', 1.04)):.2f}:"
+        f"saturation={float(fx.parameters.get('saturation', 1.04)):.2f}:"
+        f"gamma={float(fx.parameters.get('gamma', 1.00)):.2f}"
+    )
+    return ",".join(parts)
+
+
 # Extensible registry mapping Stage-40/32/42 EffectTrackItem.effect_type -> FFmpeg filter builder
 EFFECT_FILTER_BUILDERS: dict[str, Callable[[EffectTrackItem], str]] = {
     "warm_glow": lambda fx: (
@@ -70,14 +93,7 @@ EFFECT_FILTER_BUILDERS: dict[str, Callable[[EffectTrackItem], str]] = {
         f"eq=contrast={float(fx.parameters.get('contrast', 1.06)):.2f}:"
         f"saturation={float(fx.parameters.get('saturation', 1.05)):.2f}"
     ),
-    "color_grade": lambda fx: (
-        f"colorbalance=rs={float(fx.parameters.get('rs', 0.0)):.3f}:"
-        f"gs={float(fx.parameters.get('gs', 0.0)):.3f}:"
-        f"bs={float(fx.parameters.get('bs', 0.0)):.3f},"
-        f"eq=contrast={float(fx.parameters.get('contrast', 1.04)):.2f}:"
-        f"saturation={float(fx.parameters.get('saturation', 1.04)):.2f}:"
-        f"gamma={float(fx.parameters.get('gamma', 1.00)):.2f}"
-    ),
+    "color_grade": _build_color_grade_filter,
     "video_stabilize": lambda fx: (
         f"deshake=rx={int(fx.parameters.get('rx', 16))}:ry={int(fx.parameters.get('ry', 16))}:edge=mirror"
     ),
@@ -544,7 +560,7 @@ def _render_video_segment(
                 cmd.extend(["-hwaccel", "videotoolbox"])
                 if use_zero_copy_vt:
                     cmd.extend(["-hwaccel_output_format", "videotoolbox_vld"])
-            elif hw.has_cuda_hwaccel:
+            elif hw.has_cuda_hwaccel and "422" not in src_pfmt:
                 cmd.extend(["-hwaccel", "cuda"])
         cmd.extend(["-i", str(item.source)])
 
@@ -563,6 +579,8 @@ def _render_video_segment(
                 [
                     "-t",
                     f"{dur:.3f}",
+                    "-filter_complex_threads",
+                    "4",
                     "-filter_complex",
                     fc_str,
                     "-map",
@@ -577,6 +595,8 @@ def _render_video_segment(
                 "aformat=sample_fmts=fltp:channel_layouts=stereo",
                 f"volume={item.volume:.3f}",
             ]
+            if item.speed != 1.0 and 0.5 <= item.speed <= 2.0:
+                af_parts.append(f"atempo={item.speed:.3f}")
             cf_in = max(item.audio_crossfade_sec, item.transition_in.duration)
             cf_out = max(item.audio_crossfade_sec, item.transition_out.duration)
             if cf_in > 0:
@@ -588,6 +608,8 @@ def _render_video_segment(
                 [
                     "-t",
                     f"{dur:.3f}",
+                    "-filter_complex_threads",
+                    "4",
                     "-filter_complex",
                     fc_str,
                     "-af",

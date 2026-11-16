@@ -16,13 +16,15 @@ from video_editing_ai.analyzer.live_photo_filter import is_live_photo_video
 from video_editing_ai.models.schema import (
     CreativeBrief,
     EditTimeline,
+    EffectTrackItem,
     PaperEdit,
     ChapterPlan,
     TimelineSettings,
     TitleOverlayItem,
     VisualTrackItem,
 )
-from video_editing_ai.renderer.ffmpeg_composer import render_timeline
+from video_editing_ai.agents.plugins.colorist_agent import HDRColoristAgent
+from video_editing_ai.renderer.ffmpeg_composer import _build_color_grade_filter, render_timeline
 from video_editing_ai.renderer.titles import THEME_SPECS, render_title_frame
 
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
@@ -214,3 +216,26 @@ def test_video_lower_third_yuv444_backdrop_blur_renders_cleanly(tmp_path: Path, 
     out_mp4 = tmp_path / f"rendered_{'hdr' if hdr_mode else 'sdr'}.mp4"
     res = render_timeline(tl, out_mp4, work_dir=tmp_path / "cache")
     assert res["video"].exists() and res["video"].stat().st_size > 20_000
+
+
+def test_hlg_highlight_rolloff_targets_hot_hlg_only() -> None:
+    """Verify 10-bit HLG highlight roll-off activates for blown-out HLG clips and spares normal clips."""
+    fx_hot = EffectTrackItem(
+        id="fx_hot",
+        effect_type="color_grade",
+        target_clip_id="c1",
+        timeline_start=0.0,
+        duration=2.0,
+        parameters={"rs": 0.02, "gs": 0.0, "bs": -0.02, "contrast": 1.0, "saturation": 1.04, "gamma": 1.02, "hlg_rolloff": True},
+    )
+    fx_normal = EffectTrackItem(
+        id="fx_norm",
+        effect_type="color_grade",
+        target_clip_id="c2",
+        timeline_start=2.0,
+        duration=2.0,
+        parameters={"rs": 0.02, "gs": 0.0, "bs": -0.02, "contrast": 1.05, "saturation": 1.04, "gamma": 0.99, "hlg_rolloff": False},
+    )
+    assert "lutyuv=" in _build_color_grade_filter(fx_hot)
+    assert "lutyuv=" not in _build_color_grade_filter(fx_normal)
+    assert HDRColoristAgent._measure_clip_stats is not None

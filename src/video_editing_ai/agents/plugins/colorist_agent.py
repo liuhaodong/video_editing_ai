@@ -164,7 +164,12 @@ class HDRColoristAgent(BaseEditingAgent):
     produces_artifacts = ["color_transform_manifest.json", "color_grade_plan.json"]
     skill_reference_file = "13_colorist_agent.md"
 
-    def _measure_clip_stats(self, source_path: str, blackboard: PipelineBlackboard) -> dict[str, float]:
+    def _measure_clip_stats(
+        self,
+        source_path: str,
+        blackboard: PipelineBlackboard,
+        video_stats_cache: Optional[dict[str, dict[str, float]]] = None,
+    ) -> dict[str, float]:
         if blackboard.catalog is not None:
             for p in blackboard.catalog.photos:
                 if p.path == source_path and p.color_stats:
@@ -172,11 +177,58 @@ class HDRColoristAgent(BaseEditingAgent):
             for v in blackboard.catalog.videos:
                 if v.path == source_path and v.color_stats:
                     return v.color_stats
+        if video_stats_cache is not None and source_path in video_stats_cache:
+            return video_stats_cache[source_path]
         sp = Path(source_path)
         if sp.exists() and sp.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".heic"}:
             try:
                 with Image.open(sp) as im:
                     return compute_image_color_stats(im)
+            except Exception:
+                pass
+        elif sp.exists() and sp.suffix.lower() in {".mp4", ".mov", ".m4v", ".mkv"}:
+            try:
+                import subprocess
+                import numpy as np
+
+                proc = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-v",
+                        "error",
+                        "-ss",
+                        "0.5",
+                        "-i",
+                        str(sp),
+                        "-vf",
+                        "scale=160:-2",
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "rawvideo",
+                        "-pix_fmt",
+                        "rgb24",
+                        "pipe:1",
+                    ],
+                    capture_output=True,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    arr = np.frombuffer(proc.stdout, dtype=np.uint8).reshape(-1, 3).astype(np.float32)
+                    luma = 0.299 * arr[:, 0] + 0.587 * arr[:, 1] + 0.114 * arr[:, 2]
+                    p05, p50, p95 = np.percentile(luma, [5, 50, 95])
+                    stats = {
+                        "mean_r": round(float(arr[:, 0].mean()), 2),
+                        "mean_g": round(float(arr[:, 1].mean()), 2),
+                        "mean_b": round(float(arr[:, 2].mean()), 2),
+                        "p05_luma": round(float(p05), 2),
+                        "p50_luma": round(float(p50), 2),
+                        "p95_luma": round(float(p95), 2),
+                        "est_kelvin": 5500.0,
+                    }
+                    if video_stats_cache is not None:
+                        video_stats_cache[source_path] = stats
+                    return stats
             except Exception:
                 pass
         return {
@@ -242,6 +294,7 @@ class HDRColoristAgent(BaseEditingAgent):
         clip_grades: list[ClipColorGrade] = []
         color_transforms: list[ClipColorTransform] = []
         color_effects: list[EffectTrackItem] = []
+        video_stats_cache: dict[str, dict[str, float]] = {}
 
         all_visual_items = list(timeline.visual_track) + list(timeline.broll_track)
         for item in all_visual_items:
@@ -257,9 +310,16 @@ class HDRColoristAgent(BaseEditingAgent):
             if item.track_lane != 1:
                 continue
 
-            stats = self._measure_clip_stats(item.source, blackboard)
+            stats = self._measure_clip_stats(item.source, blackboard, video_stats_cache=video_stats_cache)
             kelvin = float(stats.get("est_kelvin", 5500.0))
             p50 = float(stats.get("p50_luma", 128.0))
+            p95 = float(stats.get("p95_luma", 200.0))
+            is_hot_hlg = (
+                hdr_active
+                and item.type == "video"
+                and ct.input_classification == "bt2020_hlg_10bit"
+                and (p95 > 195.0 or p50 > 135.0)
+            )
             look_name = chapter_looks.get(item.act or "", default_look)
             if look_name not in FILM_STOCK_PRESETS:
                 look_name = default_look
@@ -271,6 +331,8 @@ class HDRColoristAgent(BaseEditingAgent):
             wb_b = round(max(-0.08, min(0.08, preset["bs"] - kelvin_delta * 0.04)), 4)
             luma_err = (126.0 - p50) / 255.0
             gamma_corr = round(max(0.92, min(1.08, preset["gamma"] + luma_err * 0.12)), 3)
+            eff_contrast = 1.00 if is_hot_hlg else preset["contrast"]
+            eff_gamma = 1.02 if is_hot_hlg else gamma_corr
 
             clip_grades.append(
                 ClipColorGrade(
@@ -280,12 +342,12 @@ class HDRColoristAgent(BaseEditingAgent):
                     wb_red_shift=wb_r,
                     wb_green_shift=wb_g,
                     wb_blue_shift=wb_b,
-                    contrast=preset["contrast"],
+                    contrast=eff_contrast,
                     saturation=preset["saturation"],
-                    gamma=gamma_corr,
+                    gamma=eff_gamma,
                     rationale=(
                         f"{ct.input_classification} -> {ct.transform_mode}; matched {kelvin:.0f}K source "
-                        f"to '{look_name}' DI look."
+                        f"to '{look_name}' DI look{' (with 10-bit HLG highlight roll-off)' if is_hot_hlg else ''}."
                     ),
                 )
             )
@@ -301,9 +363,10 @@ class HDRColoristAgent(BaseEditingAgent):
                         "rs": wb_r,
                         "gs": wb_g,
                         "bs": wb_b,
-                        "contrast": preset["contrast"],
+                        "contrast": eff_contrast,
                         "saturation": preset["saturation"],
-                        "gamma": gamma_corr,
+                        "gamma": eff_gamma,
+                        "hlg_rolloff": is_hot_hlg,
                         "look": look_name,
                         "src_trc": ct.color_trc,
                         "src_primaries": ct.color_primaries,
