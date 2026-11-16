@@ -76,6 +76,11 @@ if (-not (Test-Path $VenvPy)) {
 Write-Host "==> Upgrading pip, setuptools, and wheel"
 & $VenvPy -m pip install --upgrade pip setuptools wheel
 
+if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+    Write-Host "==> NVIDIA GPU detected; installing CUDA 12.4 PyTorch runtime"
+    & $VenvPy -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu124
+}
+
 $Extras = @()
 if (-not $NoDev) { $Extras += "dev" }
 if ($WithAntigravity) { $Extras += "antigravity" }

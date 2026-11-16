@@ -1,11 +1,12 @@
-"""Batched Metal Performance Shaders (PyTorch MPS) 4K photo compositor & async pipe streamer."""
+"""Batched GPU (NVIDIA CUDA / Apple Metal MPS) 4K photo compositor & async pipe streamer."""
 
 from __future__ import annotations
 
+import contextlib
 import math
 import queue
 import threading
-from typing import IO, Any, Optional
+from typing import IO, Any, Iterator, Optional
 
 import numpy as np
 from PIL import Image
@@ -17,6 +18,7 @@ from ..hardware import select_torch_device
 
 # Serialize Metal command buffer submissions across threads to avoid PyTorch 2.2 MPS driver races.
 _MPS_LOCK = threading.Lock()
+_CUDA_MEM_FRACTION_SET: set[int] = set()
 
 
 def _ease_in_out_cubic(t: float) -> float:
@@ -64,15 +66,15 @@ def _pil_to_tensor(
 
 class MPSPhotoCompositor:
     """
-    GPU-accelerated batched photo frame compositor targeting Apple/AMD Metal ('mps')
-    with identical CPU PyTorch fallback for parity tests and CI.
+    GPU-accelerated batched photo frame compositor targeting NVIDIA CUDA ('cuda') and
+    Apple/AMD Metal ('mps') with identical CPU PyTorch fallback for parity tests and CI.
     """
 
     def __init__(self, ctx: dict[str, Any], device_override: Optional[str] = None) -> None:
         self.ctx = ctx
         dev_name = device_override or select_torch_device()
         self.device = torch.device(dev_name)
-        self.work_dtype = torch.float16 if self.device.type == "mps" else torch.float32
+        self.work_dtype = torch.float16 if self.device.type in ("mps", "cuda") else torch.float32
         self.width = int(ctx["width"])
         self.height = int(ctx["height"])
         self.mode = str(ctx["mode"])
@@ -82,16 +84,41 @@ class MPSPhotoCompositor:
         self._grid_1d_cache: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._gauss_kernel_cache: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._closed = False
+        if self.device.type == "cuda":
+            dev_idx = self.device.index if self.device.index is not None else 0
+            with _MPS_LOCK:
+                if dev_idx not in _CUDA_MEM_FRACTION_SET:
+                    try:
+                        # Bound PyTorch caching allocator so external FFmpeg NVENC/NVDEC sessions retain headroom
+                        torch.cuda.set_per_process_memory_fraction(0.32, dev_idx)
+                    except Exception:
+                        pass
+                    _CUDA_MEM_FRACTION_SET.add(dev_idx)
+        self._cuda_stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
 
-        with _MPS_LOCK:
+        with self._accel_guard():
             self._upload_ctx_textures()
+            if self._cuda_stream is not None:
+                self._cuda_stream.synchronize()
+
+    @contextlib.contextmanager
+    def _accel_guard(self) -> Iterator[None]:
+        """Serialize Metal command buffers on MPS; isolate per-compositor CUDA streams on NVIDIA."""
+        if self.device.type == "mps":
+            with _MPS_LOCK:
+                yield
+        elif self.device.type == "cuda" and self._cuda_stream is not None:
+            with torch.cuda.stream(self._cuda_stream):
+                yield
+        else:
+            yield
 
     def close(self) -> None:
         """Release GPU textures explicitly."""
         if self._closed:
             return
         self._closed = True
-        with _MPS_LOCK:
+        with self._accel_guard():
             self._textures.clear()
             self._grid_1d_cache.clear()
             self._gauss_kernel_cache.clear()
@@ -99,6 +126,11 @@ class MPSPhotoCompositor:
                 try:
                     torch.mps.synchronize()
                     torch.mps.empty_cache()
+                except Exception:
+                    pass
+            elif self._cuda_stream is not None:
+                try:
+                    self._cuda_stream.synchronize()
                 except Exception:
                     pass
 
@@ -255,7 +287,9 @@ class MPSPhotoCompositor:
         # PyTorch MPS/CPU F.grid_sample expects matching float32 inputs & grid for exact sub-pixel stability
         src_f32 = src.float().expand(batch_n, -1, -1, -1)
         warped = F.grid_sample(src_f32, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
-        return warped.to(dtype=self.work_dtype)
+        out = warped.to(dtype=self.work_dtype)
+        del grid, src_f32, warped
+        return out
 
     def _crop_plane_batch(
         self,
@@ -1007,21 +1041,17 @@ class MPSPhotoCompositor:
 
         return canvas
 
-    def render_batch_rgb(
+    def _render_batch_impl(
         self,
         frame_indices: list[int],
         total_frames: int,
         duration: float,
         fps: int,
     ) -> torch.Tensor:
-        """Synthesize a batch of frames and return contiguous CPU uint8 tensor `(B, H, W, 3)`."""
-        if not frame_indices:
-            return torch.empty((0, self.height, self.width, 3), dtype=torch.uint8)
-
         denom = max(1, total_frames - 1)
         t_norms = [f_idx / denom for f_idx in frame_indices]
 
-        with _MPS_LOCK:
+        with self._accel_guard():
             with torch.no_grad():
                 canvas = self._synthesize_base_modes(t_norms)
                 canvas = self._apply_overlay_fx_batch(canvas, t_norms=t_norms, frame_indices=frame_indices)
@@ -1036,9 +1066,45 @@ class MPSPhotoCompositor:
                 canvas = self._composite_frosted_card_batch(
                     canvas, frame_indices=frame_indices, duration=duration, fps=fps
                 )
-                out_u8 = canvas.clamp(0.0, 255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous().cpu()
+                gpu_u8 = canvas.clamp(0.0, 255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
                 del canvas
+                out_u8 = gpu_u8.to("cpu", non_blocking=False)
+                if self._cuda_stream is not None:
+                    self._cuda_stream.synchronize()
                 return out_u8
+
+    def render_batch_rgb(
+        self,
+        frame_indices: list[int],
+        total_frames: int,
+        duration: float,
+        fps: int,
+    ) -> torch.Tensor:
+        """Synthesize a batch of frames and return contiguous CPU uint8 tensor `(B, H, W, 3)`."""
+        if not frame_indices:
+            return torch.empty((0, self.height, self.width, 3), dtype=torch.uint8)
+
+        try:
+            return self._render_batch_impl(
+                frame_indices=frame_indices,
+                total_frames=total_frames,
+                duration=duration,
+                fps=fps,
+            )
+        except torch.OutOfMemoryError:
+            if self.device.type != "cuda" or len(frame_indices) <= 1:
+                raise
+            torch.cuda.empty_cache()
+            singles = [
+                self._render_batch_impl(
+                    frame_indices=[f_idx],
+                    total_frames=total_frames,
+                    duration=duration,
+                    fps=fps,
+                )
+                for f_idx in frame_indices
+            ]
+            return torch.cat(singles, dim=0)
 
 
 def synthesize_batch_rgb_mps(
@@ -1067,7 +1133,7 @@ def stream_photo_frames_to_pipe(
     device_override: Optional[str] = None,
 ) -> None:
     """
-    Synthesize photo clip frames in batches on MPS GPU and stream contiguous RGB24 buffers into
+    Synthesize photo clip frames in batches on GPU (CUDA/MPS) and stream contiguous RGB24 buffers into
     `pipe_stdin` through a bounded async queue so GPU compute overlaps with FFmpeg encoding.
     """
     comp = MPSPhotoCompositor(ctx=ctx, device_override=device_override)
@@ -1098,8 +1164,8 @@ def stream_photo_frames_to_pipe(
 
     try:
         eff_batch = (
-            min(batch_size, 4)
-            if int(ctx.get("width", 0)) >= 3840 and batch_size >= 8
+            min(max(1, batch_size), 4)
+            if int(ctx.get("width", 0)) >= 3840
             else max(1, batch_size)
         )
         for start_idx in range(0, total_frames, eff_batch):

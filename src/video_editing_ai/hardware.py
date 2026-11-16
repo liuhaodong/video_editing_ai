@@ -1,4 +1,4 @@
-"""Unified macOS AMD GPU (MPS + OpenCL), Apple VideoToolbox, and multi-core hardware policy helpers."""
+"""Unified GPU (NVIDIA CUDA/NVENC/NVDEC, macOS AMD MPS + OpenCL, VideoToolbox) and multi-core hardware policy helpers."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from typing import Iterator, Optional
 _LOCK = threading.RLock()
 _VT_HDR_ENCODE_LOCK = threading.Lock()
 
-_VALID_ACCEL_POLICIES = frozenset({"auto", "mps", "opencl", "cpu"})
+_VALID_ACCEL_POLICIES = frozenset({"auto", "cuda", "mps", "opencl", "cpu"})
 
 _PROFILE_CACHE: dict[tuple[str, str], "HardwareProfile"] = {}
 _FILTERS_CACHE: Optional[frozenset[str]] = None
@@ -50,6 +50,9 @@ class HardwareProfile:
     vt_supports_qscale_hdr: bool
     vt_supports_qscale_sdr: bool
     discrete_gpu_name: str
+    has_cuda: bool = False
+    has_cuda_hwaccel: bool = False
+    cuda_vram_gb: float = 0.0
 
 
 def reset_hardware_cache() -> None:
@@ -67,7 +70,7 @@ def reset_hardware_cache() -> None:
 
 
 def get_accel_policy() -> str:
-    """Return normalized acceleration policy from AI_EDITOR_ACCEL ('auto'|'mps'|'opencl'|'cpu')."""
+    """Return normalized acceleration policy from AI_EDITOR_ACCEL ('auto'|'cuda'|'mps'|'opencl'|'cpu')."""
     raw = os.environ.get("AI_EDITOR_ACCEL", "auto").strip().lower()
     return raw if raw in _VALID_ACCEL_POLICIES else "auto"
 
@@ -86,23 +89,81 @@ def get_io_worker_count(default_cap: int = 8) -> int:
     return max(1, min(default_cap, cpus))
 
 
-def select_torch_device() -> str:
-    """Select 'mps' when AI_EDITOR_ACCEL allows it and PyTorch MPS backend is operational, else 'cpu'."""
-    policy = get_accel_policy()
-    if policy not in ("auto", "mps"):
+def get_render_worker_count(hw: Optional[HardwareProfile] = None) -> int:
+    """Return optimal concurrent V1/V2 render worker count for the active GPU/CPU profile."""
+    raw = os.environ.get("AI_EDITOR_MAX_WORKERS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed >= 1:
+                return parsed
+        except ValueError:
+            pass
+    prof = hw or get_hardware_profile()
+    if prof.platform == "darwin":
+        return min(5, max(1, prof.cpu_count // 4))
+    if prof.has_cuda or "nvenc" in prof.best_hdr_encoder:
+        return min(6, max(4, prof.cpu_count // 5))
+    return min(8, max(2, prof.cpu_count // 4))
+
+
+def select_torch_device(policy: Optional[str] = None) -> str:
+    """Select 'cuda', 'mps', or 'cpu' honoring AI_EDITOR_ACCEL policy and operational backends."""
+    eff = policy.strip().lower() if policy else get_accel_policy()
+    if eff not in _VALID_ACCEL_POLICIES:
+        eff = "auto"
+    if eff == "cpu":
         return "cpu"
     try:
         import torch
 
-        if (
-            hasattr(torch.backends, "mps")
-            and torch.backends.mps.is_built()
-            and torch.backends.mps.is_available()
-        ):
-            return "mps"
+        if eff in ("auto", "cuda"):
+            if torch.cuda.is_available():
+                return "cuda"
+            if eff == "cuda":
+                return "cpu"
+        if eff in ("auto", "mps", "opencl"):
+            if (
+                hasattr(torch.backends, "mps")
+                and torch.backends.mps.is_built()
+                and torch.backends.mps.is_available()
+            ):
+                return "mps"
     except Exception:
         pass
     return "cpu"
+
+
+def _detect_cuda_device_info(has_cuda: bool) -> tuple[str, float]:
+    """Return (device_name, total_vram_gb) for active CUDA GPU or nvidia-smi adapter."""
+    if has_cuda:
+        try:
+            import torch
+
+            name = str(torch.cuda.get_device_name(0) or "").strip()
+            props = torch.cuda.get_device_properties(0)
+            vram_gb = round(float(props.total_memory) / float(1024 ** 3), 2)
+            return name, vram_gb
+        except Exception:
+            pass
+    if sys.platform != "darwin" and shutil.which("nvidia-smi"):
+        try:
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=4,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                first_line = proc.stdout.strip().splitlines()[0]
+                parts = [p.strip() for p in first_line.split(",")]
+                name = parts[0] if parts else ""
+                vram_gb = round(float(parts[1]) / 1024.0, 2) if len(parts) > 1 and parts[1] else 0.0
+                return name, vram_gb
+        except Exception:
+            pass
+    return "", 0.0
 
 
 def _detect_macos_gpus() -> list[dict[str, str]]:
@@ -392,8 +453,10 @@ def get_hardware_profile() -> HardwareProfile:
         if cached is not None:
             return cached
 
-        torch_dev = select_torch_device()
+        torch_dev = select_torch_device(policy=policy)
+        has_cuda = torch_dev == "cuda"
         has_mps = torch_dev == "mps"
+        cuda_hwaccel = (policy != "cpu") and has_ffmpeg_hwaccel("cuda")
 
         configure_opencv_amd_opencl()
         ocl_active, ocl_spec, has_amd_ocl = _OPENCL_STATE or (False, "", False)
@@ -409,6 +472,11 @@ def get_hardware_profile() -> HardwareProfile:
         vt_q_sdr = supports_videotoolbox_qscale("h264_videotoolbox", "yuv420p") if best_sdr == "h264_videotoolbox" else False
 
         _, discrete_name = _find_amd_gpu_index_and_name(_detect_macos_gpus())
+        cuda_vram_gb = 0.0
+        if policy != "cpu":
+            cuda_name, cuda_vram_gb = _detect_cuda_device_info(has_cuda)
+            if not discrete_name and cuda_name:
+                discrete_name = cuda_name
 
         prof = HardwareProfile(
             platform=sys.platform,
@@ -428,6 +496,9 @@ def get_hardware_profile() -> HardwareProfile:
             vt_supports_qscale_hdr=vt_q_hdr,
             vt_supports_qscale_sdr=vt_q_sdr,
             discrete_gpu_name=discrete_name,
+            has_cuda=has_cuda,
+            has_cuda_hwaccel=cuda_hwaccel,
+            cuda_vram_gb=cuda_vram_gb if has_cuda else 0.0,
         )
         _PROFILE_CACHE[cache_key] = prof
         return prof

@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Any, Callable, Iterator, Optional
 
 from ..analyzer.media_probe import probe_video_file
-from ..hardware import caffeinate_guard, get_hardware_profile, get_io_worker_count
+from ..hardware import (
+    caffeinate_guard,
+    get_hardware_profile,
+    get_io_worker_count,
+    get_render_worker_count,
+    has_ffmpeg_filter,
+)
 from ..models.schema import EditTimeline, EffectTrackItem, TitleOverlayItem, VisualTrackItem
 from .ken_burns import (
     build_hdr_color_filters,
@@ -25,7 +33,7 @@ from .ken_burns import (
     render_frosted_video_overlay_png,
     render_photo_clip,
 )
-from .kinetic_titles import render_glass_mask_png, render_kinetic_title_mov
+from .kinetic_titles import compute_kinetic_roi, render_glass_mask_png, render_kinetic_title_mov
 from .subtitles import export_ass_subtitles, export_srt_subtitles
 from .titles import compute_glass_pill_rect, render_title_png
 
@@ -85,8 +93,8 @@ def _video_encoder_args(hdr: bool, force_software: bool = False) -> list[str]:
     return get_video_encoder_args(hdr=hdr, force_software=force_software)
 
 
-def _probe_video_extradata_sig(mp4_path: Path) -> tuple[str, str]:
-    """Return (codec_name, extradata) signature of stream v:0 so mixed parameter sets are never blindly stream-copied."""
+def _probe_video_extradata_sig(mp4_path: Path) -> tuple[str, str, int, int, bool]:
+    """Return (codec_name, extradata, width, height, has_rot_sidedata) of stream v:0."""
     try:
         proc = subprocess.run(
             [
@@ -96,7 +104,7 @@ def _probe_video_extradata_sig(mp4_path: Path) -> tuple[str, str]:
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=codec_name,extradata",
+                "stream=codec_name,width,height,extradata:stream_side_data",
                 "-show_data",
                 "-of",
                 "json",
@@ -107,15 +115,27 @@ def _probe_video_extradata_sig(mp4_path: Path) -> tuple[str, str]:
             check=False,
         )
         if proc.returncode != 0:
-            return ("", "")
+            return ("", "", 0, 0, False)
         data = json.loads(proc.stdout or "{}")
         streams = data.get("streams") or []
         if not streams:
-            return ("", "")
+            return ("", "", 0, 0, False)
         s = streams[0]
-        return (str(s.get("codec_name") or ""), str(s.get("extradata") or ""))
+        sd_list = s.get("side_data_list") or []
+        has_rot = any(
+            "display" in str(sd.get("side_data_type") or "").lower() or "rotation" in sd
+            for sd in sd_list
+            if isinstance(sd, dict)
+        )
+        return (
+            str(s.get("codec_name") or ""),
+            str(s.get("extradata") or ""),
+            int(s.get("width") or 0),
+            int(s.get("height") or 0),
+            has_rot,
+        )
     except Exception:
-        return ("", "")
+        return ("", "", 0, 0, False)
 
 
 def _concat_segments_safe(
@@ -143,7 +163,14 @@ def _concat_segments_safe(
             sigs = list(ex.map(_probe_video_extradata_sig, segment_files))
     else:
         sigs = [_probe_video_extradata_sig(p) for p in segment_files]
-    uniform_extradata = len(set(sigs)) == 1 and bool(sigs[0][0]) and bool(sigs[0][1])
+    uniform_extradata = (
+        len(set(sigs)) == 1
+        and bool(sigs[0][0])
+        and bool(sigs[0][1])
+        and sigs[0][2] > 0
+        and sigs[0][3] > 0
+        and not sigs[0][4]
+    )
 
     if uniform_extradata:
         concat_cmd = [
@@ -176,20 +203,32 @@ def _concat_segments_safe(
             shutil.copy2(inputs[0], target_mp4)
             return
 
+        target_w, target_h = 3840, 2160
+        first_sig = _probe_video_extradata_sig(inputs[0])
+        if first_sig[2] > 0 and first_sig[3] > 0:
+            target_w, target_h = first_sig[2], first_sig[3]
+        sd_part = "sidedata=mode=delete," if has_ffmpeg_filter("sidedata") else ""
+        v_norm = (
+            f"{sd_part}setsar=1:1,"
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black"
+        )
         v_post = (
-            f"fps={fps},format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc"
+            f"fps={fps},format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv"
             if hdr
             else f"fps={fps},format=yuv420p"
         )
-        in_pads = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(len(inputs)))
+        norm_filters = [f"[{i}:v:0]{v_norm}[vn{i}]" for i in range(len(inputs))]
+        in_pads = "".join(f"[vn{i}][{i}:a:0]" for i in range(len(inputs)))
         fc = (
+            f"{';'.join(norm_filters)};"
             f"{in_pads}concat=n={len(inputs)}:v=1:a=1[vcat][acat];"
             f"[vcat]{v_post}[vout];"
             f"[acat]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
         )
         in_args: list[str] = []
         for p in inputs:
-            in_args.extend(["-i", str(p)])
+            in_args.extend(["-display_rotation:v:0", "0", "-i", str(p)])
 
         def _cmd(force_sw: bool) -> list[str]:
             return [
@@ -228,13 +267,21 @@ def _concat_segments_safe(
         _run_filter_concat(segment_files, output_mp4)
         return output_mp4
 
-    chunk_files: list[Path] = []
+    chunk_specs = [
+        (segment_files[c_idx : c_idx + chunk_size], w_dir / f"concat_chunk_{c_idx // chunk_size:02d}.mp4")
+        for c_idx in range(0, len(segment_files), chunk_size)
+    ]
+    chunk_files = [cm for _, cm in chunk_specs]
     try:
-        for c_idx in range(0, len(segment_files), chunk_size):
-            chunk_inputs = segment_files[c_idx : c_idx + chunk_size]
-            chunk_mp4 = w_dir / f"concat_chunk_{c_idx // chunk_size:02d}.mp4"
-            _run_filter_concat(chunk_inputs, chunk_mp4)
-            chunk_files.append(chunk_mp4)
+        chunk_workers = max(1, min(4, len(chunk_specs)))
+        if chunk_workers > 1:
+            with ThreadPoolExecutor(max_workers=chunk_workers) as pool:
+                futs = [pool.submit(_run_filter_concat, ci, cm) for ci, cm in chunk_specs]
+                for fut in futs:
+                    fut.result()
+        else:
+            for ci, cm in chunk_specs:
+                _run_filter_concat(ci, cm)
         _concat_segments_safe(
             segment_files=chunk_files,
             output_mp4=output_mp4,
@@ -312,9 +359,11 @@ def _render_video_segment(
         and item.paired_visual_source
         and Path(item.paired_visual_source).exists()
     )
+    output_mp4.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = output_mp4.with_name(f".{output_mp4.stem}.tmp_{os.getpid()}_{threading.get_ident()}.mp4")
     card_png: Optional[Path] = None
     if has_doc_card or has_paired_photo:
-        card_png = output_mp4.with_suffix(".card.png")
+        card_png = output_mp4.with_name(f".{output_mp4.stem}.card_{os.getpid()}_{threading.get_ident()}.png")
         if has_doc_card:
             render_frosted_video_overlay_png(
                 output_png=card_png,
@@ -371,6 +420,8 @@ def _render_video_segment(
     )
 
     post_filters: list[str] = [f"fps={fps}", "setsar=1:1"]
+    if has_ffmpeg_filter("sidedata"):
+        post_filters.append("sidedata=mode=delete")
     for fx in attached_effects or []:
         builder = EFFECT_FILTER_BUILDERS.get(fx.effect_type)
         if builder is not None:
@@ -468,7 +519,7 @@ def _render_video_segment(
         out_v_label = "[vout]"
         filter_complex_parts.append(f"{cur_v}{','.join(post_filters)}{out_v_label}")
 
-    def _build_cmd(force_sw: bool, use_zero_copy_vt: bool = False) -> list[str]:
+    def _build_cmd(force_sw: bool, use_zero_copy_vt: bool = False, use_hw_decode: bool = True) -> list[str]:
         cmd = [
             "ffmpeg",
             "-y",
@@ -478,10 +529,13 @@ def _render_video_segment(
             "-ss",
             f"{src_in:.3f}",
         ]
-        if not force_sw and hw.has_videotoolbox_hwaccel:
-            cmd.extend(["-hwaccel", "videotoolbox"])
-            if use_zero_copy_vt:
-                cmd.extend(["-hwaccel_output_format", "videotoolbox_vld"])
+        if not force_sw and use_hw_decode:
+            if hw.has_videotoolbox_hwaccel:
+                cmd.extend(["-hwaccel", "videotoolbox"])
+                if use_zero_copy_vt:
+                    cmd.extend(["-hwaccel_output_format", "videotoolbox_vld"])
+            elif hw.has_cuda_hwaccel:
+                cmd.extend(["-hwaccel", "cuda"])
         cmd.extend(["-i", str(item.source)])
 
         if not has_audio or item.volume <= 0.0:
@@ -537,14 +591,10 @@ def _render_video_segment(
 
         v_enc = _video_encoder_args(hdr, force_software=force_sw)
         if use_zero_copy_vt:
-            v_enc = _strip_pix_fmt_args(v_enc) + [
-                "-fps_mode",
-                "cfr",
-                "-color_range",
-                "tv",
-                "-aspect",
-                f"{width}:{height}",
-            ]
+            extra_vt = ["-fps_mode", "cfr", "-aspect", f"{width}:{height}"]
+            if "-color_range" not in v_enc:
+                extra_vt.extend(["-color_range", "tv"])
+            v_enc = _strip_pix_fmt_args(v_enc) + extra_vt
 
         cmd.extend(
             [
@@ -555,24 +605,85 @@ def _render_video_segment(
                 "-b:a",
                 "256k",
                 "-shortest",
-                str(output_mp4),
+                str(tmp_out),
             ]
         )
         return cmd
 
     from ..hardware import videotoolbox_hdr_encode_guard
 
-    hw_enc_args = _video_encoder_args(hdr, force_software=False)
-    with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
-        proc = subprocess.run(_build_cmd(force_sw=False, use_zero_copy_vt=can_zero_copy_vt), capture_output=True, text=True, check=False)
-        if proc.returncode != 0 and can_zero_copy_vt:
-            proc = subprocess.run(_build_cmd(force_sw=False, use_zero_copy_vt=False), capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        # Automatic retry with software libx265 if hardware encoder session limit was reached
-        proc = subprocess.run(_build_cmd(force_sw=True, use_zero_copy_vt=False), capture_output=True, text=True, check=False)
+    try:
+        hw_enc_args = _video_encoder_args(hdr, force_software=False)
+        with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
+            proc = subprocess.run(
+                _build_cmd(force_sw=False, use_zero_copy_vt=can_zero_copy_vt, use_hw_decode=True),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0 and can_zero_copy_vt:
+                tmp_out.unlink(missing_ok=True)
+                proc = subprocess.run(
+                    _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=True),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            if proc.returncode != 0 and (hw.has_cuda_hwaccel or hw.has_videotoolbox_hwaccel):
+                # Retry hardware encode with CPU decode if source pixel format (e.g. 10-bit 4:2:2) rejects NVDEC
+                tmp_out.unlink(missing_ok=True)
+                proc = subprocess.run(
+                    _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=False),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
         if proc.returncode != 0:
-            raise RuntimeError(f"FFmpeg video segment render failed for {item.source}: {proc.stderr}")
-    return output_mp4
+            # Automatic retry with software libx265 if hardware encoder session limit was reached
+            tmp_out.unlink(missing_ok=True)
+            proc = subprocess.run(
+                _build_cmd(force_sw=True, use_zero_copy_vt=False, use_hw_decode=False),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"FFmpeg video segment render failed for {item.source}: {proc.stderr}")
+        if is_portrait and not has_ffmpeg_filter("sidedata") and tmp_out.exists():
+            # Fallback container rotation strip only when FFmpeg lacks libavfilter `sidedata`
+            clean_tmp = tmp_out.with_suffix(".norot.mp4")
+            remux = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-display_rotation:v:0",
+                    "0",
+                    "-i",
+                    str(tmp_out),
+                    "-c",
+                    "copy",
+                    "-metadata:s:v:0",
+                    "rotate=0",
+                    *(["-tag:v", "hvc1"] if hdr else []),
+                    str(clean_tmp),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if remux.returncode == 0 and clean_tmp.exists() and clean_tmp.stat().st_size > 1024:
+                os.replace(clean_tmp, tmp_out)
+            else:
+                clean_tmp.unlink(missing_ok=True)
+        os.replace(tmp_out, output_mp4)
+        return output_mp4
+    finally:
+        tmp_out.unlink(missing_ok=True)
+        if card_png is not None:
+            card_png.unlink(missing_ok=True)
 
 
 def _build_ducking_volume_expr(
@@ -635,6 +746,67 @@ def _build_ducking_volume_expr(
     return base_expr
 
 
+def _render_single_title_artifact(task: dict[str, Any]) -> dict[str, Any]:
+    """Worker-safe renderer for one static or kinetic Track V3 title overlay + optional glass mask."""
+    t_item = TitleOverlayItem.model_validate(task["item_dict"])
+    width = int(task["width"])
+    height = int(task["height"])
+    fps = int(task["fps"])
+    hdr = bool(task["hdr"])
+    kind = str(task["kind"])
+    ov_path = Path(str(task["overlay_path"]))
+    glass_rect_raw = task.get("glass_rect")
+    glass_rect = tuple(int(v) for v in glass_rect_raw) if glass_rect_raw is not None else None
+    mask_path_str = task.get("glass_mask_path")
+
+    ov_path.parent.mkdir(parents=True, exist_ok=True)
+    if glass_rect is not None and mask_path_str:
+        mask_p = Path(str(mask_path_str))
+        if not (mask_p.exists() and mask_p.stat().st_size > 64):
+            tmp_mask = mask_p.with_name(f".{mask_p.stem}.tmp_{os.getpid()}{mask_p.suffix}")
+            try:
+                render_glass_mask_png(glass_rect, tmp_mask)
+                os.replace(tmp_mask, mask_p)
+            except Exception:
+                tmp_mask.unlink(missing_ok=True)
+                raise
+
+    if kind == "static_png":
+        tmp_ov = ov_path.with_name(f".{ov_path.stem}.tmp_{os.getpid()}{ov_path.suffix}")
+        try:
+            render_title_png(t_item, tmp_ov, width=width, height=height, hdr_safe=hdr)
+            os.replace(tmp_ov, ov_path)
+        except Exception:
+            tmp_ov.unlink(missing_ok=True)
+            raise
+        roi = (0, 0, width, height)
+    else:
+        tmp_ov = ov_path.with_name(f".{ov_path.stem}.tmp_{os.getpid()}.mov")
+        try:
+            _, roi = render_kinetic_title_mov(
+                t_item,
+                tmp_ov,
+                width=width,
+                height=height,
+                fps=fps,
+                hdr_safe=hdr,
+                transparent_glass_body=(glass_rect is not None),
+            )
+            os.replace(tmp_ov, ov_path)
+        except Exception:
+            tmp_ov.unlink(missing_ok=True)
+            raise
+
+    return {
+        "idx": int(task["idx"]),
+        "kind": kind,
+        "overlay_path": str(ov_path),
+        "roi": tuple(int(v) for v in roi),
+        "glass_rect": glass_rect,
+        "glass_mask_path": str(mask_path_str) if mask_path_str else None,
+    }
+
+
 def render_timeline(
     timeline: EditTimeline,
     output_mp4: str | Path,
@@ -655,6 +827,8 @@ def render_timeline(
 
     timeline.recalculate_sequential_starts()
 
+    hw = get_hardware_profile()
+    render_workers_cap = get_render_worker_count(hw)
     width = timeline.settings.width
     height = timeline.settings.height
     fps = timeline.settings.fps
@@ -683,6 +857,7 @@ def render_timeline(
             sig_payload = json.dumps(
                 {
                     "v": 4,
+                    "mux_norm": "tv_norot_v2",
                     "b_item": b_item.model_dump(mode="json"),
                     "w": width,
                     "h": height,
@@ -722,8 +897,7 @@ def render_timeline(
                     hdr=hdr,
                 )
 
-            b_cap = 4 if sys.platform == "darwin" else 5
-            b_workers = max(1, min(b_cap, get_io_worker_count(default_cap=b_cap), len(broll_tasks)))
+            b_workers = max(1, min(render_workers_cap, len(broll_tasks)))
             with ThreadPoolExecutor(max_workers=b_workers) as pool:
                 for fut in as_completed([pool.submit(_render_broll_one, bt) for bt in broll_tasks]):
                     fut.result()
@@ -733,45 +907,99 @@ def render_timeline(
             for t in timeline.title_track
             if t.timeline_start < total_dur
         ]
-        title_entries_all: list[dict[str, Any]] = []
+        title_entries_all: list[dict[str, Any]] = [{} for _ in active_titles]
+        title_miss_tasks: list[dict[str, Any]] = []
         for t_idx, t_item in enumerate(active_titles):
             glass_rect = compute_glass_pill_rect(t_item, width=width, height=height) if t_item.backdrop_blur else None
-            glass_mask_path: Optional[Path] = None
-            if glass_rect is not None:
-                glass_mask_path = titles_dir / f"_glass_mask_{t_idx + 1:03d}_{t_item.id}.png"
-                render_glass_mask_png(glass_rect, glass_mask_path)
-                temp_title_artifacts.append(glass_mask_path)
-
-            if getattr(t_item, "motion_preset", "masked_rise") == "static":
-                png_path = titles_dir / f"title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.png"
-                render_title_png(t_item, png_path, width=width, height=height, hdr_safe=hdr)
-                overlay_path = png_path
-                roi = (0, 0, width, height)
-                kind = "static_png"
-            else:
-                mov_path = titles_dir / f"_kin_title_{t_idx + 1:03d}_{t_item.id}_{'hdr' if hdr else 'sdr'}.mov"
-                overlay_path, roi = render_kinetic_title_mov(
-                    t_item,
-                    mov_path,
-                    width=width,
-                    height=height,
-                    fps=fps,
-                    hdr_safe=hdr,
-                    transparent_glass_body=(glass_rect is not None),
-                )
-                temp_title_artifacts.append(mov_path)
-                kind = "kinetic_mov"
-
-            title_entries_all.append(
+            kind = "static_png" if getattr(t_item, "motion_preset", "masked_rise") == "static" else "kinetic_mov"
+            roi = (0, 0, width, height) if kind == "static_png" else compute_kinetic_roi(t_item, width=width, height=height)
+            item_dict = t_item.model_dump(mode="json")
+            t_sig_payload = json.dumps(
                 {
+                    "v": "kin_v2",
+                    "item": item_dict,
+                    "w": width,
+                    "h": height,
+                    "fps": fps,
+                    "hdr": hdr,
+                    "glass": glass_rect is not None,
+                },
+                sort_keys=True,
+            )
+            t_hash = hashlib.sha1(t_sig_payload.encode("utf-8")).hexdigest()[:8]
+            safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", str(t_item.id or "title"))[:48] or "title"
+            glass_mask_path: Optional[Path] = (
+                titles_dir / f"glass_mask_{t_idx + 1:03d}_{safe_id}_{t_hash}.png"
+                if glass_rect is not None
+                else None
+            )
+            ov_path = titles_dir / (
+                f"title_{t_idx + 1:03d}_{safe_id}_{t_hash}.png"
+                if kind == "static_png"
+                else f"kin_title_{t_idx + 1:03d}_{safe_id}_{t_hash}.mov"
+            )
+            ov_ok = ov_path.exists() and ov_path.stat().st_size > 100
+            mask_ok = (glass_mask_path is None) or (glass_mask_path.exists() and glass_mask_path.stat().st_size > 64)
+            if ov_ok and mask_ok:
+                title_entries_all[t_idx] = {
                     "item": t_item,
                     "kind": kind,
-                    "overlay_path": overlay_path,
+                    "overlay_path": ov_path,
                     "roi": roi,
                     "glass_rect": glass_rect,
                     "glass_mask_path": glass_mask_path,
                 }
-            )
+            else:
+                title_miss_tasks.append(
+                    {
+                        "idx": t_idx,
+                        "item_dict": item_dict,
+                        "width": width,
+                        "height": height,
+                        "fps": fps,
+                        "hdr": hdr,
+                        "kind": kind,
+                        "overlay_path": str(ov_path),
+                        "glass_rect": tuple(int(v) for v in glass_rect) if glass_rect is not None else None,
+                        "glass_mask_path": str(glass_mask_path) if glass_mask_path is not None else None,
+                    }
+                )
+
+        def _store_rendered_title(res: dict[str, Any]) -> None:
+            nonlocal done_titles
+            r_idx = int(res["idx"])
+            title_entries_all[r_idx] = {
+                "item": active_titles[r_idx],
+                "kind": res["kind"],
+                "overlay_path": Path(res["overlay_path"]),
+                "roi": tuple(res["roi"]),
+                "glass_rect": res["glass_rect"],
+                "glass_mask_path": Path(res["glass_mask_path"]) if res["glass_mask_path"] else None,
+            }
+            done_titles += 1
+            if progress_callback:
+                progress_callback(
+                    f"Rendered title overlay {done_titles}/{len(active_titles)} ({active_titles[r_idx].id})",
+                    0.05 * (done_titles / max(1, len(active_titles))),
+                )
+
+        if len(title_miss_tasks) == 1:
+            done_titles = len(active_titles) - 1
+            _store_rendered_title(_render_single_title_artifact(title_miss_tasks[0]))
+        elif title_miss_tasks:
+            title_workers = min(16, max(2, (os.cpu_count() or 8) // 2), len(title_miss_tasks))
+            done_titles = len(active_titles) - len(title_miss_tasks)
+            try:
+                with ProcessPoolExecutor(max_workers=title_workers) as pool:
+                    futs = {pool.submit(_render_single_title_artifact, tk): tk for tk in title_miss_tasks}
+                    for fut in as_completed(futs):
+                        _store_rendered_title(fut.result())
+            except (PermissionError, OSError, NotImplementedError):
+                # Fallback to threaded execution only when spawning worker processes is blocked
+                with ThreadPoolExecutor(max_workers=min(8, title_workers)) as pool:
+                    futs = {pool.submit(_render_single_title_artifact, tk): tk for tk in title_miss_tasks}
+                    for fut in as_completed(futs):
+                        _store_rendered_title(fut.result())
 
         num_clips = len(timeline.visual_track)
         v1_broll_entries: list[list[tuple[VisualTrackItem, Path, float, float]]] = [[] for _ in range(num_clips)]
@@ -837,6 +1065,7 @@ def render_timeline(
             sig_payload = json.dumps(
                 {
                     "v": 5,
+                    "mux_norm": "tv_norot_v2",
                     "item": item.model_dump(mode="json"),
                     "fx": [f.model_dump(mode="json") for f in clip_fxs],
                     "seg_broll": [
@@ -906,9 +1135,7 @@ def render_timeline(
             return t_idx, t_mp4
 
         if tasks_to_run:
-            # 5 concurrent workers stays within consumer NVIDIA GeForce NVENC session limits; 4 on macOS keeps VideoToolbox + MPS balanced
-            worker_cap = min(4, get_io_worker_count(default_cap=4)) if sys.platform == "darwin" else min(5, max(1, (os.cpu_count() or 8) // 4))
-            max_workers = max(1, min(worker_cap, len(tasks_to_run)))
+            max_workers = max(1, min(render_workers_cap, len(tasks_to_run)))
             completed_count = num_clips - len(tasks_to_run)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {pool.submit(_render_one_v1, t): t for t in tasks_to_run}
@@ -916,9 +1143,10 @@ def render_timeline(
                     done_idx, _ = fut.result()
                     completed_count += 1
                     if progress_callback:
+                        frac_v1 = (completed_count / max(1, num_clips)) * 0.68
                         progress_callback(
                             f"Rendered V1 clip {completed_count}/{num_clips} ({Path(timeline.visual_track[done_idx].source).name})",
-                            (completed_count / max(1, num_clips)) * 0.68,
+                            max(0.05 if active_titles else 0.0, frac_v1),
                         )
 
         # 3. Concatenate normalized V1 segments into base visual + camera audio stream
@@ -1082,7 +1310,7 @@ def render_timeline(
 
             if hdr and has_step4_video_ops:
                 filter_parts.append(
-                    f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc[vhdr]"
+                    f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv[vhdr]"
                 )
                 cur_v = "[vhdr]"
 

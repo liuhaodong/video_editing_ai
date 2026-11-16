@@ -974,6 +974,7 @@ def render_title_frame(
     t_norm: float = 0.55,
     hdr_safe: Optional[bool] = None,
     transparent_glass_body: bool = False,
+    crop_roi: Optional[tuple[int, int, int, int]] = None,
 ) -> Image.Image:
     """
     Render a single keyframe of a TitleOverlayItem across all 6 Cinema Themes & 11 Archetypes
@@ -1706,6 +1707,11 @@ def render_title_frame(
                         hdr_safe=use_hdr_safe,
                     )
                     ty += max(12, int(round(25 * s)))
+
+    if crop_roi is not None:
+        rx, ry, rw, rh = crop_roi
+        if (rx != 0) or (ry != 0) or (rw != width) or (rh != height):
+            img = img.crop((rx, ry, rx + rw, ry + rh))
 
     if use_hdr_safe:
         arr = np.asarray(img, dtype=np.uint8).copy()

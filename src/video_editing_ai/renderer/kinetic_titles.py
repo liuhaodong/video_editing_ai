@@ -173,6 +173,7 @@ def render_kinetic_title_mov(
     )
     assert proc.stdin is not None and proc.stderr is not None
 
+    crop_arg = (rx, ry, rw, rh) if crop_needed else None
     try:
         for f_idx in range(n_frames):
             t_norm = float(f_idx) / float(max(1, n_frames - 1))
@@ -183,9 +184,8 @@ def render_kinetic_title_mov(
                 t_norm=t_norm,
                 hdr_safe=hdr_safe,
                 transparent_glass_body=transparent_glass_body,
+                crop_roi=crop_arg,
             )
-            if crop_needed:
-                frame = frame.crop((rx, ry, rx + rw, ry + rh))
             if frame.size != (rw, rh):
                 frame = frame.resize((rw, rh), Image.Resampling.BILINEAR)
             proc.stdin.write(frame.tobytes())

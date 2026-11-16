@@ -549,7 +549,7 @@ def build_hdr_color_filters(
         filters.extend(
             [
                 "format=p010le",
-                "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
+                "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv",
             ]
         )
         return filters
@@ -570,12 +570,12 @@ def build_hdr_color_filters(
         if z_trc_in == "smpte2084":
             filters.append(
                 "zscale=primariesin=2020:transferin=smpte2084:matrixin=2020_ncl:"
-                "primaries=2020:transfer=arib-std-b67:matrix=2020_ncl"
+                "primaries=2020:transfer=arib-std-b67:matrix=2020_ncl:range=limited"
             )
         else:
             filters.append(
                 f"zscale=primariesin={z_prim_in}:transferin={z_trc_in}:matrixin={z_mat_in}:"
-                f"primaries=2020:transfer=arib-std-b67:matrix=2020_ncl:npl={npl_val}"
+                f"primaries=2020:transfer=arib-std-b67:matrix=2020_ncl:range=limited:npl={npl_val}"
             )
     else:
         # Calibrated SDR -> HLG diffuse-white (~75% signal / ~203 nits) curve prior to setparams fallback
@@ -589,7 +589,7 @@ def build_hdr_color_filters(
     filters.extend(
         [
             "format=p010le",
-            "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
+            "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv",
         ]
     )
     return filters
@@ -600,6 +600,8 @@ def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> li
     enc = ("libx265" if hdr else "libx264") if force_software else detect_best_video_encoder(hdr=hdr)
     if hdr:
         hdr_tags = [
+            "-color_range",
+            "tv",
             "-color_primaries",
             "bt2020",
             "-color_trc",
@@ -2614,7 +2616,7 @@ def build_segment_overlay_filtergraph(
 
     if hdr and (segment_broll or segment_titles):
         filter_parts.append(
-            f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc[svhdr]"
+            f"{cur_v}format=p010le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv[svhdr]"
         )
         cur_v = "[svhdr]"
 
@@ -2622,6 +2624,7 @@ def build_segment_overlay_filtergraph(
 
 
 _PHOTO_PREBUFFER_SEM = threading.BoundedSemaphore(2)
+_CUDA_PHOTO_SEM = threading.BoundedSemaphore(3)
 _MAX_PHOTO_PREBUFFER_BYTES = 4_800_000_000  # ~192 4K RGB24 frames (~6.4s @ 30fps) per worker
 
 
@@ -2643,6 +2646,7 @@ def render_photo_clip(
     kb = ken_burns or KenBurnsConfig()
     out_path = Path(output_mp4)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = out_path.with_name(f".{out_path.stem}.tmp_{os.getpid()}_{threading.get_ident()}.mp4")
 
     total_frames = max(1, int(round(duration * fps)))
     ctx = _prepare_photo_scene_context(photo_path=photo_path, width=width, height=height, kb=kb)
@@ -2677,224 +2681,324 @@ def render_photo_clip(
         vf_filters.extend(build_hdr_color_filters("iec61966-2-1"))
     else:
         vf_filters.append("format=yuv420p")
-    v_enc = get_video_encoder_args(hdr=hdr, force_software=False)
-    mux_args = build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=v_enc)
 
     has_seg_overlays = bool(segment_broll or segment_titles)
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{width}x{height}",
-        "-r",
-        str(fps),
-        "-i",
-        "pipe:0",
-        "-f",
-        "lavfi",
-        "-i",
-        "anullsrc=channel_layout=stereo:sample_rate=48000",
-    ]
 
-    if has_seg_overlays:
-        extra_inputs, ov_parts, out_v_label = build_segment_overlay_filtergraph(
-            base_label="[vbase]",
-            hdr=hdr,
-            next_input_idx=2,
-            segment_broll=segment_broll,
-            segment_titles=segment_titles,
-        )
-        fc_parts = [f"[0:v]{','.join(vf_filters)}[vbase]", *ov_parts]
-        cmd.extend(extra_inputs)
-        cmd.extend(
-            [
-                "-t",
-                f"{duration:.3f}",
-                "-filter_complex",
-                ";".join(fc_parts),
-                "-map",
-                out_v_label,
-                "-map",
-                "1:a:0",
-            ]
-        )
-    else:
-        cmd.extend(
-            [
-                "-t",
-                f"{duration:.3f}",
-                "-vf",
-                ",".join(vf_filters),
-            ]
-        )
-
-    cmd.extend(
-        [
-            *v_enc,
-            *mux_args,
-            "-c:a",
-            "aac",
-            "-b:a",
-            "256k",
-            "-shortest",
-            str(out_path),
+    def _build_photo_cmd(force_sw: bool) -> list[str]:
+        v_enc_local = get_video_encoder_args(hdr=hdr, force_software=force_sw)
+        mux_local = build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=v_enc_local)
+        c = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+            "-i",
+            "pipe:0",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
         ]
-    )
+        if has_seg_overlays:
+            extra_inputs, ov_parts, out_v_label = build_segment_overlay_filtergraph(
+                base_label="[vbase]",
+                hdr=hdr,
+                next_input_idx=2,
+                segment_broll=segment_broll,
+                segment_titles=segment_titles,
+            )
+            fc_parts = [f"[0:v]{','.join(vf_filters)}[vbase]", *ov_parts]
+            c.extend(extra_inputs)
+            c.extend(
+                [
+                    "-t",
+                    f"{duration:.3f}",
+                    "-filter_complex",
+                    ";".join(fc_parts),
+                    "-map",
+                    out_v_label,
+                    "-map",
+                    "1:a:0",
+                ]
+            )
+        else:
+            c.extend(
+                [
+                    "-t",
+                    f"{duration:.3f}",
+                    "-vf",
+                    ",".join(vf_filters),
+                ]
+            )
+        c.extend(
+            [
+                *v_enc_local,
+                *mux_local,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "256k",
+                "-shortest",
+                str(tmp_out),
+            ]
+        )
+        return c
+
+    v_enc = get_video_encoder_args(hdr=hdr, force_software=False)
+    cmd = _build_photo_cmd(force_sw=False)
 
     from ..hardware import videotoolbox_hdr_encode_guard
 
-    hw = get_hardware_profile()
-    used_mps = False
-    mps_batch_size = 4 if width >= 3840 else 8
-    frame_bytes = max(1, width * height * 3)
-    pre_frames = min(total_frames, max(mps_batch_size, _MAX_PHOTO_PREBUFFER_BYTES // frame_bytes))
-    sem_held = False
-    pre_batches: list[Optional[Any]] = []
-    rem_comp: Optional[Any] = None
-
     try:
-        # Stage A: Pre-synthesize MPS photo frames outside _VT_HDR_ENCODE_LOCK so AMD MPS
-        # compute on Clip N+1 overlaps Apple T2 hevc_videotoolbox encoding on Clip N.
-        if hw.has_mps and total_frames > 0:
-            _PHOTO_PREBUFFER_SEM.acquire()
-            sem_held = True
-            comp: Optional[Any] = None
+        hw = get_hardware_profile()
+        if hw.has_cuda and total_frames > 0:
+            cuda_batch = 4 if width >= 3840 else 12
+            cuda_ok = False
+            cuda_sem_held = False
+            stderr_bytes = b""
+            ret = 1
+            proc: Optional[subprocess.Popen[bytes]] = None
             try:
-                from .mps_photo_compositor import MPSPhotoCompositor
+                _CUDA_PHOTO_SEM.acquire()
+                cuda_sem_held = True
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                assert proc.stdin is not None
+                from .mps_photo_compositor import stream_photo_frames_to_pipe
 
-                comp = MPSPhotoCompositor(ctx=ctx)
-                for start_idx in range(0, pre_frames, mps_batch_size):
-                    batch_indices = list(range(start_idx, min(pre_frames, start_idx + mps_batch_size)))
-                    pre_batches.append(
-                        comp.render_batch_rgb(
-                            frame_indices=batch_indices,
-                            total_frames=total_frames,
-                            duration=duration,
-                            fps=fps,
-                        )
-                    )
-                if pre_frames >= total_frames:
-                    comp.close()
-                    comp = None
-                else:
-                    rem_comp = comp
-                used_mps = True
+                stream_photo_frames_to_pipe(
+                    ctx=ctx,
+                    total_frames=total_frames,
+                    duration=duration,
+                    fps=fps,
+                    pipe_stdin=proc.stdin,
+                    batch_size=cuda_batch,
+                    device_override="cuda",
+                )
+                cuda_ok = True
             except Exception as exc:
-                pre_batches.clear()
-                if comp is not None:
+                print(f"[ken_burns] CUDA photo compositor fallback to CPU: {exc}", file=sys.stderr)
+                if proc is not None:
                     try:
-                        comp.close()
+                        proc.kill()
+                        proc.wait(timeout=5)
                     except Exception:
                         pass
-                if rem_comp is not None:
-                    try:
-                        rem_comp.close()
-                    except Exception:
-                        pass
-                    rem_comp = None
-                if sem_held:
-                    _PHOTO_PREBUFFER_SEM.release()
-                    sem_held = False
-                used_mps = False
-                print(f"[ken_burns] MPS photo compositor fallback to CPU Pillow: {exc}", file=sys.stderr)
+                tmp_out.unlink(missing_ok=True)
+                try:
+                    import torch
 
-        # Stage B: Serialized HDR VideoToolbox encode consumes pre-buffered frames fast
-        with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=v_enc):
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-            assert proc.stdin is not None
-            pipe_broken = False
-            try:
-                if used_mps:
-                    for b_idx in range(len(pre_batches)):
-                        batch_t = pre_batches[b_idx]
-                        pre_batches[b_idx] = None
-                        if batch_t is None or pipe_broken:
-                            continue
-                        mv = memoryview(np.ascontiguousarray(batch_t.numpy()))
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            finally:
+                if proc is not None and proc.stdin is not None:
+                    try:
+                        proc.stdin.close()
+                    except (BrokenPipeError, OSError, ValueError):
+                        pass
+                if cuda_sem_held:
+                    _CUDA_PHOTO_SEM.release()
+
+            if cuda_ok and proc is not None:
+                stderr_bytes = proc.stderr.read() if proc.stderr else b""
+                ret = proc.wait()
+                if ret == 0:
+                    os.replace(tmp_out, out_path)
+                    return out_path
+                tmp_out.unlink(missing_ok=True)
+                sw_cmd = _build_photo_cmd(force_sw=True)
+                sw_proc: Optional[subprocess.Popen[bytes]] = None
+                sw_sem_held = False
+                try:
+                    _CUDA_PHOTO_SEM.acquire()
+                    sw_sem_held = True
+                    sw_proc = subprocess.Popen(sw_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                    assert sw_proc.stdin is not None
+                    from .mps_photo_compositor import stream_photo_frames_to_pipe
+
+                    stream_photo_frames_to_pipe(
+                        ctx=ctx,
+                        total_frames=total_frames,
+                        duration=duration,
+                        fps=fps,
+                        pipe_stdin=sw_proc.stdin,
+                        batch_size=cuda_batch,
+                        device_override="cuda",
+                    )
+                finally:
+                    if sw_proc is not None and sw_proc.stdin is not None:
                         try:
-                            proc.stdin.write(mv)
-                        except (BrokenPipeError, OSError):
-                            pipe_broken = True
-                        finally:
-                            mv.release()
-                            del batch_t
-                    pre_batches.clear()
-                    if rem_comp is None and sem_held:
-                        _PHOTO_PREBUFFER_SEM.release()
-                        sem_held = False
+                            sw_proc.stdin.close()
+                        except (BrokenPipeError, OSError, ValueError):
+                            pass
+                    if sw_sem_held:
+                        _CUDA_PHOTO_SEM.release()
+                assert sw_proc is not None
+                sw_err = sw_proc.stderr.read() if sw_proc.stderr else b""
+                sw_ret = sw_proc.wait()
+                if sw_ret != 0:
+                    err_msg = (sw_err or stderr_bytes).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"FFmpeg photo clip render failed (code {sw_ret}): {err_msg}")
+                os.replace(tmp_out, out_path)
+                return out_path
 
-                    if not pipe_broken and rem_comp is not None and pre_frames < total_frames:
-                        for start_idx in range(pre_frames, total_frames, mps_batch_size):
-                            batch_indices = list(range(start_idx, min(total_frames, start_idx + mps_batch_size)))
-                            batch_t = rem_comp.render_batch_rgb(
+        used_mps = False
+        mps_batch_size = 4 if width >= 3840 else 8
+        frame_bytes = max(1, width * height * 3)
+        pre_frames = min(total_frames, max(mps_batch_size, _MAX_PHOTO_PREBUFFER_BYTES // frame_bytes))
+        sem_held = False
+        pre_batches: list[Optional[Any]] = []
+        rem_comp: Optional[Any] = None
+
+        try:
+            # Stage A: Pre-synthesize MPS photo frames outside _VT_HDR_ENCODE_LOCK so AMD MPS
+            # compute on Clip N+1 overlaps Apple T2 hevc_videotoolbox encoding on Clip N.
+            if hw.has_mps and total_frames > 0:
+                _PHOTO_PREBUFFER_SEM.acquire()
+                sem_held = True
+                comp: Optional[Any] = None
+                try:
+                    from .mps_photo_compositor import MPSPhotoCompositor
+
+                    comp = MPSPhotoCompositor(ctx=ctx)
+                    for start_idx in range(0, pre_frames, mps_batch_size):
+                        batch_indices = list(range(start_idx, min(pre_frames, start_idx + mps_batch_size)))
+                        pre_batches.append(
+                            comp.render_batch_rgb(
                                 frame_indices=batch_indices,
                                 total_frames=total_frames,
                                 duration=duration,
                                 fps=fps,
                             )
+                        )
+                    if pre_frames >= total_frames:
+                        comp.close()
+                        comp = None
+                    else:
+                        rem_comp = comp
+                    used_mps = True
+                except Exception as exc:
+                    pre_batches.clear()
+                    if comp is not None:
+                        try:
+                            comp.close()
+                        except Exception:
+                            pass
+                    if rem_comp is not None:
+                        try:
+                            rem_comp.close()
+                        except Exception:
+                            pass
+                        rem_comp = None
+                    if sem_held:
+                        _PHOTO_PREBUFFER_SEM.release()
+                        sem_held = False
+                    used_mps = False
+                    print(f"[ken_burns] MPS photo compositor fallback to CPU Pillow: {exc}", file=sys.stderr)
+
+            # Stage B: Serialized HDR VideoToolbox encode consumes pre-buffered frames fast
+            with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=v_enc):
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                assert proc.stdin is not None
+                pipe_broken = False
+                try:
+                    if used_mps:
+                        for b_idx in range(len(pre_batches)):
+                            batch_t = pre_batches[b_idx]
+                            pre_batches[b_idx] = None
+                            if batch_t is None or pipe_broken:
+                                continue
                             mv = memoryview(np.ascontiguousarray(batch_t.numpy()))
                             try:
                                 proc.stdin.write(mv)
                             except (BrokenPipeError, OSError):
-                                break
+                                pipe_broken = True
                             finally:
                                 mv.release()
                                 del batch_t
-                else:
-                    for f_idx in range(total_frames):
-                        t_norm = f_idx / max(1, total_frames - 1)
-                        frame = _render_photo_frame_from_context(
-                            ctx=ctx,
-                            t_norm=t_norm,
-                            f_idx=f_idx,
-                            duration=duration,
-                            fps=fps,
-                        )
+                        pre_batches.clear()
+                        if rem_comp is None and sem_held:
+                            _PHOTO_PREBUFFER_SEM.release()
+                            sem_held = False
+
+                        if not pipe_broken and rem_comp is not None and pre_frames < total_frames:
+                            for start_idx in range(pre_frames, total_frames, mps_batch_size):
+                                batch_indices = list(range(start_idx, min(total_frames, start_idx + mps_batch_size)))
+                                batch_t = rem_comp.render_batch_rgb(
+                                    frame_indices=batch_indices,
+                                    total_frames=total_frames,
+                                    duration=duration,
+                                    fps=fps,
+                                )
+                                mv = memoryview(np.ascontiguousarray(batch_t.numpy()))
+                                try:
+                                    proc.stdin.write(mv)
+                                except (BrokenPipeError, OSError):
+                                    break
+                                finally:
+                                    mv.release()
+                                    del batch_t
+                    else:
+                        for f_idx in range(total_frames):
+                            t_norm = f_idx / max(1, total_frames - 1)
+                            frame = _render_photo_frame_from_context(
+                                ctx=ctx,
+                                t_norm=t_norm,
+                                f_idx=f_idx,
+                                duration=duration,
+                                fps=fps,
+                            )
+                            try:
+                                proc.stdin.write(frame.tobytes())
+                            except (BrokenPipeError, OSError):
+                                break
+                finally:
+                    if rem_comp is not None:
                         try:
-                            proc.stdin.write(frame.tobytes())
-                        except (BrokenPipeError, OSError):
-                            break
-            finally:
-                if rem_comp is not None:
+                            rem_comp.close()
+                        except Exception:
+                            pass
+                        rem_comp = None
+                    if sem_held:
+                        _PHOTO_PREBUFFER_SEM.release()
+                        sem_held = False
                     try:
-                        rem_comp.close()
-                    except Exception:
+                        proc.stdin.close()
+                    except (BrokenPipeError, OSError):
                         pass
-                    rem_comp = None
-                if sem_held:
-                    _PHOTO_PREBUFFER_SEM.release()
-                    sem_held = False
+
+                stderr_bytes = proc.stderr.read() if proc.stderr else b""
+                ret = proc.wait()
+        finally:
+            pre_batches.clear()
+            if rem_comp is not None:
                 try:
-                    proc.stdin.close()
-                except (BrokenPipeError, OSError):
+                    rem_comp.close()
+                except Exception:
                     pass
+                rem_comp = None
+            if sem_held:
+                _PHOTO_PREBUFFER_SEM.release()
+                sem_held = False
 
-            stderr_bytes = proc.stderr.read() if proc.stderr else b""
-            ret = proc.wait()
+        if ret != 0:
+            err_msg = stderr_bytes.decode("utf-8", errors="replace")
+            raise RuntimeError(f"FFmpeg photo clip render failed (code {ret}): {err_msg}")
+
+        os.replace(tmp_out, out_path)
+        return out_path
     finally:
-        pre_batches.clear()
-        if rem_comp is not None:
-            try:
-                rem_comp.close()
-            except Exception:
-                pass
-            rem_comp = None
-        if sem_held:
-            _PHOTO_PREBUFFER_SEM.release()
-            sem_held = False
-
-    if ret != 0:
-        err_msg = stderr_bytes.decode("utf-8", errors="replace")
-        raise RuntimeError(f"FFmpeg photo clip render failed (code {ret}): {err_msg}")
-
-    return out_path
+        tmp_out.unlink(missing_ok=True)
 
 
 def render_photo_effects_showcase_sheet(
