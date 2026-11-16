@@ -89,6 +89,12 @@ from video_editing_ai.agents import (  # noqa: E402
     render_video_culling_contact_sheets,
     run_multi_agent_pipeline,
 )
+from video_editing_ai.cloud import (  # noqa: E402
+    GooglePhotosAuthManager,
+    build_google_photos_web_search_url,
+    format_picker_date_query,
+    run_google_photos_sync,
+)
 from video_editing_ai.exporters.nle_export import export_all_nle_formats  # noqa: E402
 from video_editing_ai.models.schema import CreativeBrief, EditTimeline  # noqa: E402
 from video_editing_ai.planner.story_director import generate_storyboard_markdown  # noqa: E402
@@ -109,8 +115,173 @@ def _write_json(path: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
+def _resolve_cloud_or_local_media_dir(args: argparse.Namespace) -> Path:
+    proj_raw = getattr(args, "project_dir", None)
+    proj_dir = Path(proj_raw).resolve() if proj_raw else None
+    g_takeout = getattr(args, "google_takeout", None) or getattr(args, "takeout", None)
+    from_dl = getattr(args, "from_downloads", None)
+    g_photos = bool(getattr(args, "google_photos", False))
+    date_from = getattr(args, "date_from", None)
+    date_to = getattr(args, "date_to", None)
+    tz_name = getattr(args, "timezone", None) or "UTC"
+    dl_all = bool(getattr(args, "download_all", False))
+    dur_hint = float(getattr(args, "duration", None) or getattr(args, "target_duration", None) or 155.0)
+    auth_mode = getattr(args, "auth_mode", None) or "auto"
+
+    if g_takeout or from_dl or g_photos:
+        if proj_dir is None:
+            proj_dir = (_WORKSPACE_ROOT / "cloud_story_project").resolve()
+
+        def _on_browser(url: str, dl_dir: Path) -> None:
+            print(f"Open Google Photos Browser URL (zero GCP setup):\n  {url}")
+            print(f"Watching downloads folder: {dl_dir}")
+
+        def _on_pick(uri: str, hint: str) -> None:
+            print(f"Open Google Photos Picker URL:\n  {uri}")
+            if hint:
+                print(f"Suggested date search query (copied to clipboard): {hint}")
+
+        manifest = run_google_photos_sync(
+            project_dir=proj_dir,
+            date_from=date_from,
+            date_to=date_to,
+            tz_name=tz_name,
+            target_duration_sec=dur_hint,
+            max_photos=getattr(args, "max_photos", None),
+            max_videos=getattr(args, "max_videos", None),
+            download_all=dl_all,
+            auth_mode=auth_mode,
+            from_downloads=from_dl,
+            takeout_source=g_takeout,
+            downloads_dir=getattr(args, "downloads_dir", None),
+            watch_timeout_sec=float(getattr(args, "watch_timeout", None) or 600.0),
+            session_id=getattr(args, "session_id", None),
+            open_browser=not bool(getattr(args, "no_browser", False)),
+            browser_open_callback=_on_browser,
+            picker_ready_callback=_on_pick,
+            progress_callback=lambda m: print(f"  {m}"),
+        )
+        _write_project_meta(proj_dir, {"media_dir": manifest.staged_media_dir})
+        return Path(manifest.staged_media_dir).resolve()
+
+    if getattr(args, "media_dir", None):
+        return Path(args.media_dir).resolve()
+
+    if proj_dir is not None:
+        meta_p = proj_dir / "project_meta.json"
+        if meta_p.exists():
+            try:
+                meta = json.loads(meta_p.read_text(encoding="utf-8"))
+                saved_m = str(meta.get("media_dir") or "").strip()
+                if saved_m and Path(saved_m).exists():
+                    return Path(saved_m).resolve()
+            except Exception:
+                pass
+        cloud_m = proj_dir / "cloud_media"
+        if cloud_m.is_dir():
+            return cloud_m.resolve()
+
+    raise ValueError("Provide --media-dir, --google-photos, --from-downloads, --google-takeout, or a synced --project-dir.")
+
+
+def cmd_google_photos_auth(args: argparse.Namespace) -> int:
+    auth = GooglePhotosAuthManager(
+        client_secrets_path=getattr(args, "client_secrets", None),
+        token_path=getattr(args, "token_path", None),
+    )
+    if getattr(args, "revoke", False):
+        removed = auth.revoke_local_token()
+        print(f"Removed Google Photos token: {removed} ({auth.token_path})")
+        return 0
+    if getattr(args, "status", False):
+        print(json.dumps(auth.get_auth_status(), indent=2))
+        return 0
+    if not auth.client_secrets_path.exists():
+        print(auth.format_setup_instructions(), file=sys.stderr)
+        return 1
+    auth.authenticate_interactive(
+        open_browser=not bool(getattr(args, "no_browser", False)),
+        auth_url_callback=lambda url: print(f"Open Google Photos consent URL in your browser:\n{url}"),
+    )
+    print(f"Success! Google Photos OAuth connected -> {auth.token_path}")
+    return 0
+
+
+def cmd_sync_google_photos(args: argparse.Namespace) -> int:
+    if getattr(args, "search_url_only", False):
+        payload = {
+            "search_url": build_google_photos_web_search_url(args.date_from, args.date_to),
+            "date_query": format_picker_date_query(args.date_from, args.date_to),
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+    if not getattr(args, "project_dir", None):
+        print("Error: --project-dir is required unless --search-url-only is passed.", file=sys.stderr)
+        return 1
+
+    proj_dir = Path(args.project_dir).resolve()
+    proj_dir.mkdir(parents=True, exist_ok=True)
+
+    def _on_browser(url: str, dl_dir: Path) -> None:
+        print(f"Open Google Photos Browser URL (zero GCP setup):\n  {url}")
+        print(f"Watching downloads folder: {dl_dir}")
+
+    def _on_pick(uri: str, hint: str) -> None:
+        print(f"Open Google Photos Picker URL:\n  {uri}")
+        if hint:
+            print(f"Suggested date search query (copied to clipboard): {hint}")
+
+    manifest = run_google_photos_sync(
+        project_dir=proj_dir,
+        date_from=args.date_from,
+        date_to=args.date_to,
+        tz_name=args.timezone or "UTC",
+        target_duration_sec=float(args.target_duration or 155.0),
+        max_photos=args.max_photos,
+        max_videos=args.max_videos,
+        download_all=bool(args.download_all),
+        auth_mode=getattr(args, "auth_mode", None) or "auto",
+        from_downloads=getattr(args, "from_downloads", None),
+        takeout_source=getattr(args, "takeout", None),
+        downloads_dir=getattr(args, "downloads_dir", None),
+        watch_timeout_sec=float(getattr(args, "watch_timeout", None) or 600.0),
+        session_id=args.session_id,
+        open_browser=not bool(args.no_browser),
+        client_secrets_path=args.client_secrets,
+        token_path=args.token_path,
+        favorite_filenames=getattr(args, "favorites", None),
+        browser_open_callback=_on_browser,
+        picker_ready_callback=_on_pick,
+        progress_callback=lambda m: print(f"  {m}"),
+    )
+
+    _write_project_meta(
+        proj_dir,
+        {
+            "name": proj_dir.name.replace("_project", "").replace("_", " ").title(),
+            "media_dir": manifest.staged_media_dir,
+            "cloud_source_mode": manifest.source_mode,
+            "date_from": manifest.date_from,
+            "date_to": manifest.date_to,
+        },
+    )
+    if args.output:
+        _write_json(Path(args.output).resolve(), manifest.model_dump(mode="json"))
+    print(
+        f"Success! Synced {manifest.selected_photos_count} photos and {manifest.selected_videos_count} videos "
+        f"(from {manifest.in_date_range_count} in-range candidates) to {manifest.staged_media_dir}\n"
+        f"  - Manifest:      {proj_dir / 'google_photos_manifest.json'}\n"
+        f"  - Contact Sheet: {manifest.scan_contact_sheet_path}"
+    )
+    return 0
+
+
 def cmd_inspect_library(args: argparse.Namespace) -> int:
-    media_dir = Path(args.media_dir).resolve()
+    try:
+        media_dir = _resolve_cloud_or_local_media_dir(args)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if not media_dir.exists():
         print(f"Error: media_dir does not exist: {media_dir}", file=sys.stderr)
         return 1
@@ -146,9 +317,9 @@ def cmd_inspect_library(args: argparse.Namespace) -> int:
 
 
 def cmd_intake_refine(args: argparse.Namespace) -> int:
-    media_dir = Path(args.media_dir).resolve()
     project_dir = Path(args.project_dir).resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
+    media_dir = _resolve_cloud_or_local_media_dir(args)
 
     answers: dict[str, str] = {}
     if args.answers_json:
@@ -288,9 +459,9 @@ def cmd_run_stage(args: argparse.Namespace) -> int:
 
 
 def cmd_run_pipeline(args: argparse.Namespace) -> int:
-    media_dir = Path(args.media_dir).resolve()
     project_dir = Path(args.project_dir).resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
+    media_dir = _resolve_cloud_or_local_media_dir(args)
 
     meta_path = project_dir / "project_meta.json"
     existing_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
@@ -1049,16 +1220,24 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
     # 1. inspect-library
-    p_insp = sub.add_parser("inspect-library", help="Scan raw media folder & get Director's recommended length")
-    p_insp.add_argument("--media-dir", required=True, help="Path to raw videos and photos folder")
+    p_insp = sub.add_parser("inspect-library", help="Scan raw or cloud-synced media folder & get Director's recommended length")
+    p_insp.add_argument("--media-dir", default=None, help="Path to raw videos and photos folder (optional if using --google-photos/--google-takeout/--project-dir)")
     p_insp.add_argument("--project-dir", default=None, help="Optional project directory for saving output")
+    p_insp.add_argument("--google-photos", action="store_true", default=False, help="Sync media from Google Photos before inspecting")
+    p_insp.add_argument("--auth-mode", default="auto", help="auto (browser login default) | browser | oauth")
+    p_insp.add_argument("--from-downloads", default=None, help="Import browser-downloaded Google Photos .zip/media path(s) directly")
+    p_insp.add_argument("--google-takeout", default=None, help="Optional Google Takeout folder or .zip archive to sync")
+    p_insp.add_argument("--date-from", default=None, help="Inclusive start date (YYYY-MM-DD or ISO-8601) for cloud sync")
+    p_insp.add_argument("--date-to", default=None, help="Inclusive end date (YYYY-MM-DD or ISO-8601) for cloud sync")
+    p_insp.add_argument("--timezone", default="UTC", help="Timezone for cloud date filtering (UTC, local, or IANA zone)")
+    p_insp.add_argument("--download-all", action="store_true", default=False, help="Download all cloud items in date range instead of Two-Pass smart curation")
     p_insp.add_argument("--prompt", default="", help="Optional initial user story prompt")
     p_insp.add_argument("--output", default=None, help="Output JSON file path")
     p_insp.set_defaults(func=cmd_inspect_library)
 
     # 2. intake-refine
     p_int = sub.add_parser("intake-refine", help="Run interactive Client Intake + Director length refinement")
-    p_int.add_argument("--media-dir", required=True, help="Path to raw media folder")
+    p_int.add_argument("--media-dir", default=None, help="Path to raw media folder (defaults to synced media_dir in project_meta.json)")
     p_int.add_argument("--project-dir", required=True, help="Target project workspace directory")
     p_int.add_argument("--prompt", default="", help="User story vision and feedback")
     p_int.add_argument("--narrative-style", default=None, help="family_keepsake_4act | day_in_the_life_vlog | upbeat_montage | dialogue_story")
@@ -1095,9 +1274,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_stg.set_defaults(func=cmd_run_stage)
 
     # 4. run-pipeline
-    p_pipe = sub.add_parser("run-pipeline", help="Run the full 11-agent pipeline (Stage 00 -> Stage 60) and optional 4K HDR render")
-    p_pipe.add_argument("--media-dir", required=True, help="Raw media folder path")
+    p_pipe = sub.add_parser("run-pipeline", help="Run the full 21-agent pipeline (Stage 00 -> Stage 65) and optional 4K HDR render")
+    p_pipe.add_argument("--media-dir", default=None, help="Raw media folder path (optional when using --google-photos, --google-takeout, or previously synced --project-dir)")
     p_pipe.add_argument("--project-dir", required=True, help="Target project workspace directory")
+    p_pipe.add_argument("--google-photos", action="store_true", default=False, help="Sync media from Google Photos before running pipeline")
+    p_pipe.add_argument("--auth-mode", default="auto", help="auto (browser login default) | browser | oauth")
+    p_pipe.add_argument("--from-downloads", default=None, help="Import browser-downloaded Google Photos .zip/media path(s) directly")
+    p_pipe.add_argument("--google-takeout", default=None, help="Optional Google Takeout folder or .zip archive before running pipeline")
+    p_pipe.add_argument("--date-from", default=None, help="Cloud sync inclusive start date (YYYY-MM-DD or ISO-8601)")
+    p_pipe.add_argument("--date-to", default=None, help="Cloud sync inclusive end date (YYYY-MM-DD or ISO-8601)")
+    p_pipe.add_argument("--timezone", default="UTC", help="Timezone for cloud date filtering (UTC, local, or IANA zone)")
+    p_pipe.add_argument("--download-all", action="store_true", default=False, help="Download all cloud items in date range instead of smart Two-Pass curation")
     p_pipe.add_argument("--prompt", default="", help="Story vision prompt")
     p_pipe.add_argument("--duration", type=int, default=None, help="Target duration in seconds (30 to 600)")
     p_pipe.add_argument("--photo-mode", default="parallax_gallery", help="Primary fallback photo mode (any of the 16 PhotoModeType modes)")
@@ -1382,6 +1569,45 @@ def build_parser() -> argparse.ArgumentParser:
     p_rtm.add_argument("--with-audio", action="store_true", default=False, help="Synthesize stereo flyover sweep + landing chime audio")
     p_rtm.add_argument("--output", default=None, help="Optional output MP4 path")
     p_rtm.set_defaults(func=cmd_render_travel_map)
+
+    # 21. google-photos-auth
+    p_gpa = sub.add_parser(
+        "google-photos-auth",
+        help="Authenticate or inspect OAuth 2.0 PKCE credentials for Google Photos Picker API",
+    )
+    p_gpa.add_argument("--client-secrets", default=None, help="Optional path to Desktop OAuth client_secret.json")
+    p_gpa.add_argument("--token-path", default=None, help="Optional path to OAuth token.json")
+    p_gpa.add_argument("--no-browser", action="store_true", default=False, help="Print consent URL without opening browser")
+    p_gpa.add_argument("--status", action="store_true", default=False, help="Print JSON credential & token readiness status")
+    p_gpa.add_argument("--revoke", action="store_true", default=False, help="Delete stored OAuth token.json")
+    p_gpa.set_defaults(func=cmd_google_photos_auth)
+
+    # 22. sync-google-photos
+    p_sgp = sub.add_parser(
+        "sync-google-photos",
+        help="Scan Google Photos (Browser Login, OAuth Picker, or Takeout) for [date_from, date_to] and stage curated assets",
+    )
+    p_sgp.add_argument("--project-dir", default=None, help="Target project workspace directory (required unless --search-url-only)")
+    p_sgp.add_argument("--date-from", default=None, help="Inclusive start date (YYYY-MM-DD or ISO-8601)")
+    p_sgp.add_argument("--date-to", default=None, help="Inclusive end date (YYYY-MM-DD or ISO-8601)")
+    p_sgp.add_argument("--timezone", default="UTC", help="Timezone for date filtering (UTC, local, or IANA zone)")
+    p_sgp.add_argument("--auth-mode", default="auto", help="Connection mode: auto (browser login default) | browser | oauth")
+    p_sgp.add_argument("--from-downloads", default=None, help="Already-downloaded .zip/media file(s) or folder from Google Photos browser")
+    p_sgp.add_argument("--downloads-dir", default=None, help="Browser downloads folder to watch (defaults to ~/Downloads)")
+    p_sgp.add_argument("--watch-timeout", type=float, default=600.0, help="Seconds to wait for browser download completion")
+    p_sgp.add_argument("--search-url-only", action="store_true", default=False, help="Print JSON with Google Photos search URL & date query and exit")
+    p_sgp.add_argument("--takeout", default=None, help="Optional Google Takeout folder or .zip archive instead of browser/OAuth")
+    p_sgp.add_argument("--target-duration", type=float, default=155.0, help="Target edit duration in seconds for smart selection budget")
+    p_sgp.add_argument("--max-photos", type=int, default=None, help="Optional cap on smart-downloaded photos")
+    p_sgp.add_argument("--max-videos", type=int, default=None, help="Optional cap on smart-downloaded videos")
+    p_sgp.add_argument("--download-all", action="store_true", default=False, help="Download/keep every in-range item without smart curation pruning")
+    p_sgp.add_argument("--favorites", default=None, help="Comma-separated Favorited filenames or JSON manifest path to mark ★ favorite")
+    p_sgp.add_argument("--session-id", default=None, help="Optional existing Google Photos Picker sessionId")
+    p_sgp.add_argument("--no-browser", action="store_true", default=False, help="Do not auto-open browser")
+    p_sgp.add_argument("--client-secrets", default=None, help="Optional path to OAuth client_secret.json")
+    p_sgp.add_argument("--token-path", default=None, help="Optional path to OAuth token.json")
+    p_sgp.add_argument("--output", default=None, help="Optional output JSON report path")
+    p_sgp.set_defaults(func=cmd_sync_google_photos)
 
     return parser
 

@@ -14,6 +14,13 @@ import uvicorn
 
 from .agents import AgentRegistry, generate_intake_questions, run_multi_agent_pipeline
 from .analyzer.ag_annotator import analyze_media_directory
+from .cloud.google_photos import (
+    GooglePhotosAuthManager,
+    build_google_photos_web_search_url,
+    format_picker_date_query,
+    get_default_browser_downloads_dir,
+    run_google_photos_sync,
+)
 from .docs_sync import resolve_repo_root, sync_agent_documentation
 from .doctor import collect_environment_diagnostics
 from .exporters.nle_export import export_all_nle_formats, export_fcpxml
@@ -45,12 +52,163 @@ def cmd_agents_list() -> None:
         )
 
 
+@app.command("google-photos-auth")
+def cmd_google_photos_auth(
+    client_secrets: Optional[Path] = typer.Option(None, "--client-secrets", help="Path to Google Cloud Desktop OAuth client_secret.json"),
+    token_path: Optional[Path] = typer.Option(None, "--token-path", help="Optional custom path to store OAuth token.json"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not auto-open browser during OAuth consent"),
+    status: bool = typer.Option(False, "--status", help="Inspect current Browser Login & OAuth credential readiness"),
+    revoke: bool = typer.Option(False, "--revoke", help="Delete the local stored OAuth token.json"),
+) -> None:
+    """Inspect zero-setup Browser Login status or configure optional Google Photos OAuth 2.0 PKCE credentials."""
+    auth = GooglePhotosAuthManager(client_secrets_path=client_secrets, token_path=token_path)
+    if revoke:
+        removed = auth.revoke_local_token()
+        console.print(f"[green][OK][/green] Local Google Photos OAuth token removed: {removed} ({auth.token_path})")
+        return
+    if status:
+        st = auth.get_auth_status()
+        oauth_badge = "[green]READY[/green]" if st["ready"] else "[yellow]OPTIONAL / NOT CONFIGURED[/yellow]"
+        console.print(
+            Panel(
+                "[bold cyan]Google Photos Connection Status[/bold cyan]\n"
+                f"  - Browser Login (Zero-Setup Default): [green]READY[/green] (watches {get_default_browser_downloads_dir()})\n"
+                f"  - Picker API OAuth (Optional):        {oauth_badge}\n"
+                f"  - Config Dir:     {st['config_dir']}\n"
+                f"  - Client Secrets: {st['client_secrets_path']} (exists={st['client_secrets_configured']})\n"
+                f"  - Token File:     {st['token_path']} (present={st['token_present']}, valid={st['token_valid']}, refresh={st['refresh_token_present']})\n"
+                f"  - Scope:          {st['scope']}"
+            )
+        )
+        return
+
+    if not auth.client_secrets_path.exists():
+        console.print(
+            Panel(
+                "[bold green]Zero-Setup Tip:[/bold green] Browser Login works right now with NO Google Cloud setup!\n"
+                "Simply run: [bold cyan]ai-editor agents-run --google-photos --date-from YYYY-MM-DD --date-to YYYY-MM-DD -p \"...\"[/bold cyan]\n\n"
+                + auth.format_setup_instructions(),
+                title="[bold yellow]Optional Google Cloud OAuth Setup[/bold yellow]",
+            )
+        )
+        raise typer.Exit(code=1)
+
+    def _show_url(url: str) -> None:
+        console.print(f"[bold cyan]Open this Google sign-in URL in your browser:[/bold cyan]\n{url}\n")
+        if not no_browser:
+            import webbrowser
+
+            webbrowser.open(url, new=2)
+
+    auth.authenticate_interactive(open_browser=not no_browser, auth_url_callback=_show_url)
+    console.print(f"[bold green][OK] Google Photos OAuth connected![/bold green] Token saved to: {auth.token_path}")
+
+
+def _make_cli_cloud_callbacks(no_browser: bool = False):
+    def _on_browser(search_url: str, dl_dir: Path) -> None:
+        console.print(
+            Panel(
+                "[bold cyan]Zero-Setup Google Photos Browser Login[/bold cyan]\n"
+                f"  1. Opened [underline]{search_url}[/underline] in your browser (no API keys needed).\n"
+                "  2. Sign into Google Photos if prompted, Shift-select items in your date range, and press [bold]Shift+D[/bold] (Download).\n"
+                f"  3. Watching [underline]{dl_dir}[/underline] — burst deduplication & editing start automatically once finished!"
+            )
+        )
+        if not no_browser and search_url:
+            import webbrowser
+
+            webbrowser.open(search_url, new=2)
+
+    def _on_picker(uri: str, hint: str) -> None:
+        hint_line = f"\nSearch tip copied to clipboard: [bold yellow]{hint}[/bold yellow]" if hint else ""
+        console.print(
+            Panel(
+                f"[bold cyan]Select items in Google Photos Picker:[/bold cyan]\n{uri}{hint_line}\n"
+                "After clicking Done in Google Photos, downloads will start automatically."
+            )
+        )
+        if not no_browser and uri:
+            import webbrowser
+
+            webbrowser.open(uri, new=2)
+
+    return _on_browser, _on_picker, (lambda msg: console.print(f"  [cyan]{msg}[/cyan]"))
+
+
+@app.command("google-photos-sync")
+def cmd_google_photos_sync(
+    project_dir: Path = typer.Option(Path("workspace_project"), "-o", "--project-dir", help="Project workspace directory"),
+    date_from: Optional[str] = typer.Option(None, "--date-from", help="Inclusive start date (YYYY-MM-DD or ISO-8601)"),
+    date_to: Optional[str] = typer.Option(None, "--date-to", help="Inclusive end date (YYYY-MM-DD or ISO-8601)"),
+    timezone_name: str = typer.Option("UTC", "--timezone", help="Date interpretation timezone (UTC, local, or IANA zone)"),
+    auth_mode: str = typer.Option("auto", "--auth-mode", help="Connection mode: auto (browser login default) | browser | oauth"),
+    from_downloads: Optional[str] = typer.Option(None, "--from-downloads", help="Import already-downloaded Google Photos .zip/media file(s) or folder"),
+    downloads_dir: Optional[Path] = typer.Option(None, "--downloads-dir", help="Browser downloads folder to watch (defaults to ~/Downloads)"),
+    watch_timeout: float = typer.Option(600.0, "--watch-timeout", help="Seconds to wait for browser download completion"),
+    takeout: Optional[Path] = typer.Option(None, "--takeout", help="Optional Google Takeout folder or .zip archive instead of browser/OAuth"),
+    target_duration: float = typer.Option(155.0, "--target-duration", help="Target edit duration in seconds for smart selection budget"),
+    max_photos: Optional[int] = typer.Option(None, "--max-photos", help="Optional override max photos to download"),
+    max_videos: Optional[int] = typer.Option(None, "--max-videos", help="Optional override max videos to download"),
+    download_all: bool = typer.Option(False, "--download-all", help="Bypass Two-Pass Smart Curation and download/keep all in-range items"),
+    session_id: Optional[str] = typer.Option(None, "--session-id", help="Attach to an existing Google Photos Picker sessionId"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not auto-open browser"),
+    client_secrets: Optional[Path] = typer.Option(None, "--client-secrets", help="Optional custom client_secret.json path"),
+    token_path: Optional[Path] = typer.Option(None, "--token-path", help="Optional custom OAuth token.json path"),
+) -> None:
+    """Connect to Google Photos via Browser Login (or OAuth/Takeout) in [date_from, date_to] and stage smart-curated assets."""
+    on_browser, on_picker, on_log = _make_cli_cloud_callbacks(no_browser=no_browser)
+    manifest = run_google_photos_sync(
+        project_dir=project_dir,
+        date_from=date_from,
+        date_to=date_to,
+        tz_name=timezone_name,
+        target_duration_sec=target_duration,
+        max_photos=max_photos,
+        max_videos=max_videos,
+        download_all=download_all,
+        auth_mode=auth_mode,
+        from_downloads=from_downloads,
+        takeout_source=takeout,
+        downloads_dir=downloads_dir,
+        watch_timeout_sec=watch_timeout,
+        session_id=session_id,
+        open_browser=not no_browser,
+        client_secrets_path=client_secrets,
+        token_path=token_path,
+        browser_open_callback=on_browser,
+        picker_ready_callback=on_picker,
+        progress_callback=on_log,
+    )
+
+    console.print(
+        f"[bold green][OK] Cloud Sync Complete ({manifest.source_mode})![/bold green]\n"
+        f"  - In Date Range:    {manifest.in_date_range_count} / {manifest.total_scanned_in_session} scanned\n"
+        f"  - Selected Media:   {manifest.selected_photos_count} photos, {manifest.selected_videos_count} videos "
+        f"(skipped {manifest.skipped_count}, cache hits {manifest.cache_hits_count})\n"
+        f"  - Staged Folder:    [underline]{manifest.staged_media_dir}[/underline]\n"
+        f"  - Manifest JSON:    [underline]{project_dir / 'google_photos_manifest.json'}[/underline]"
+    )
+
+
 @app.command("agents-run")
 def cmd_agents_run(
-    media_dir: Path = typer.Argument(..., help="Directory containing raw videos (.MOV, .MP4) and photos (.HEIC, .JPG)"),
+    media_dir: Optional[Path] = typer.Argument(None, help="Directory containing raw videos (.MOV, .MP4) and photos (.HEIC, .JPG)"),
     prompt: str = typer.Option(..., "-p", "--prompt", help="Client story idea and must-have moments"),
     project_dir: Path = typer.Option(Path("workspace_project"), "-o", "--project-dir", help="Project output folder"),
     bgm: Optional[Path] = typer.Option(None, "--bgm", help="Optional background music file (.mp3, .wav)"),
+    google_photos: bool = typer.Option(False, "--google-photos", help="Pull media directly from Google Photos via Browser Login (or configured OAuth) before editing"),
+    auth_mode: str = typer.Option("auto", "--auth-mode", help="Google Photos auth mode: auto (browser login default) | browser | oauth"),
+    from_downloads: Optional[str] = typer.Option(None, "--from-downloads", help="Import browser-downloaded Google Photos .zip/media file(s) directly"),
+    downloads_dir: Optional[Path] = typer.Option(None, "--downloads-dir", help="Browser downloads folder to watch (defaults to ~/Downloads)"),
+    watch_timeout: float = typer.Option(600.0, "--watch-timeout", help="Seconds to wait for browser download completion"),
+    google_takeout: Optional[Path] = typer.Option(None, "--google-takeout", help="Pull media from a Google Takeout folder or .zip archive"),
+    date_from: Optional[str] = typer.Option(None, "--date-from", help="Cloud sync inclusive start date (YYYY-MM-DD or ISO-8601)"),
+    date_to: Optional[str] = typer.Option(None, "--date-to", help="Cloud sync inclusive end date (YYYY-MM-DD or ISO-8601)"),
+    timezone_name: str = typer.Option("UTC", "--timezone", help="Timezone for --date-from / --date-to filtering"),
+    max_cloud_photos: Optional[int] = typer.Option(None, "--max-cloud-photos", help="Optional cap on smart-downloaded cloud photos"),
+    max_cloud_videos: Optional[int] = typer.Option(None, "--max-cloud-videos", help="Optional cap on smart-downloaded cloud videos"),
+    download_all: bool = typer.Option(False, "--download-all", help="Bypass Two-Pass Smart Curation and download all cloud items in range"),
+    target_duration: Optional[float] = typer.Option(None, "--target-duration", help="Optional target duration hint (s) for cloud budget & story length"),
     enable_agent: Optional[list[str]] = typer.Option(
         None,
         "--enable-agent",
@@ -104,6 +262,33 @@ def cmd_agents_run(
     use_antigravity: bool = typer.Option(True, "--antigravity/--no-antigravity", help="Use Google Antigravity SDK"),
 ) -> None:
     """Run the Coordinated Multi-Agent Post-Production Pipeline (Stage 00 -> Stage 65)."""
+    if google_photos or google_takeout is not None or from_downloads is not None:
+        on_browser, on_picker, on_log = _make_cli_cloud_callbacks(no_browser=False)
+        sync_manifest = run_google_photos_sync(
+            project_dir=project_dir,
+            date_from=date_from,
+            date_to=date_to,
+            tz_name=timezone_name,
+            target_duration_sec=float(target_duration or 155.0),
+            max_photos=max_cloud_photos,
+            max_videos=max_cloud_videos,
+            download_all=download_all,
+            auth_mode=auth_mode,
+            from_downloads=from_downloads,
+            takeout_source=google_takeout,
+            downloads_dir=downloads_dir,
+            watch_timeout_sec=watch_timeout,
+            open_browser=True,
+            browser_open_callback=on_browser,
+            picker_ready_callback=on_picker,
+            progress_callback=on_log,
+        )
+        media_dir = Path(sync_manifest.staged_media_dir)
+
+    if media_dir is None:
+        console.print("[bold red]Error:[/bold red] Provide MEDIA_DIR or pass --google-photos / --from-downloads / --google-takeout.")
+        raise typer.Exit(code=2)
+
     console.print(
         Panel(
             f"[bold cyan]Running Modular Multi-Agent Video Editing Pipeline[/bold cyan]\n"
@@ -114,6 +299,8 @@ def cmd_agents_run(
     )
 
     answers: dict[str, str] = {}
+    if target_duration is not None:
+        answers["target_duration_sec"] = str(int(round(target_duration)))
     if story_arc_mode:
         answers["story_arc_mode"] = story_arc_mode
     if title_theme:
@@ -471,6 +658,7 @@ def cmd_doctor(
     ff = report["ffmpeg"]
     fp = report["ffprobe"]
     hw = report["hardware"]
+    gp = report.get("google_photos") or {}
     heif = report["heif"]
     ag = report["antigravity"]
     pkgs = report["packages"]
@@ -481,6 +669,11 @@ def cmd_doctor(
     fp_badge = "[green]OK[/green]" if fp["ok"] else "[red]MISSING[/red]"
     heif_badge = "[green]OK[/green]" if heif["ok"] else "[red]FAIL[/red]"
     ag_badge = "[green]OK[/green]" if ag["sdk_ok"] else "[red]FAIL[/red]"
+    gp_badge = (
+        "[green]READY (OAuth + Browser)[/green]"
+        if gp.get("ready")
+        else "[green]READY (Browser Login)[/green]"
+    )
 
     console.print(
         Panel(
@@ -490,6 +683,7 @@ def cmd_doctor(
             + f"\n  - ffmpeg:    {ff_badge} {ff['version_line'] or ff['path'] or 'Not found on PATH'}"
             + f"\n  - ffprobe:   {fp_badge} {fp['path'] or 'Not found on PATH'}"
             + f"\n  - HEIF/HEIC: {heif_badge} {'pillow-heif registered' if heif['ok'] else heif['error']}"
+            + f"\n  - Google Photos: {gp_badge} (secrets={gp.get('client_secrets_configured', False)}, token={gp.get('token_valid', False)})"
             + f"\n  - Antigravity: {ag_badge} sdk={ag['sdk_version'] or 'missing'}, "
             + f"skill={'OK' if ag['workspace_skill_ok'] else 'missing'}, "
             + f"rules={'OK' if ag['workspace_rules_ok'] else 'missing'}, "

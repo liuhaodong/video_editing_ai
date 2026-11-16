@@ -160,9 +160,9 @@ def render_director_screening_sheet(
             )
             if active_title is not None:
                 try:
-                    render_title_png(active_title, tmp_title_png, width=tile_w, height=tile_h)
+                    render_title_png(active_title, tmp_title_png, width=1920, height=1080)
                     with Image.open(tmp_title_png) as ov:
-                        ov_rgba = ov.convert("RGBA")
+                        ov_rgba = ov.convert("RGBA").resize((tile_w, tile_h), Image.Resampling.LANCZOS)
                         tile_rgba = tile_img.convert("RGBA")
                         tile_rgba.alpha_composite(ov_rgba)
                         tile_img = tile_rgba.convert("RGB")

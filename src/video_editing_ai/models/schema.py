@@ -253,6 +253,10 @@ class VideoAsset(BaseModel):
         default_factory=dict,
         description="Mechanically measured RGB means, luminance percentiles (p05, p50, p95), and estimated Kelvin",
     )
+    is_favorite: bool = Field(
+        default=False,
+        description="True if starred/favorited in Google Photos, Takeout, or EXIF Rating >= 4",
+    )
     overall_summary: str = Field(default="", description="High-level summary of the clip and its story value")
     scenes: list[SceneSegment] = Field(default_factory=list)
     dialogues: list[DialogueSegment] = Field(default_factory=list)
@@ -294,6 +298,10 @@ class PhotoAsset(BaseModel):
         description="Recommended photo treatment (e.g., gallery_ken_burns, zoom_in, pan_right, zoom_out)",
     )
     quality_score: float = Field(default=8.0, description="Composition & story quality score (1-10)")
+    is_favorite: bool = Field(
+        default=False,
+        description="True if starred/favorited in Google Photos, Takeout, or EXIF Rating >= 4",
+    )
 
 
 class AudioAsset(BaseModel):
@@ -548,6 +556,10 @@ class CulledSubClip(BaseModel):
     emotion_score: float = Field(default=8.0, ge=1.0, le=10.0)
     action_peak_tc: float = Field(default=1.5, ge=0.0)
     aesthetic_score: float = Field(default=8.0, ge=1.0, le=10.0)
+    is_favorite: bool = Field(
+        default=False,
+        description="True if starred/favorited in Google Photos, Takeout, or EXIF Rating >= 4",
+    )
     brief_match_boost: float = Field(default=0.0, description="Score boost from matching CreativeBrief must-haves")
     annotation_title: Optional[str] = Field(default=None, description="Curated subject/artwork/landmark title")
     annotation_subtitle: Optional[str] = Field(default=None, description="Bilingual curatorial subtitle")
@@ -677,6 +689,10 @@ class CuratedPhotoItem(BaseModel):
     portrait_warmth_score: float = Field(default=7.5, ge=1.0, le=10.0)
     art_architecture_score: float = Field(default=8.0, ge=1.0, le=10.0)
     overall_taste_score: float = Field(default=8.2, ge=1.0, le=10.0)
+    is_favorite: bool = Field(
+        default=False,
+        description="True if starred/favorited in Google Photos, Takeout, or EXIF Rating >= 4",
+    )
     is_selected: bool = False
     rejection_reason: Optional[str] = None
     subject_category: str = "landmark_architecture"
@@ -1548,6 +1564,10 @@ class DITIngestEntry(BaseModel):
     preview_path: Optional[str] = None
     focal_point: tuple[float, float] = (0.5, 0.5)
     color_stats: dict[str, float] = Field(default_factory=dict)
+    is_favorite: bool = Field(
+        default=False,
+        description="True if starred/favorited in Google Photos, Takeout, or EXIF Rating >= 4",
+    )
 
 
 class DITIngestManifest(BaseModel):
@@ -1961,4 +1981,65 @@ class TravelMapManifest(BaseModel):
 
     @classmethod
     def from_json_file(cls, path: str | Path) -> "TravelMapManifest":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class CloudMediaCandidateItem(BaseModel):
+    """Scanned cloud or Google Takeout media candidate tracked across Two-Pass Smart Curation."""
+
+    cloud_item_id: str
+    source_provider: Literal["google_photos_browser", "google_photos_picker", "google_takeout"] = "google_photos_browser"
+    filename: str
+    mime_type: str = "image/jpeg"
+    media_type: Literal["photo", "video"] = "photo"
+    creation_time: str = ""
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    video_processing_status: str = "READY"
+    camera_make_model: Optional[str] = None
+    exif_summary: Optional[str] = None
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    gps_alt: Optional[float] = None
+    proxy_thumbnail_path: Optional[str] = None
+    downloaded_path: Optional[str] = None
+    taste_score: float = 7.5
+    is_favorite: bool = Field(
+        default=False,
+        description="True if starred/favorited in Google Photos, Takeout, or EXIF Rating >= 4",
+    )
+    dhash: str = ""
+    burst_group_id: Optional[str] = None
+    selected_for_download: bool = True
+    skip_reason: Optional[str] = None
+    cache_hit: bool = False
+
+
+class GooglePhotosSyncManifest(BaseModel):
+    """Cloud ingestion & Two-Pass Smart Curation contract (google_photos_manifest.json)."""
+
+    source_mode: Literal["google_photos_browser", "google_photos_picker", "google_takeout"] = "google_photos_browser"
+    session_id: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    timezone_name: str = "UTC"
+    download_policy: Literal["smart_two_pass", "download_all"] = "smart_two_pass"
+    total_scanned_in_session: int = 0
+    in_date_range_count: int = 0
+    selected_photos_count: int = 0
+    selected_videos_count: int = 0
+    skipped_count: int = 0
+    cache_hits_count: int = 0
+    staged_media_dir: str = ""
+    scan_contact_sheet_path: Optional[str] = None
+    items: list[CloudMediaCandidateItem] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "GooglePhotosSyncManifest":
         return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))

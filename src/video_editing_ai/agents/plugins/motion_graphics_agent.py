@@ -490,10 +490,11 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
 
         if map_active and timeline.visual_track:
             n_total_legs = len(waypoints) - 1
-            if n_total_legs <= 4:
+            if n_total_legs <= 8:
                 chosen_legs = list(range(n_total_legs))
             else:
-                chosen_legs = sorted({0, 1, n_total_legs // 2, n_total_legs - 2, n_total_legs - 1})
+                step = (n_total_legs - 1) / 7.0
+                chosen_legs = sorted({int(round(i * step)) for i in range(8)})
 
             allow_tiles = os.environ.get("AI_EDITOR_OFFLINE_MAPS", "0") != "1"
             maps_dir = blackboard.project_dir / "cache" / "maps"
@@ -542,7 +543,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                         host_v1 = min(
                             pool,
                             key=lambda vc: (
-                                0 if (vc.roll_type == "b_roll" or vc.type == "photo") else 1,
+                                0 if (vc.type == "video" and vc.roll_type == "b_roll") else (1 if vc.type == "video" else 2),
                                 abs(float(vc.timeline_start) - dest_t),
                             ),
                         )
@@ -742,10 +743,14 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
         # Helper to check if a bottom-third card would collide with a burned-in photo plaque or active subtitle
         def _has_bottom_collision(start_t: float, dur_t: float, style_name: str) -> bool:
             end_t = start_t + dur_t
-            # Check photo burned-in caption plaque
+            # Check photo burned-in caption plaque (top-level or nested ken_burns caption)
             for vc in timeline.visual_track:
                 if vc.timeline_start < end_t and (vc.timeline_start + vc.duration) > start_t:
-                    if vc.type == "photo" and vc.caption_title:
+                    has_plaque = bool(
+                        vc.caption_title
+                        or (vc.ken_burns and (vc.ken_burns.caption_title or vc.ken_burns.caption_subtitle))
+                    )
+                    if vc.type == "photo" and has_plaque:
                         return True
             # Route map cards & curved ribbons sit at y=[0.80..0.96], so avoid overlapping subtitles at y=[0.85..0.96]
             sub_box = [0.10, 0.85, 0.90, 0.96]
@@ -823,33 +828,53 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             use_mag_plate = (plate_turn % 2 == 0)
             card_style = "magazine_chapter_plate" if use_mag_plate else "lower_third"
             plate_turn += 1
-            if not _has_bottom_collision(lt_start, lt_dur, card_style):
-                chap_lbl = _clean_waypoint_label(chap)
-                plate_accent = sample_shot_accent_hex(
-                    _resolve_sample_image_for_time(lt_start, timeline, catalog),
-                    fallback_hex=str(theme_spec["accent_hex"]),
+            if _has_bottom_collision(lt_start, lt_dur, card_style):
+                # Relocate onto first non-plaque clip in the chapter, else promote to top-left editorial_caption
+                clean_vc = next(
+                    (
+                        vc
+                        for vc in timeline.visual_track
+                        if vc.act == chap.title
+                        and vc.duration >= 2.4
+                        and not _has_bottom_collision(
+                            round(vc.timeline_start + 0.35, 2),
+                            round(min(3.0, vc.duration - 0.5), 2),
+                            card_style,
+                        )
+                    ),
+                    None,
                 )
-                kicker = f"CHAPTER {roman}" if use_mag_plate else chap_lbl
-                consolidated_overlays.append(
-                    TitleOverlayItem(
-                        id=f"title_lt_{chap.chapter_id}",
-                        style=card_style,  # type: ignore[arg-type]
-                        theme=theme,  # type: ignore[arg-type]
-                        motion_preset="masked_rise",
-                        eyebrow=kicker,
-                        overline=kicker,
-                        chapter_numeral=roman if use_mag_plate else "",
-                        text=chap.title,
-                        subtitle=chap.narrative_goal[:56] if chap.narrative_goal else chap_lbl,
-                        timeline_start=lt_start,
-                        duration=lt_dur,
-                        fade_in=0.30,
-                        fade_out=0.35,
-                        accent_color=plate_accent,
-                        backdrop_blur=(not use_mag_plate) or use_glass,
-                        hdr_safe=is_hdr,
-                    )
+                if clean_vc is not None:
+                    lt_start, lt_dur = _clamp_to_v1_segment(timeline, round(clean_vc.timeline_start + 0.35, 2), 3.0)
+                else:
+                    card_style = "editorial_caption"
+                    use_mag_plate = False
+            chap_lbl = _clean_waypoint_label(chap)
+            plate_accent = sample_shot_accent_hex(
+                _resolve_sample_image_for_time(lt_start, timeline, catalog),
+                fallback_hex=str(theme_spec["accent_hex"]),
+            )
+            kicker = f"CHAPTER {roman}" if use_mag_plate else chap_lbl
+            consolidated_overlays.append(
+                TitleOverlayItem(
+                    id=f"title_lt_{chap.chapter_id}",
+                    style=card_style,  # type: ignore[arg-type]
+                    theme=theme,  # type: ignore[arg-type]
+                    motion_preset="masked_rise",
+                    eyebrow=kicker,
+                    overline=kicker,
+                    chapter_numeral=roman if use_mag_plate else "",
+                    text=chap.title,
+                    subtitle=chap.narrative_goal[:56] if chap.narrative_goal else chap_lbl,
+                    timeline_start=lt_start,
+                    duration=lt_dur,
+                    fade_in=0.30,
+                    fade_out=0.35,
+                    accent_color=plate_accent,
+                    backdrop_blur=(not use_mag_plate) or use_glass,
+                    hdr_safe=is_hdr,
                 )
+            )
 
         # 2b. Convert Stage 25 narrative cues into upper-left curatorial editorial captions (zero plaque/subtitle overlap)
         if delivery_mode == "visual_editorial_cards" and isinstance(narration_data, dict):
@@ -919,7 +944,10 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                             break
                 if not v_title and vc.narrative_note:
                     v_title = re.sub(r"^\[[^\]]+\]\s*", "", vc.narrative_note).strip()
-                if len(v_title) >= 4:
+                is_generic_auto = v_title.startswith(
+                    ("Living Tableau", "Steady Frame", "Cinematic Scene", "Opening Establishing Vista", "Closing Finale Vista")
+                ) or bool(re.search(r"— Scene \d+$", v_title))
+                if len(v_title) >= 4 and not is_generic_auto:
                     lt_st, lt_dur = _clamp_to_v1_segment(timeline, vc.timeline_start + 0.35, min(3.8, max(2.2, vc.duration - 0.6)))
                     kicker = _strip_chapter_prefix(vc.act or "GALLERY MOMENT")[:26]
                     consolidated_overlays.append(

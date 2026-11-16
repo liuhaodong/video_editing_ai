@@ -128,12 +128,38 @@ Open **Google Antigravity** in this repository (always-on workspace rules in `AG
 Simply ask Antigravity in natural language:
 
 - *"Edit `/path/to/Photos-and-Videos` into a 4K HDR highlight film with Criterion museum plaques, paired vertical diptychs, and chamber BGM."*
+- *"Pull my Google Photos from 2026-07-01 to 2026-07-07, skip burst duplicates before downloading full-res videos, and edit a 3-minute 4K travel documentary."*
 - *"Inspect `/path/to/my_trip` first, ask me interactive questions about pacing and photo effects, and recommend the best runtime."*
 - *"Trim clip 2 by 1.5 seconds, update the title on the atrium shot, and give me a quick preview before re-rendering."*
 
-Antigravity automatically runs `ai_video_studio_skill.py` in `.venv` to inspect your footage, presents interactive multi-choice questions (`ask_question`), visually reviews contact sheets via `read_file`, coordinates specialist editing passes (`invoke_subagent`), executes 2-second surgical ripple edits (`edit-cut` + `render-segment`), and renders the final hardware-accelerated 4K 10-bit HLG HDR `.mp4` + `timeline.fcpxml`.
+Antigravity automatically runs `ai_video_studio_skill.py` in `.venv` to connect to Google Photos (or inspect local folders), presents interactive multi-choice questions (`ask_question`), visually reviews contact sheets via `read_file`, coordinates specialist editing passes (`invoke_subagent`), executes 2-second surgical ripple edits (`edit-cut` + `render-segment`), and renders the final hardware-accelerated 4K 10-bit HLG HDR `.mp4` + `timeline.fcpxml`.
 
-### 3. Secondary Usage: Programmatic CLI & Antigravity SDK (`ai-editor`)
+### 3. Direct Google Photos (Zero-Setup Browser Login & OAuth / Takeout Sync)
+
+Point the studio directly at Google Photos with a date range—**no Google Cloud Console setup required**:
+
+- **In Antigravity Chat (Hands-Free Browser Login)**: Ask Antigravity *"Edit my Google Photos from 2026-07-01 to 2026-07-07 into a travel film."* Antigravity opens `photos.google.com/search/2026-07-01%20to%202026-07-07` in the built-in browser pane so you can sign in naturally, then curates bursts, downloads the selected `.zip`/clips, preserves intact EXIF GPS + timestamps, and runs the 21-agent edit.
+- **In Terminal CLI (System Browser + Live `~/Downloads` Watcher)**: Launches your already-signed-in browser to that date-range search, watches `~/Downloads` until download completes, deduplicates bursts, filters `[date_from, date_to]`, and edits automatically (`--auth-mode oauth` and `--google-takeout` are also supported for power users):
+
+```bash
+# Zero-setup default: opens photos.google.com search for your dates, watches ~/Downloads, curates & renders!
+.venv/bin/python -m video_editing_ai.cli agents-run --google-photos \
+  --date-from 2026-07-01 --date-to 2026-07-07 \
+  -o "./summer_trip_project" \
+  -p "Summer family trip highlights with travel map and chamber soundtrack" \
+  --render
+
+# Or import already-downloaded browser .zip / media files directly
+.venv/bin/python -m video_editing_ai.cli agents-run \
+  --from-downloads "~/Downloads/Photos-001.zip" \
+  --date-from 2026-07-01 --date-to 2026-07-07 -o "./summer_trip_project" --render
+
+# Optional OAuth Picker API or Google Takeout archive ingestion
+.venv/bin/python -m video_editing_ai.cli agents-run --google-takeout "/path/to/Takeout.zip" \
+  --date-from 2026-07-01 --date-to 2026-07-07 -o "./summer_trip_project" --render
+```
+
+### 4. Secondary Usage: Programmatic CLI & Antigravity SDK (`ai-editor`)
 
 ```bash
 # Verify environment, Antigravity integration, GPU/VideoToolbox, and all 27 Python packages
@@ -159,7 +185,7 @@ Antigravity automatically runs `ai_video_studio_skill.py` in `.venv` to inspect 
 .venv/bin/python -m video_editing_ai.cli sync-skill
 ```
 
-### 4. Companion Local Web Studio (`serve`)
+### 5. Companion Local Web Studio (`serve`)
 
 ```bash
 .venv/bin/python -m video_editing_ai.cli serve --port 8000
@@ -167,7 +193,7 @@ Antigravity automatically runs `ai_video_studio_skill.py` in `.venv` to inspect 
 
 Open `http://127.0.0.1:8000` to run the **Stage 0 Client Intake Interview**, preview 16 photo projection effects, inspect live agent reasoning and `blackboard.json` messages, edit `timeline.yaml`, and trigger hardware-accelerated 4K HDR renders.
 
-### 5. Optional Fallback Multimodal VLM Providers
+### 6. Optional Fallback Multimodal VLM Providers
 
 When running outside interactive Antigravity chat without live Antigravity SDK agents, you can optionally configure a fallback VLM API key:
 

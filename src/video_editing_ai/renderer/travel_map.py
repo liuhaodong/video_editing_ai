@@ -539,9 +539,13 @@ def infer_transport_mode(
     if any(k in blob for k in ("shinkansen", "rail", "train", "station", "eurostar", "tgv", "hakone", "kyoto")):
         if 35.0 <= distance_km <= 900.0:
             return "train"
-    if any(k in blob for k in ("ferry", "harbor", "harbour", "island", "bay", "santorini", "miyajima", "venice", "como", "fiord", "sound")):
-        if distance_km <= 350.0:
-            return "boat"
+    # Require explicit marine transit cues ("ferry", "island", "cruise", ...) rather than landing near a bay/harbor by car
+    orig_low = (origin_label or "").lower()
+    dest_low = (dest_label or "").lower()
+    explicit_marine = any(k in blob for k in ("ferry", "island", "cruise", "catamaran", "santorini", "miyajima", "venice", "como", "fiord", "catalina", "archipelago"))
+    both_coastal = any(k in orig_low for k in ("harbor", "harbour", "bay", "pier", "marina")) and any(k in dest_low for k in ("harbor", "harbour", "bay", "pier", "marina"))
+    if (explicit_marine or both_coastal) and distance_km <= 350.0:
+        return "boat"
     if distance_km >= 450.0:
         return "flight"
     if distance_km >= 15.0:

@@ -786,8 +786,11 @@ class MontageEditorAgent(BaseEditingAgent):
         brief = blackboard.creative_brief
         paper = blackboard.paper_edit
         media_index = blackboard.media_index
+        target_dur_sec = brief.target_duration_sec if brief else 110.0
         max_broll = brief.max_broll_duration_sec if brief else 4.5
-        is_extended_cut = (brief.target_duration_sec if brief else 110.0) >= 135.0
+        is_extended_cut = target_dur_sec >= 135.0
+        # Allow complete un-rushed video B-roll scenes in medium/feature documentaries (>= 240s)
+        video_broll_cap = max(max_broll, min(16.0, round(target_dur_sec / 40.0, 1))) if target_dur_sec >= 240.0 else max_broll
 
         subclips_by_path: dict[str, list[CulledSubClip]] = {}
         if media_index is not None:
@@ -914,7 +917,8 @@ class MontageEditorAgent(BaseEditingAgent):
                 prefer_db = chap_mode == "music_montage"
 
                 if item.roll_type in ("b_roll", "still"):
-                    cap = max(max_broll, 7.0) if item.id in v1_with_v2_cutaway else max_broll
+                    eff_max = video_broll_cap if item.type == "video" else max_broll
+                    cap = max(eff_max, 7.0) if item.id in v1_with_v2_cutaway else eff_max
                     target_d = min(cap, item.duration)
                     min_hold = 2.0 if prefer_db else 2.4
                     if item.type == "photo" and item.ken_burns is not None and is_extended_cut:
@@ -964,7 +968,8 @@ class MontageEditorAgent(BaseEditingAgent):
                         (c.usable_out for c in subclips_by_path.get(item.source, [])),
                         default=item.source_in + item.duration,
                     )
-                    avail_max = max(2.0, min(6.0, usable_hi - item.source_in))
+                    montage_vid_max = 14.0 if target_dur_sec >= 240.0 else 6.0
+                    avail_max = max(2.0, min(montage_vid_max, usable_hi - item.source_in))
                     snapped_d = _snap_montage_duration(
                         item.duration,
                         min_dur=2.0,

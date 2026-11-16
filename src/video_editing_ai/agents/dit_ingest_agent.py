@@ -19,7 +19,7 @@ from ..analyzer.media_probe import (
     probe_audio_signal_metrics,
     probe_video_file,
 )
-from ..models.schema import DITIngestEntry, DITIngestManifest
+from ..models.schema import CloudMediaCandidateItem, DITIngestEntry, DITIngestManifest, GooglePhotosSyncManifest
 from .base import BaseEditingAgent, PipelineBlackboard, register_agent
 
 
@@ -104,6 +104,7 @@ class DITIngestAgent(BaseEditingAgent):
     def run(self, blackboard: PipelineBlackboard) -> dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor
 
+        from ..cloud.google_photos import discover_takeout_sidecar_metadata
         from ..hardware import get_io_worker_count
 
         cache_dir = blackboard.project_dir / "cache"
@@ -111,6 +112,27 @@ class DITIngestAgent(BaseEditingAgent):
         cache_file = cache_dir / "dit_ingest_cache.json"
         previews_dir = cache_dir / "photos"
         previews_dir.mkdir(parents=True, exist_ok=True)
+
+        gp_manifest = blackboard.google_photos_manifest
+        gp_path = blackboard.project_dir / "google_photos_manifest.json"
+        if gp_manifest is None and gp_path.exists():
+            try:
+                gp_manifest = GooglePhotosSyncManifest.from_json_file(gp_path)
+                blackboard.google_photos_manifest = gp_manifest
+            except Exception:
+                gp_manifest = None
+
+        cloud_by_path: dict[str, CloudMediaCandidateItem] = {}
+        cloud_by_name: dict[str, CloudMediaCandidateItem] = {}
+        if gp_manifest is not None:
+            for c_item in gp_manifest.items:
+                if c_item.downloaded_path:
+                    try:
+                        cloud_by_path[str(Path(c_item.downloaded_path).resolve())] = c_item
+                    except Exception:
+                        cloud_by_path[c_item.downloaded_path] = c_item
+                if c_item.filename:
+                    cloud_by_name.setdefault(c_item.filename.lower(), c_item)
 
         disk_cache: dict[str, dict[str, Any]] = {}
         if cache_file.exists():
@@ -134,8 +156,22 @@ class DITIngestAgent(BaseEditingAgent):
             idx, f = item
             ext = f.suffix.lower()
             resolved_str = str(f.resolve())
+            cloud_item = cloud_by_path.get(resolved_str) or cloud_by_name.get(f.name.lower())
+            sidecar_meta = {} if cloud_item is not None else discover_takeout_sidecar_metadata(f)
+            cloud_ctime = (
+                (cloud_item.creation_time if cloud_item and cloud_item.creation_time else None)
+                or sidecar_meta.get("creation_time")
+            )
+            cloud_cam = cloud_item.camera_make_model if cloud_item else None
+            cloud_exif = cloud_item.exif_summary if cloud_item else None
+            cloud_lat = cloud_item.gps_lat if (cloud_item and cloud_item.gps_lat is not None) else sidecar_meta.get("gps_lat")
+            cloud_lon = cloud_item.gps_lon if (cloud_item and cloud_item.gps_lon is not None) else sidecar_meta.get("gps_lon")
+            cloud_alt = cloud_item.gps_alt if (cloud_item and cloud_item.gps_alt is not None) else sidecar_meta.get("gps_alt")
+            is_fav = bool((cloud_item and cloud_item.is_favorite) or sidecar_meta.get("is_favorite"))
+            cloud_sig = f"{cloud_ctime or ''}|{cloud_cam or ''}|{cloud_lat or ''}|{cloud_lon or ''}|{cloud_alt or ''}|{int(is_fav)}"
+
             size_b, mtime_ns, f_hash = compute_file_fingerprint(f)
-            cache_key = f"v3|{resolved_str}|{size_b}|{mtime_ns}|{f_hash}"
+            cache_key = f"v4|{resolved_str}|{size_b}|{mtime_ns}|{f_hash}|{cloud_sig}"
 
             cached_payload = disk_cache.get(cache_key)
             if isinstance(cached_payload, dict):
@@ -163,7 +199,12 @@ class DITIngestAgent(BaseEditingAgent):
                 pfmt = str(v_info.get("pix_fmt") or "yuv420p").lower()
                 is_hdr = trc in ("arib-std-b67", "smpte2084") or "2020" in prim
                 is_log = "log" in trc or any(k in f.stem.lower() for k in ("slog", "vlog", "flog", "clog"))
-                cam_id = (v_info.get("camera_make_model") or "video_cam").replace(" ", "_").lower()
+                c_raw = v_info.get("creation_time") or cloud_ctime
+                cam_mm = v_info.get("camera_make_model") or cloud_cam
+                cam_id = (cam_mm or "video_cam").replace(" ", "_").lower()
+                gps_lat = v_info.get("gps_lat") if v_info.get("gps_lat") is not None else cloud_lat
+                gps_lon = v_info.get("gps_lon") if v_info.get("gps_lon") is not None else cloud_lon
+                gps_alt = v_info.get("gps_alt") if v_info.get("gps_alt") is not None else cloud_alt
                 ent = DITIngestEntry(
                     asset_id=f"vid_{f.stem}",
                     source_path=resolved_str,
@@ -173,8 +214,8 @@ class DITIngestAgent(BaseEditingAgent):
                     mtime_ns=mtime_ns,
                     file_hash=f_hash,
                     cache_hit=False,
-                    creation_time_raw=v_info.get("creation_time"),
-                    normalized_timestamp=v_info.get("creation_time") or f"1970-01-01T00:{idx % 60:02d}:00Z",
+                    creation_time_raw=c_raw,
+                    normalized_timestamp=c_raw or f"1970-01-01T00:{idx % 60:02d}:00Z",
                     camera_id=cam_id,
                     duration=v_info["duration"],
                     width=v_info["width"],
@@ -191,14 +232,21 @@ class DITIngestAgent(BaseEditingAgent):
                     integrated_lufs=float(aud_sig["integrated_lufs"]),
                     snr_db=float(aud_sig["snr_db"]),
                     has_diegetic_music=bool(aud_sig["has_diegetic_music"]),
-                    gps_lat=v_info.get("gps_lat"),
-                    gps_lon=v_info.get("gps_lon"),
-                    gps_alt=v_info.get("gps_alt"),
-                    camera_make_model=v_info.get("camera_make_model"),
+                    gps_lat=gps_lat,
+                    gps_lon=gps_lon,
+                    gps_alt=gps_alt,
+                    camera_make_model=cam_mm,
+                    exif_summary=cloud_exif,
+                    is_favorite=is_fav,
                 )
             elif ext in PHOTO_EXTENSIONS:
                 ph = inspect_photo_file(f, previews_dir)
-                cam_id = (ph.camera_make_model or "photo_cam").replace(" ", "_").lower()
+                c_raw = ph.creation_time or cloud_ctime
+                cam_mm = ph.camera_make_model or cloud_cam
+                cam_id = (cam_mm or "photo_cam").replace(" ", "_").lower()
+                gps_lat = ph.gps_lat if ph.gps_lat is not None else cloud_lat
+                gps_lon = ph.gps_lon if ph.gps_lon is not None else cloud_lon
+                gps_alt = ph.gps_alt if ph.gps_alt is not None else cloud_alt
                 ent = DITIngestEntry(
                     asset_id=ph.id,
                     source_path=resolved_str,
@@ -208,8 +256,8 @@ class DITIngestAgent(BaseEditingAgent):
                     mtime_ns=mtime_ns,
                     file_hash=f_hash,
                     cache_hit=False,
-                    creation_time_raw=ph.creation_time,
-                    normalized_timestamp=ph.creation_time or f"1970-01-01T01:{idx % 60:02d}:00Z",
+                    creation_time_raw=c_raw,
+                    normalized_timestamp=c_raw or f"1970-01-01T01:{idx % 60:02d}:00Z",
                     camera_id=cam_id,
                     duration=0.0,
                     width=ph.width,
@@ -226,14 +274,15 @@ class DITIngestAgent(BaseEditingAgent):
                     integrated_lufs=-60.0,
                     snr_db=30.0,
                     has_diegetic_music=False,
-                    gps_lat=ph.gps_lat,
-                    gps_lon=ph.gps_lon,
-                    gps_alt=ph.gps_alt,
-                    camera_make_model=ph.camera_make_model,
-                    exif_summary=ph.exif_summary,
+                    gps_lat=gps_lat,
+                    gps_lon=gps_lon,
+                    gps_alt=gps_alt,
+                    camera_make_model=cam_mm,
+                    exif_summary=ph.exif_summary or cloud_exif,
                     preview_path=ph.preview_path,
                     focal_point=ph.focal_point,
                     color_stats=ph.color_stats,
+                    is_favorite=bool(is_fav or ph.is_favorite),
                 )
             else:
                 dur = probe_audio_file(f)

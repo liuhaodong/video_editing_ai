@@ -314,6 +314,29 @@ class SoundDesignerMixerAgent(BaseEditingAgent):
                 a_trk.duck_under_dialogue = True
                 a_trk.duck_volume = round(a_trk.volume * (10.0 ** (-14.0 / 20.0)), 4)
                 a_trk.duration = round(timeline.total_duration, 2)
+                src_p = Path(a_trk.source)
+                if src_p.exists() and src_p.stat().st_size > 16_000:
+                    try:
+                        from ..music_supervisor_agent import master_bgm_soundtrack, probe_audio_diagnostics
+
+                        actual_dur = float(probe_audio_diagnostics(src_p).get("duration_sec", 0.0) or 0.0)
+                        if actual_dur > 4.0 and timeline.total_duration > actual_dur + 1.5:
+                            lib_tracks = [
+                                p
+                                for p in sorted(src_p.parent.glob("*.mp3"))
+                                if not p.name.startswith("mastered") and p.stat().st_size > 16_000
+                            ]
+                            tracks_in = lib_tracks[:4] if lib_tracks else [src_p]
+                            mastered = master_bgm_soundtrack(
+                                track_paths=tracks_in,
+                                target_duration_sec=timeline.total_duration,
+                                output_mp3=src_p.parent / "mastered_soundtrack.mp3",
+                                target_lufs=-14.0,
+                                crossfade_sec=3.5,
+                            )
+                            a_trk.source = str(mastered.resolve())
+                    except Exception:
+                        pass
 
         # 2. Build spatial ambience & foley cues for photo plates
         cues: list[SoundDesignCue] = []

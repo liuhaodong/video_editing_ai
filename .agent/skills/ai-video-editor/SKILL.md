@@ -60,8 +60,23 @@ Additional rendering & contract schema specification: [references/10_contracts_a
 
 When the user asks you to edit a video from a media folder, follow these 6 phases:
 
-### Phase 1: Project Setup & Media Library Inspection (`inspect-library` & `project`)
-Scan the raw media folder to detect video/photo counts, EXIF camera models, and the **Executive Director's Recommended Video Length (`30s–600s`)**:
+### Phase 1: Project Setup, Zero-Setup Google Photos Browser Login & Media Inspection (`sync-google-photos`, `inspect-library`, `project`)
+When the user points you to **Google Photos** with a date range (`YYYY-MM-DD` to `YYYY-MM-DD`) instead of a local directory, use the **Zero-Setup Browser Login** workflow first (no Google Cloud `client_secret.json` required, and downloaded originals retain EXIF GPS for the 2.5D Travel Map):
+1. **Antigravity Browser Agent (Hands-Free in Chat)**:
+   - Print the deep-linked date search URL (`https://photos.google.com/search/YYYY-MM-DD%20to%20YYYY-MM-DD`):
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --search-url-only --date-from 2026-07-01 --date-to 2026-07-07
+     ```
+   - Launch `invoke_subagent(TypeName="browser", Model="flash", ...)` pointing at that `search_url`. If redirected to Google Sign-In (`accounts.google.com`), pause and ask the user to log in inside the browser pane, then call `send_message` on the same subagent `conversationId` so it resumes in the signed-in session, skips obvious burst duplicates, selects the remaining date-range items, clicks **Download** (`Shift+D`), and reports the downloaded `.zip`/media path(s).
+   - Run `sync-google-photos --from-downloads` to extract, enforce `[date_from, date_to]`, deduplicate bursts, and stage `<project_dir>/cloud_media/`:
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --project-dir "<project_dir>" --from-downloads "<downloaded_zip_or_files>" --date-from 2026-07-01 --date-to 2026-07-07
+     ```
+2. **CLI System Browser + `~/Downloads` Auto-Watcher (or Optional OAuth Picker / Takeout)**:
+   - Running `sync-google-photos --project-dir "<project_dir>" --date-from ... --date-to ...` (without `--from-downloads`) opens `photos.google.com/search/...` in the user's browser and watches `~/Downloads` until `Photos*.zip` finishes (or uses the Picker API if optional OAuth credentials were configured, or `--takeout <path>` for Google Takeout exports).
+   - You can also pass `--google-photos --date-from ... --date-to ...` (or `--from-downloads` / `--google-takeout`) directly to `inspect-library` or `run-pipeline`.
+
+Scan the raw (or cloud-staged) media folder to detect video/photo counts, EXIF camera models, and the **Executive Director's Recommended Video Length (`30s–600s`)**:
 ```bash
 .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py inspect-library --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>"
 ```

@@ -373,11 +373,25 @@ def _format_tracked_eyebrow(text: str) -> str:
     return up
 
 
+def _sanitize_display_text(text: str) -> str:
+    """Strip or replace symbols missing in standard serif/sans TTFs (e.g. U+2605 stars -> clean text) so zero tofu boxes render."""
+    if not text:
+        return ""
+    return (
+        str(text)
+        .replace("★FAV ", "FAV · ")
+        .replace("★FAV", "FAV")
+        .replace("★", "")
+        .replace("☆", "")
+    )
+
+
 def _measure_text(
     draw: ImageDraw.ImageDraw,
     text: str,
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
 ) -> tuple[int, int]:
+    text = _sanitize_display_text(text)
     if not text:
         return 0, 0
     box = draw.textbbox((0, 0), text, font=font)
@@ -392,7 +406,7 @@ def _fit_text_lines(
     max_lines: int = 2,
 ) -> list[str]:
     """Wrap Latin or CJK text to fit within `max_width` pixels without overflowing glass card bounds."""
-    clean = " ".join((text or "").strip().split())
+    clean = " ".join(_sanitize_display_text(text).strip().split())
     if not clean:
         return []
     if _measure_text(draw, clean, font)[0] <= max_width or max_lines <= 1:
@@ -471,6 +485,7 @@ def measure_tracked_text(
     cjk_font: Optional[ImageFont.FreeTypeFont | ImageFont.ImageFont] = None,
 ) -> tuple[int, int]:
     """Measure (width, height) of text with optional per-glyph tracking and automatic CJK fallback."""
+    text = _sanitize_display_text(text)
     if not text:
         return (0, 0)
     fallback = cjk_font or _load_font_tier(_resolve_font_size(font), tier="cjk", bold=True)
@@ -524,6 +539,7 @@ def _draw_tracked_on_draw(
     cjk_font: Optional[ImageFont.FreeTypeFont | ImageFont.ImageFont] = None,
 ) -> int:
     """Render tracked mixed-script text onto a Pillow ImageDraw, returning rendered pixel width."""
+    text = _sanitize_display_text(text)
     if not text:
         return 0
     x, y = float(xy[0]), float(xy[1])

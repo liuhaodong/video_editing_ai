@@ -275,7 +275,10 @@ class PhotoCuratorAgent(BaseEditingAgent):
         # Scale number of curated photos dynamically from brief.target_duration_sec
         video_dur_sum = sum(s.duration for s in media_index.subclips if s.media_type == "video" and not s.is_discarded)
         target_dur = brief.target_duration_sec if brief else 110.0
-        rem_photo_sec = max(24.0, target_dur - video_dur_sum)
+        if video_dur_sum >= 25.0:
+            rem_photo_sec = min(max(18.0, target_dur - video_dur_sum), max(24.0, target_dur * 0.35))
+        else:
+            rem_photo_sec = max(24.0, target_dur - video_dur_sum)
         dynamic_select_count = max(14, min(60, int(round(rem_photo_sec / 3.1))))
         target_select_count = min(total_photos, dynamic_select_count if total_photos >= 15 else total_photos)
         min_taste_floor = 7.8
@@ -321,6 +324,8 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     cam_model = None
             badge = _build_camera_badge(sc.filename, cam_model, project_badge_tag)
 
+            is_fav = bool(getattr(sc, "is_favorite", False))
+            boosted_taste = round(min(9.99, float(metrics["overall_taste_score"]) + (1.25 if is_fav else 0.0)), 2)
             curated_items.append(
                 CuratedPhotoItem(
                     subclip_id=sc.subclip_id,
@@ -333,7 +338,8 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     composition_score=float(metrics["composition_score"]),
                     portrait_warmth_score=float(metrics["portrait_warmth_score"]),
                     art_architecture_score=float(metrics["art_architecture_score"]),
-                    overall_taste_score=float(metrics["overall_taste_score"]),
+                    overall_taste_score=boosted_taste,
+                    is_favorite=is_fav,
                     is_selected=False,
                     subject_category=inferred_cat,
                     annotation_title=title,
@@ -412,6 +418,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
             members_sorted = sorted(
                 members,
                 key=lambda it: (
+                    it.is_favorite,
                     it.overall_taste_score + subclip_by_id[it.subclip_id].brief_match_boost * 0.45,
                     it.eye_open_score,
                     it.smile_score,
@@ -437,7 +444,9 @@ class PhotoCuratorAgent(BaseEditingAgent):
         index_pos_by_id = {it.subclip_id: i for i, it in enumerate(curated_items)}
         num_time_bins = max(1, min(8, target_select_count))
 
-        eligible_pool = [it for it in deduped_pool if it.overall_taste_score >= min_taste_floor]
+        eligible_pool = [
+            it for it in deduped_pool if it.is_favorite or it.overall_taste_score >= min_taste_floor
+        ]
         if len(eligible_pool) < target_select_count:
             eligible_pool = list(deduped_pool)
 
@@ -473,6 +482,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     + 0.09 * cat_nov
                     + 0.06 * scale_nov
                     + 0.05 * time_nov
+                    + (0.35 if cand.is_favorite else 0.0)
                 )
                 if gain > best_gain:
                     best_gain = gain
@@ -916,11 +926,16 @@ def render_curation_contact_sheets(
                 x0 = pad + c * (cell_w + pad)
                 y0 = 44 + pad + r * (cell_h + pad)
 
-                border_col = (16, 185, 129) if item.is_selected else (245, 158, 11)
+                border_col = (
+                    (250, 204, 21)
+                    if (item.is_selected and item.is_favorite)
+                    else ((16, 185, 129) if item.is_selected else (245, 158, 11))
+                )
                 draw.rectangle([x0, y0, x0 + cell_w, y0 + cell_h], fill=(22, 29, 43), outline=border_col, width=2)
                 draw.rectangle([x0, y0, x0 + cell_w, y0 + 26], fill=(15, 21, 33))
 
-                status_tag = f"★ SEL {item.overall_taste_score:.1f}" if item.is_selected else f"CAND {item.overall_taste_score:.1f}"
+                fav_pfx = "★FAV " if item.is_favorite else ""
+                status_tag = f"{fav_pfx}★ SEL {item.overall_taste_score:.1f}" if item.is_selected else f"{fav_pfx}CAND {item.overall_taste_score:.1f}"
                 header_text = f"[{tile_code}] {item.filename[:20]} • {status_tag}"
                 draw.text((x0 + 6, y0 + 4), header_text, fill=border_col, font=font_hdr)
 
@@ -948,6 +963,7 @@ def render_curation_contact_sheets(
                         "filename": item.filename,
                         "source_path": item.source_path,
                         "orientation": item.orientation,
+                        "is_favorite": item.is_favorite,
                         "is_selected": item.is_selected,
                         "overall_taste_score": item.overall_taste_score,
                         "annotation_title": item.annotation_title,

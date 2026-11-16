@@ -73,7 +73,7 @@ def _synthesize_video_scene_caption_and_transition(
             "pan_right": "Sweeping Panorama",
             "tilt_up": "Architectural Tilt-Up",
             "walk_forward": "First-Person Tracking Shot",
-            "static": "Living Tableau",
+            "static": "Steady Frame",
         }.get(cam_motion, "Cinematic Scene")
         stage_label = (
             "Opening Establishing Vista"
@@ -592,6 +592,7 @@ class CullerAgent(BaseEditingAgent):
             v_lat = dit_ent.gps_lat if dit_ent and dit_ent.gps_lat is not None else vid.gps_lat
             v_lon = dit_ent.gps_lon if dit_ent and dit_ent.gps_lon is not None else vid.gps_lon
             v_alt = dit_ent.gps_alt if dit_ent and dit_ent.gps_alt is not None else vid.gps_alt
+            is_fav = bool((dit_ent and dit_ent.is_favorite) or getattr(vid, "is_favorite", False))
 
             aroll_seq = 0
             broll_seq = 0
@@ -624,10 +625,13 @@ class CullerAgent(BaseEditingAgent):
                     translations = [d.translation for d in m_dialogues if d.translation]
                     blob = f"{vid.filename} {vid.overall_summary} {spoken_text}"
                     boost = _compute_brief_match_boost(blob, True, must_topics, avoid_topics)
+                    if is_fav:
+                        boost = round(min(2.5, boost + 1.0), 2)
+                    fav_bonus = 1.15 if is_fav else 0.0
                     prosody_bonus = max(0.0, (m_pros - 0.35) * 1.1)
                     stab_adj = (m_stab - 0.75) * 0.8
                     emo_score = float(
-                        np.clip(round(avg_scene_q + 0.75 + boost * 0.5 + prosody_bonus + stab_adj, 2), 1.0, 10.0)
+                        np.clip(round(avg_scene_q + 0.75 + boost * 0.5 + prosody_bonus + stab_adj + fav_bonus, 2), 1.0, 10.0)
                     )
                     v_title, v_sub, v_trans, v_rat = _synthesize_video_scene_caption_and_transition(
                         vid=vid,
@@ -672,7 +676,8 @@ class CullerAgent(BaseEditingAgent):
                             translation=" | ".join(translations) if translations else None,
                             emotion_score=emo_score,
                             action_peak_tc=m_peak,
-                            aesthetic_score=round(float(np.clip(avg_scene_q + stab_adj * 0.5, 1.0, 10.0)), 2),
+                            aesthetic_score=round(float(np.clip(avg_scene_q + stab_adj * 0.5 + fav_bonus, 1.0, 10.0)), 2),
+                            is_favorite=is_fav,
                             brief_match_boost=boost,
                             annotation_title=v_title,
                             annotation_subtitle=v_sub,
@@ -699,13 +704,16 @@ class CullerAgent(BaseEditingAgent):
                     )
                     blob = f"{vid.filename} {vid.overall_summary}"
                     boost = _compute_brief_match_boost(blob, False, must_topics, avoid_topics)
-                    is_disc = avg_scene_q < 3.0 or m_stab < 0.25
+                    if is_fav:
+                        boost = round(min(2.5, boost + 1.0), 2)
+                    fav_bonus = 1.15 if is_fav else 0.0
+                    is_disc = (not is_fav) and (avg_scene_q < 3.0 or m_stab < 0.25)
                     if is_disc:
                         discarded_count += 1
                     stab_adj = (m_stab - 0.72) * 1.1
                     prosody_bonus = max(0.0, (m_pros - 0.40) * 0.8)
                     emo_score = float(
-                        np.clip(round(avg_scene_q + boost * 0.5 + stab_adj + prosody_bonus, 2), 1.0, 10.0)
+                        np.clip(round(avg_scene_q + boost * 0.5 + stab_adj + prosody_bonus + fav_bonus, 2), 1.0, 10.0)
                     )
                     v_title, v_sub, v_trans, v_rat = _synthesize_video_scene_caption_and_transition(
                         vid=vid,
@@ -749,7 +757,8 @@ class CullerAgent(BaseEditingAgent):
                             spoken_text="",
                             emotion_score=emo_score,
                             action_peak_tc=m_peak,
-                            aesthetic_score=round(float(np.clip(avg_scene_q + stab_adj * 0.6, 1.0, 10.0)), 2),
+                            aesthetic_score=round(float(np.clip(avg_scene_q + stab_adj * 0.6 + fav_bonus, 1.0, 10.0)), 2),
+                            is_favorite=is_fav,
                             brief_match_boost=boost,
                             annotation_title=v_title,
                             annotation_subtitle=v_sub,
@@ -786,11 +795,15 @@ class CullerAgent(BaseEditingAgent):
                 face_area = (fx2 - fx1) * (fy2 - fy1)
                 shot_scale = "closeup" if face_area >= 0.14 else "medium"
 
+            dit_ph = dit_by_path.get(str(Path(ph.path).resolve()))
+            is_fav_ph = bool((dit_ph and dit_ph.is_favorite) or getattr(ph, "is_favorite", False))
             blob = f"{ph.filename} {ph.caption} {' '.join(ph.subjects)} {perc['inferred_category']}"
             boost = _compute_brief_match_boost(blob, False, must_topics, avoid_topics)
+            if is_fav_ph:
+                boost = round(min(2.5, boost + 1.0), 2)
+            fav_bonus_ph = 1.15 if is_fav_ph else 0.0
             taste_q = float(perc["overall_taste_score"])
-            emo_score = float(np.clip(round(taste_q + boost * 0.45 + float(perc["smile_score"]) * 0.3, 2), 1.0, 10.0))
-            dit_ph = dit_by_path.get(str(Path(ph.path).resolve()))
+            emo_score = float(np.clip(round(taste_q + boost * 0.45 + float(perc["smile_score"]) * 0.3 + fav_bonus_ph, 2), 1.0, 10.0))
             ph_norm_ts = (
                 (dit_ph.normalized_timestamp if dit_ph and dit_ph.normalized_timestamp else None)
                 or ph.creation_time
@@ -832,7 +845,8 @@ class CullerAgent(BaseEditingAgent):
                     spoken_text="",
                     emotion_score=emo_score,
                     action_peak_tc=1.5,
-                    aesthetic_score=round(min(10.0, max(1.0, taste_q)), 2),
+                    aesthetic_score=round(min(10.0, max(1.0, taste_q + fav_bonus_ph)), 2),
+                    is_favorite=is_fav_ph,
                     brief_match_boost=boost,
                     subject_category=str(perc["inferred_category"]),
                     is_discarded=False,
@@ -849,19 +863,22 @@ class CullerAgent(BaseEditingAgent):
 
         video_dur_sum = sum(s.duration for s in subclips if s.media_type == "video" and not s.is_discarded)
         target_dur = blackboard.creative_brief.target_duration_sec if blackboard.creative_brief else 110.0
-        rem_photo_sec = max(24.0, target_dur - video_dur_sum)
+        if video_dur_sum >= 25.0:
+            rem_photo_sec = min(max(18.0, target_dur - video_dur_sum), max(24.0, target_dur * 0.35))
+        else:
+            rem_photo_sec = max(24.0, target_dur - video_dur_sum)
         dynamic_photo_cap = max(14, min(60, int(round(rem_photo_sec / 3.1))))
         max_photos_cap = dynamic_photo_cap if len(photo_candidates) >= 15 else len(photo_candidates)
         target_active_photos = min(len(photo_candidates), max_photos_cap)
         if len(photo_candidates) > target_active_photos and target_active_photos > 0:
             bucket_size = len(photo_candidates) / target_active_photos
-            chosen_ids: set[str] = set()
+            chosen_ids: set[str] = {c.subclip_id for c in photo_candidates if c.is_favorite}
             for b in range(target_active_photos):
                 s_i = int(round(b * bucket_size))
                 e_i = int(round((b + 1) * bucket_size))
                 bucket = photo_candidates[s_i : max(s_i + 1, e_i)]
                 if bucket:
-                    best_in_bucket = max(bucket, key=lambda c: (c.emotion_score, c.aesthetic_score))
+                    best_in_bucket = max(bucket, key=lambda c: (c.is_favorite, c.emotion_score, c.aesthetic_score))
                     chosen_ids.add(best_in_bucket.subclip_id)
 
             for cand in photo_candidates:

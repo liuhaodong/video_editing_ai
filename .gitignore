@@ -27,7 +27,10 @@ louvre_day_trip_project/
 workspace_project/
 render_cache/
 cache/
+cloud_media/
 scratch_frames/
+*client_secret*.json
+*google_photos_token*.json
 *.mp4
 *.mov
 *.MOV

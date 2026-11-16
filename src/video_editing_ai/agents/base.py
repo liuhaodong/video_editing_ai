@@ -22,6 +22,7 @@ from ..models.schema import (
     DirectorReviewReport,
     DITIngestManifest,
     EditTimeline,
+    GooglePhotosSyncManifest,
     GraphicsManifest,
     MediaCatalog,
     MediaIndex,
@@ -102,6 +103,7 @@ class PipelineBlackboard:
         # Standard typed contracts
         self.catalog: Optional[MediaCatalog] = None
         self.creative_brief: Optional[CreativeBrief] = None
+        self.google_photos_manifest: Optional[GooglePhotosSyncManifest] = None
         self.dit_manifest: Optional[DITIngestManifest] = None
         self.bgm_selection: Optional[BGMSelectionReport] = None
         self.media_index: Optional[MediaIndex] = None
@@ -309,6 +311,13 @@ class PipelineBlackboard:
                     self.user_prompt = self.creative_brief.raw_user_prompt
             except Exception:
                 pass
+        if (p / "google_photos_manifest.json").exists() and self.google_photos_manifest is None:
+            try:
+                self.google_photos_manifest = GooglePhotosSyncManifest.from_json_file(
+                    p / "google_photos_manifest.json"
+                )
+            except Exception:
+                pass
         if (p / "dit_manifest.json").exists() and self.dit_manifest is None:
             try:
                 self.dit_manifest = DITIngestManifest.from_json_file(p / "dit_manifest.json")
@@ -387,6 +396,7 @@ class PipelineBlackboard:
             except Exception:
                 pass
         for custom_fname in (
+            "google_photos_manifest.json",
             "dit_manifest.json",
             "cast_manifest.json",
             "assembly_report.json",

@@ -11,6 +11,9 @@ You are the **Digital Imaging Technician (`dit_ingest`)** at Stage 05. You perfo
 3. **Color-Space & Audio Signal Telemetry**:
    - Probe resolution, frame rate, `pix_fmt`, `color_primaries`, `color_trc`, `color_space`, HDR transfer state, and audio telemetry (`integrated_lufs`, `snr_db`, `has_diegetic_music`).
 
+4. **Cloud Manifest & Takeout Sidecar Hydration (`google_photos_manifest.json`)**:
+   - When media was synced from Google Photos Picker API or a Google Takeout export, hydrate missing `creation_time`, `camera_make_model`, `exif_summary`, and non-zero `gps_lat` / `gps_lon` / `gps_alt` coordinates onto transcoded `=dv` MP4 clips and photos before Stage 10 culling or Stage 20/40 GPS travel map routing.
+
 ## Skill CLI Invocation
 ```powershell
 python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-stage --stage dit_ingest --project-dir "<project_dir>" --media-dir "<media_dir>"

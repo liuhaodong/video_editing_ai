@@ -611,6 +611,38 @@ def _extract_exif_gps(img: Image.Image) -> tuple[Optional[float], Optional[float
     return lat, lon
 
 
+def extract_exif_is_favorite(img: Image.Image, photo_path: Optional[Path] = None) -> bool:
+    """Return True if EXIF Rating (0x4746 >= 4), RatingPercent (0x4749 >= 75), or XMP Rating (4..5) is set."""
+    try:
+        exif = img.getexif()
+        if exif:
+            raw_rating = exif.get(0x4746)
+            if raw_rating is not None and int(float(raw_rating)) >= 4:
+                return True
+            raw_pct = exif.get(0x4749)
+            if raw_pct is not None and int(float(raw_pct)) >= 75:
+                return True
+    except Exception:
+        pass
+    try:
+        xmp_blob = img.info.get("xmp") or img.info.get("XML:com.adobe.xmp")
+        if xmp_blob:
+            txt = xmp_blob.decode("utf-8", errors="ignore") if isinstance(xmp_blob, (bytes, bytearray)) else str(xmp_blob)
+            if re.search(r'xmp:Rating\s*=\s*["\']([45])["\']|<xmp:Rating>\s*([45])\s*</xmp:Rating>', txt, re.IGNORECASE):
+                return True
+    except Exception:
+        pass
+    if photo_path is not None:
+        try:
+            with open(photo_path, "rb") as fh:
+                head = fh.read(65536)
+            if re.search(rb'xmp:Rating\s*=\s*["\']([45])["\']|<xmp:Rating>\s*([45])\s*</xmp:Rating>', head, re.IGNORECASE):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def compute_image_color_stats(img: Image.Image) -> dict[str, float]:
     """Mechanically compute RGB channel means, luminance percentiles (p05, p50, p95), and estimated Kelvin."""
     try:
@@ -652,6 +684,7 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
     creation_time = _extract_exif_datetime(img, photo_path)
     camera_make_model, exif_summary = _extract_exif_camera_info(img, photo_path)
     gps_lat, gps_lon, gps_alt = _extract_exif_gps_and_alt(img)
+    is_fav = extract_exif_is_favorite(img, photo_path)
     orig_w, orig_h = img.size
     try:
         exif_orient = img.getexif().get(274, 1)
@@ -708,6 +741,7 @@ def inspect_photo_file(photo_path: Path, previews_dir: Path) -> PhotoAsset:
         focal_point=focal,
         recommended_effect=rec_effect,
         quality_score=8.0,
+        is_favorite=is_fav,
     )
 
 
@@ -941,6 +975,7 @@ def build_initial_catalog(
                     gps_lon=gps_lon,
                     gps_alt=gps_alt,
                     color_stats=v_color_stats,
+                    is_favorite=bool(dit_ent.is_favorite) if dit_ent is not None else False,
                     overall_summary=f"Video clip {f.name} ({duration:.1f}s, {width}x{height})",
                     scenes=scenes,
                     dialogues=[],
@@ -976,9 +1011,13 @@ def build_initial_catalog(
                         gps_alt=dit_ent.gps_alt,
                         color_stats=dict(dit_ent.color_stats),
                         focal_point=dit_ent.focal_point,
+                        is_favorite=bool(dit_ent.is_favorite),
                     ),
                 )
-            return idx, "photo", inspect_photo_file(f, previews_dir)
+            inspected = inspect_photo_file(f, previews_dir)
+            if dit_ent is not None and dit_ent.is_favorite:
+                inspected.is_favorite = True
+            return idx, "photo", inspected
         else:
             if is_fresh and dit_ent is not None and dit_ent.media_type == "audio":
                 dur = float(dit_ent.duration)

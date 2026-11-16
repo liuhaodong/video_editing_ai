@@ -33,24 +33,36 @@ class CameraOperatorAgent(BaseEditingAgent):
         if timeline is None:
             return {"portrait_video_diptychs_created": 0, "stabilized_clips_count": 0}
 
-        # Collect candidate portrait photos from MediaIndex or visual_track for pairing with portrait 9:16 videos
-        portrait_photos: list[str] = []
+        # Collect candidate portrait photos scoped by chapter/day so companions never jump across unrelated days
+        paper = blackboard.paper_edit
+        subclip_to_act: dict[str, str] = {}
+        if paper is not None:
+            for chap in paper.chapters:
+                for sid in chap.selected_subclip_ids:
+                    subclip_to_act[sid] = chap.title
+
+        portrait_by_act: dict[str, list[str]] = {}
+        portrait_by_date: dict[str, list[str]] = {}
+        sc_by_path: dict[str, Any] = {}
         if mi is not None:
             for sc in mi.subclips:
+                sc_by_path[sc.source_path] = sc
                 if sc.media_type == "photo" and not sc.is_discarded and sc.orientation == "portrait":
                     if Path(sc.source_path).exists():
-                        portrait_photos.append(sc.source_path)
-        if not portrait_photos:
-            for v_item in timeline.visual_track:
-                if v_item.type == "photo" and Path(v_item.source).exists():
-                    portrait_photos.append(v_item.source)
+                        act_lbl = subclip_to_act.get(sc.subclip_id, "")
+                        if act_lbl:
+                            portrait_by_act.setdefault(act_lbl, []).append(sc.source_path)
+                        day_key = str(getattr(sc, "normalized_timestamp", "") or "")[:10]
+                        if len(day_key) == 10:
+                            portrait_by_date.setdefault(day_key, []).append(sc.source_path)
 
-        sc_by_path = {s.source_path: s for s in (mi.subclips if mi else [])}
+        used_companion_sources: set[str] = {
+            v.source for v in timeline.visual_track if v.type == "photo"
+        }
         operations: list[ClipCameraOperation] = []
         stabilize_effects: list[EffectTrackItem] = []
         diptych_count = 0
         stabilized_count = 0
-        photo_cursor = 0
 
         for item in timeline.visual_track:
             if item.type != "video" or not Path(item.source).exists():
@@ -63,9 +75,20 @@ class CameraOperatorAgent(BaseEditingAgent):
             sc_meta = sc_by_path.get(item.source)
             cam_move = sc_meta.camera_movement if sc_meta else "static"
 
-            if is_portrait_video and portrait_photos:
-                paired_photo = item.paired_visual_source or portrait_photos[photo_cursor % len(portrait_photos)]
-                photo_cursor += 1
+            # Only auto-pair portrait video when an explicit override or same-chapter/same-day portrait exists
+            paired_photo: str | None = item.paired_visual_source
+            if is_portrait_video and not paired_photo:
+                cand_pool = list(portrait_by_act.get(item.act or "", []))
+                if not cand_pool and sc_meta is not None:
+                    v_day = str(getattr(sc_meta, "normalized_timestamp", "") or "")[:10]
+                    if len(v_day) == 10:
+                        cand_pool = list(portrait_by_date.get(v_day, []))
+                unused = [p for p in cand_pool if p not in used_companion_sources]
+                if unused:
+                    paired_photo = unused[0]
+                    used_companion_sources.add(paired_photo)
+
+            if is_portrait_video and paired_photo and Path(paired_photo).exists():
                 item.paired_visual_source = paired_photo
                 diptych_count += 1
                 operations.append(

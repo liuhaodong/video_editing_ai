@@ -170,6 +170,16 @@ def collect_environment_diagnostics() -> dict[str, Any]:
     global_skill_dir = Path.home() / ".gemini" / "config" / "skills" / "ai-video-editor"
     global_skill_md = global_skill_dir / "SKILL.md"
 
+    gp_status: dict[str, Any] = {"browser_login_ready": True, "ready": False}
+    try:
+        from .cloud.google_photos import GooglePhotosAuthManager, get_default_browser_downloads_dir
+
+        gp_status = GooglePhotosAuthManager().get_auth_status()
+        gp_status["browser_login_ready"] = True
+        gp_status["downloads_dir"] = str(get_default_browser_downloads_dir())
+    except Exception as exc:
+        gp_status = {"browser_login_ready": True, "ready": False, "error": str(exc)}
+
     healthy = bool(
         python_compatible
         and ffmpeg_info["ok"]
@@ -191,6 +201,7 @@ def collect_environment_diagnostics() -> dict[str, Any]:
         "ffprobe": ffprobe_info,
         "heif": {"ok": heif_ok, "error": heif_error},
         "hardware": hardware_info,
+        "google_photos": gp_status,
         "antigravity": {
             "sdk_ok": ag_sdk_ok,
             "sdk_version": ag_version,

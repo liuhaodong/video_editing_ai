@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any, Literal, Optional
 
 import cv2
@@ -322,21 +323,25 @@ def cie_lab_harmony_score(
     return round(float(math.exp(-delta_e / 30.0)), 4)
 
 
-_CASCADE_CACHE: dict[str, Any] = {}
+_CASCADE_TLS = threading.local()
 
 
 def _get_haar_cascade(xml_name: str) -> Any:
-    if xml_name in _CASCADE_CACHE:
-        return _CASCADE_CACHE[xml_name]
+    cache: Optional[dict[str, Any]] = getattr(_CASCADE_TLS, "cache", None)
+    if cache is None:
+        cache = {}
+        _CASCADE_TLS.cache = cache
+    if xml_name in cache:
+        return cache[xml_name]
     try:
         cascade_path = Path(cv2.data.haarcascades) / xml_name
         if cascade_path.exists():
             clf = cv2.CascadeClassifier(str(cascade_path))
-            _CASCADE_CACHE[xml_name] = clf
+            cache[xml_name] = clf
             return clf
     except Exception:
         pass
-    _CASCADE_CACHE[xml_name] = None
+    cache[xml_name] = None
     return None
 
 
