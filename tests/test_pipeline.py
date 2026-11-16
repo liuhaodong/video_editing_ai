@@ -708,7 +708,7 @@ def test_cross_platform_macbook_pro_2019_hardware_encoding_and_filters(monkeypat
 
 
 def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
-    """Verify all 16 Premium Photo Presentation Modes + 8 Atmospheric Finishers and 4x4 showcase sheet generator."""
+    """Verify all 19 Premium Photo Presentation Modes + 10 Atmospheric Finishers and 4x5 showcase sheet generator."""
     from PIL import Image, ImageDraw
     from video_editing_ai.models.schema import (
         VALID_PHOTO_MODES,
@@ -736,9 +736,12 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
     ImageDraw.Draw(v_img).rectangle([55, 80, 245, 400], fill=(225, 185, 110), outline=(255, 255, 255), width=5)
     v_img.save(p_vert, quality=90)
 
-    # All 16 modes paired evenly across all 8 finishers (+ 'none')
+    # All 19 modes paired across all 10 finishers (+ 'none')
     modes_and_finishers = [
-        ("cinematic_depth_3d", "golden_light_leak"),
+        ("cinematic_depth_3d", "halation_bloom_35mm"),
+        ("aperture_rack_focus", "museum_spotlight"),
+        ("dolly_zoom_vertigo", "anamorphic_streak"),
+        ("archival_color_bloom", "caustic_water_shimmer"),
         ("contact_sheet_zoom", "nostalgic_film_grain"),
         ("split_diopter_focus", "anamorphic_streak"),
         ("glassmorphic_pedestal", "prism_chromatic_edge"),
@@ -751,9 +754,9 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
         ("editorial_magazine", "museum_spotlight"),
         ("cinema_anamorphic", "champagne_bokeh"),
         ("diptych_frame", "none"),
-        ("parallax_gallery", "museum_spotlight"),
+        ("parallax_gallery", "golden_light_leak"),
         ("gallery_frame", "prism_chromatic_edge"),
-        ("full_bleed", "anamorphic_streak"),
+        ("full_bleed", "caustic_water_shimmer"),
     ]
     assert {m for m, _ in modes_and_finishers} == set(VALID_PHOTO_MODES)
     covered_fx = {fx for _, fx in modes_and_finishers}

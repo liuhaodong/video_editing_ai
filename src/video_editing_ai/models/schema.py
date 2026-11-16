@@ -14,6 +14,9 @@ PhotoModeType = Literal[
     "diptych_frame",
     "full_bleed",
     "cinematic_depth_3d",
+    "aperture_rack_focus",
+    "dolly_zoom_vertigo",
+    "archival_color_bloom",
     "triptych_cinematic",
     "polaroid_scrapbook",
     "curator_loupe",
@@ -37,6 +40,8 @@ PhotoOverlayFxType = Literal[
     "prism_chromatic_edge",
     "velvet_vignette_rembrandt",
     "fine_art_rag_texture",
+    "halation_bloom_35mm",
+    "caustic_water_shimmer",
 ]
 
 VALID_PHOTO_MODES: tuple[str, ...] = (
@@ -45,6 +50,9 @@ VALID_PHOTO_MODES: tuple[str, ...] = (
     "diptych_frame",
     "full_bleed",
     "cinematic_depth_3d",
+    "aperture_rack_focus",
+    "dolly_zoom_vertigo",
+    "archival_color_bloom",
     "triptych_cinematic",
     "polaroid_scrapbook",
     "curator_loupe",
@@ -68,6 +76,8 @@ VALID_PHOTO_OVERLAY_FX: tuple[str, ...] = (
     "prism_chromatic_edge",
     "velvet_vignette_rembrandt",
     "fine_art_rag_texture",
+    "halation_bloom_35mm",
+    "caustic_water_shimmer",
 )
 
 TitleThemeType = Literal[
@@ -414,6 +424,9 @@ class CreativeBrief(BaseModel):
     enabled_photo_modes: list[PhotoModeType] = Field(
         default_factory=lambda: [
             "cinematic_depth_3d",
+            "aperture_rack_focus",
+            "dolly_zoom_vertigo",
+            "archival_color_bloom",
             "triptych_cinematic",
             "polaroid_scrapbook",
             "curator_loupe",
@@ -439,6 +452,8 @@ class CreativeBrief(BaseModel):
             "prism_chromatic_edge",
             "velvet_vignette_rembrandt",
             "fine_art_rag_texture",
+            "halation_bloom_35mm",
+            "caustic_water_shimmer",
         ],
         description="Multi-selected atmospheric photo finishers",
     )
@@ -1029,9 +1044,12 @@ class KenBurnsConfig(BaseModel):
     mode: PhotoModeType = Field(
         default="parallax_gallery",
         description=(
-            "One of 16 curated photo presentation modes: "
+            "One of 19 curated photo presentation modes: "
             "'parallax_gallery' (2.5D multi-plane counter-panning matte), "
-            "'cinematic_depth_3d' (foreground depth-mask parallax + rack-focus bokeh), "
+            "'cinematic_depth_3d' (4-layer neural MPI depth parallax + disocclusion inpainting), "
+            "'aperture_rack_focus' (continuous depth-guided cinema focus pull), "
+            "'dolly_zoom_vertigo' (optical Hitchcock counter-dolly neural depth warp), "
+            "'archival_color_bloom' (selenium B&W -> depth-driven living color bloom), "
             "'triptych_cinematic' (3-panel staggered storyboard reveal), "
             "'polaroid_scrapbook' (tilted vintage instant-film print stack), "
             "'curator_loupe' (1.65x optical magnifying spotlight), "
@@ -1053,7 +1071,8 @@ class KenBurnsConfig(BaseModel):
         description=(
             "Composable atmospheric finisher: 'none', 'golden_light_leak', 'champagne_bokeh', "
             "'museum_spotlight', 'nostalgic_film_grain', 'anamorphic_streak', "
-            "'prism_chromatic_edge', 'velvet_vignette_rembrandt', or 'fine_art_rag_texture'"
+            "'prism_chromatic_edge', 'velvet_vignette_rembrandt', 'fine_art_rag_texture', "
+            "'halation_bloom_35mm', or 'caustic_water_shimmer'"
         ),
     )
     preset: Literal[

@@ -479,3 +479,57 @@ def test_video_stabilize_filter_crops_mirrored_borders() -> None:
     assert "deshake=rx=14:ry=16:edge=mirror" in flt
     assert "crop=iw-28:ih-32:14:16" in flt
     assert "scale=iw+28:ih+32:flags=lanczos" in flt
+
+
+def test_cuda_photo_compositor_new_depth_and_vfx_modes_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify CPU/GPU FP16 parity (<6.0 MAE) for MPI depth parallax, rack focus, vertigo, color bloom, and finishers."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available for GPU parity test")
+
+    monkeypatch.setenv("AI_EDITOR_OFFLINE_DEPTH", "1")
+    p_src = tmp_path / "parity_vfx_src.jpg"
+    img = Image.new("RGB", (640, 360), (24, 92, 168))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 220, 640, 360], fill=(215, 185, 130))
+    d.ellipse([240, 90, 400, 300], fill=(245, 220, 175), outline=(255, 255, 255), width=4)
+    img.save(p_src, quality=95)
+
+    from video_editing_ai.models.schema import KenBurnsConfig
+    from video_editing_ai.renderer import ken_burns
+    from video_editing_ai.renderer.mps_photo_compositor import MPSPhotoCompositor
+
+    cases = [
+        ("cinematic_depth_3d", "halation_bloom_35mm"),
+        ("dolly_zoom_vertigo", "none"),
+        ("aperture_rack_focus", "museum_spotlight"),
+        ("archival_color_bloom", "caustic_water_shimmer"),
+        ("parallax_gallery", "none"),
+    ]
+    for mode_name, fx_name in cases:
+        kb = KenBurnsConfig(
+            mode=mode_name,  # type: ignore[arg-type]
+            overlay_fx=fx_name,  # type: ignore[arg-type]
+            start_center=(0.48, 0.50),
+            end_center=(0.53, 0.46),
+            caption_title="Coastal Study",
+            caption_subtitle="Optical Depth Pass",
+        )
+        ctx = ken_burns._prepare_photo_scene_context(p_src, width=480, height=270, kb=kb)
+        comp = MPSPhotoCompositor(ctx=ctx, device_override="cuda")
+        try:
+            f_idxs = [0, 15, 30]
+            total_f = 31
+            gpu_batch = comp.render_batch_rgb(frame_indices=f_idxs, total_frames=total_f, duration=2.0, fps=15)
+            assert gpu_batch.shape == (3, 270, 480, 3)
+
+            for i, fi in enumerate(f_idxs):
+                tn = fi / float(total_f - 1)
+                cpu_img = ken_burns._render_photo_frame_from_context(ctx=ctx, t_norm=tn, f_idx=fi, duration=2.0, fps=15)
+                mae = float(np.abs(np.asarray(cpu_img, dtype=np.float32) - gpu_batch[i].numpy().astype(np.float32)).mean())
+                assert mae < 6.0, f"High CPU/GPU MAE ({mae:.2f}) for mode={mode_name}, fx={fx_name}, t={tn}"
+        finally:
+            comp.close()

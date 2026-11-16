@@ -1,4 +1,4 @@
-"""Sub-pixel 16-Mode Cinema & Exhibition Photo Animator + 8-Finisher Optical Pipeline."""
+"""Sub-pixel 19-Mode Cinema & Exhibition Photo Animator + 10-Finisher Optical Pipeline."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import textwrap
 import threading
 from typing import Any, Optional
 
+import cv2
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
@@ -31,6 +32,11 @@ from ..hardware import (
     supports_videotoolbox_qscale as _hw_supports_videotoolbox_qscale,
 )
 from ..models.schema import KenBurnsConfig, TransitionConfig
+from .depth_parallax import (
+    build_mpi_depth_layers,
+    build_rack_focus_assets,
+    estimate_depth_map,
+)
 
 
 def _ease_in_out_cubic(t: float) -> float:
@@ -764,54 +770,22 @@ def _build_subject_depth_layers(
     bg_h: int,
     focal_point: tuple[float, float],
     scale_factor: float,
-) -> tuple[Image.Image, Image.Image, Image.Image]:
+    cache_dir: Optional[Path] = None,
+    photo_key: Optional[str] = None,
+) -> dict[str, Any]:
     """
-    Build 3 depth planes for 'cinematic_depth_3d':
-      1. bg_sharp: fitted full-canvas RGB plane
-      2. bg_bokeh: defocused creamy bokeh background plane
-      3. fg_subject_rgba: extracted foreground subject with soft saliency + radial alpha mask and micro-contrast pop
+    Build neural-depth 4-layer Multi-Plane Image (MPI) depth strata for 'cinematic_depth_3d'
+    and 'dolly_zoom_vertigo' with dilated disocclusion fill and natural far-plane optical softness.
     """
     bg_sharp = ImageOps.fit(raw_img, (bg_w, bg_h), method=Image.Resampling.BILINEAR)
-
-    # Defocused creamy bokeh plane (computed fast at 1/4 scale)
-    small_w, small_h = max(32, bg_w // 4), max(32, bg_h // 4)
-    small_rgb = bg_sharp.resize((small_w, small_h), Image.Resampling.BILINEAR)
-    bokeh_small = small_rgb.filter(ImageFilter.GaussianBlur(radius=max(8, int(round(12 * scale_factor)))))
-    bokeh_small = Image.blend(bokeh_small, Image.new("RGB", (small_w, small_h), (8, 11, 20)), 0.28)
-    bg_bokeh = bokeh_small.resize((bg_w, bg_h), Image.Resampling.BILINEAR)
-
-    # Saliency + radial focal-point depth mask at 1/4 resolution
-    gray_small = small_rgb.convert("L")
-    edges = gray_small.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(radius=6))
-    edge_arr = np.asarray(edges, dtype=np.float32)
-    p95 = float(np.percentile(edge_arr, 95)) if edge_arr.size else 1.0
-    edge_norm = np.clip(edge_arr / max(12.0, p95), 0.0, 1.0)
-
-    yy, xx = np.mgrid[0:small_h, 0:small_w]
-    nx = xx / max(1.0, float(small_w - 1))
-    ny = fy = yy / max(1.0, float(small_h - 1))
-    fx_c = max(0.22, min(0.78, float(focal_point[0])))
-    fy_c = max(0.22, min(0.78, float(focal_point[1])))
-
-    dist_sq = ((nx - fx_c) ** 2) / 0.11 + ((ny - fy_c) ** 2) / 0.14
-    radial_core = np.exp(-0.5 * dist_sq)
-    radial_broad = np.exp(-0.22 * dist_sq)
-
-    combined = np.clip(0.58 * radial_core + 0.62 * edge_norm * radial_broad, 0.0, 1.0)
-    # Smooth S-curve mask so the foreground subject has a natural feathered boundary
-    mask_float = np.clip((combined - 0.22) / 0.52, 0.0, 1.0)
-    mask_float = mask_float * mask_float * (3.0 - 2.0 * mask_float)
-    mask_u8 = (mask_float * 255.0).astype(np.uint8)
-    mask_l = (
-        Image.fromarray(mask_u8, mode="L")
-        .filter(ImageFilter.GaussianBlur(radius=8))
-        .resize((bg_w, bg_h), Image.Resampling.BILINEAR)
+    depth_map = estimate_depth_map(
+        bg_sharp,
+        focal_point=focal_point,
+        cache_dir=cache_dir,
+        photo_key=photo_key,
+        target_size=(bg_w, bg_h),
     )
-
-    fg_enhanced = ImageEnhance.Contrast(ImageEnhance.Sharpness(bg_sharp).enhance(1.18)).enhance(1.06)
-    fg_subject_rgba = fg_enhanced.copy().convert("RGBA")
-    fg_subject_rgba.putalpha(mask_l)
-    return bg_sharp, bg_bokeh, fg_subject_rgba
+    return build_mpi_depth_layers(bg_sharp=bg_sharp, depth=depth_map, scale_factor=scale_factor)
 
 
 def _build_polaroid_card(
@@ -1695,6 +1669,26 @@ def _prepare_overlay_fx_assets(
         rag_img = Image.fromarray(rag_rgb, mode="RGB").resize((width, height), Image.Resampling.BILINEAR)
         return {"type": "fine_art_rag_texture", "rag_img": rag_img}
 
+    if overlay_fx == "halation_bloom_35mm":
+        return {"type": "halation_bloom_35mm"}
+
+    if overlay_fx == "caustic_water_shimmer":
+        # Smooth upper-corner diagonal sun rays & coastal shimmer profile (low-contrast archival grade)
+        ray1 = np.exp(-((nx * 0.72 + ny * 0.69 - 0.34) ** 2) / 0.018)
+        ray2 = np.exp(-((nx * 0.68 + ny * 0.73 - 0.56) ** 2) / 0.024) * 0.75
+        falloff = np.clip(1.0 - ny * 0.92, 0.0, 1.0) * np.clip(0.25 + nx * 0.75, 0.0, 1.0)
+        beams = np.clip((ray1 + ray2) * falloff, 0.0, 1.0)
+        c_rgb = np.zeros((small_h, small_w, 3), dtype=np.uint8)
+        c_rgb[:, :, 0] = (beams * 255.0).astype(np.uint8)
+        c_rgb[:, :, 1] = (beams * 228.0).astype(np.uint8)
+        c_rgb[:, :, 2] = (beams * 176.0).astype(np.uint8)
+        shimmer_img = (
+            Image.fromarray(c_rgb, mode="RGB")
+            .filter(ImageFilter.GaussianBlur(radius=6))
+            .resize((width, height), Image.Resampling.BILINEAR)
+        )
+        return {"type": "caustic_water_shimmer", "shimmer_img": shimmer_img}
+
     return {"type": "none"}
 
 
@@ -1784,6 +1778,28 @@ def _apply_overlay_fx(
 
     if fx_type == "fine_art_rag_texture":
         return Image.blend(frame_rgb, fx_assets["rag_img"], 0.055)
+
+    if fx_type == "halation_bloom_35mm":
+        w, h = frame_rgb.size
+        sw, sh = max(48, w // 6), max(27, h // 6)
+        small_arr = np.asarray(frame_rgb.resize((sw, sh), Image.Resampling.BILINEAR), dtype=np.float32)
+        luma = 0.299 * small_arr[:, :, 0] + 0.587 * small_arr[:, :, 1] + 0.114 * small_arr[:, :, 2]
+        hi = np.clip((luma - 206.0) / 49.0, 0.0, 1.0)
+        hi_u8 = (hi * 255.0).astype(np.uint8)
+        halo_s = np.asarray(Image.fromarray(hi_u8, mode="L").filter(ImageFilter.GaussianBlur(radius=4)), dtype=np.float32) / 255.0
+        halo_rgb = np.zeros((sh, sw, 3), dtype=np.uint8)
+        halo_rgb[:, :, 0] = np.clip(halo_s * 255.0, 0, 255).astype(np.uint8)
+        halo_rgb[:, :, 1] = np.clip(halo_s * 124.0, 0, 255).astype(np.uint8)
+        halo_rgb[:, :, 2] = np.clip(halo_s * 68.0, 0, 255).astype(np.uint8)
+        halo_full = Image.fromarray(halo_rgb, mode="RGB").resize((w, h), Image.Resampling.BILINEAR)
+        screened = ImageChops.screen(frame_rgb, halo_full)
+        weight = 0.24 + 0.08 * math.sin(math.pi * t_norm)
+        return Image.blend(frame_rgb, screened, weight)
+
+    if fx_type == "caustic_water_shimmer":
+        screened = ImageChops.screen(frame_rgb, fx_assets["shimmer_img"])
+        weight = 0.09 + 0.045 * math.sin(math.pi * t_norm)
+        return Image.blend(frame_rgb, screened, weight)
 
     return frame_rgb
 
@@ -1901,17 +1917,54 @@ def _prepare_photo_scene_context(
         else:
             ctx["polaroid_2"] = None
 
-    elif mode == "cinematic_depth_3d":
-        bg_sharp, bg_bokeh, fg_subject_rgba = _build_subject_depth_layers(
+    elif mode in ("cinematic_depth_3d", "dolly_zoom_vertigo"):
+        mpi = _build_subject_depth_layers(
             raw_img=raw_primary,
             bg_w=bg_w,
             bg_h=bg_h,
             focal_point=kb.start_center,
             scale_factor=scale_factor,
         )
-        ctx["depth_bg_sharp"] = bg_sharp
-        ctx["depth_bg_bokeh"] = bg_bokeh
-        ctx["depth_fg_rgba"] = fg_subject_rgba
+        ctx["mpi_layers"] = mpi["layers"]
+        ctx["parallax_amp"] = float(mpi["suitability"])
+
+    elif mode == "aperture_rack_focus":
+        rf = build_rack_focus_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+            focal_point=kb.start_center,
+            scale_factor=scale_factor,
+        )
+        ctx["rf_sharp"] = rf["sharp"]
+        ctx["rf_bokeh"] = rf["bokeh"]
+        ctx["rf_depth_q"] = rf["depth_q"]
+        ctx["rf_focus_start"] = rf["focus_start"]
+        ctx["rf_focus_end"] = rf["focus_end"]
+
+    elif mode == "archival_color_bloom":
+        oversample = 1.07
+        work_w = max(64, int(round(width * oversample)))
+        work_h = max(64, int(round(height * oversample)))
+        color_base = ImageOps.fit(raw_primary, (work_w, work_h), method=Image.Resampling.BILINEAR)
+        # Selenium-toned high-contrast silver-gelatin B&W master
+        bw_l = ImageEnhance.Contrast(color_base.convert("L")).enhance(1.08)
+        bw_arr = np.asarray(bw_l, dtype=np.float32)
+        bw_rgb = np.stack(
+            [
+                np.clip(bw_arr * 1.01, 0, 255).astype(np.uint8),
+                np.clip(bw_arr * 1.00, 0, 255).astype(np.uint8),
+                np.clip(bw_arr * 0.97, 0, 255).astype(np.uint8),
+            ],
+            axis=-1,
+        )
+        bw_img = Image.fromarray(bw_rgb, mode="RGB")
+        depth_full = estimate_depth_map(color_base, focal_point=kb.start_center, target_size=(work_w, work_h))
+        qw, qh = max(48, work_w // 4), max(27, work_h // 4)
+        depth_q = cv2.resize(depth_full, (qw, qh), interpolation=cv2.INTER_AREA).astype(np.float32)
+        ctx["bloom_color"] = color_base
+        ctx["bloom_bw"] = bw_img
+        ctx["bloom_depth_q"] = depth_q
 
     elif mode == "curator_loupe":
         dimmed_c, sharp_c, loupe_mask, loupe_bezel, rad_px = _build_curator_loupe_assets(
@@ -2148,43 +2201,143 @@ def _render_photo_frame_from_context(
             frame.paste(scaled_p1, (px, max(8, py)), scaled_p1)
 
     elif mode == "cinematic_depth_3d":
-        bg_sharp: Image.Image = ctx["depth_bg_sharp"]
-        bg_bokeh: Image.Image = ctx["depth_bg_bokeh"]
-        fg_rgba: Image.Image = ctx["depth_fg_rgba"]
+        mpi_layers: list[Image.Image] = ctx["mpi_layers"]
+        amp = float(ctx.get("parallax_amp", 1.0))
 
-        # Plane 1: Background counter-zooms (1.10 -> 1.06) and racks focus into creamy bokeh
-        bg_zoom = 1.10 - 0.04 * eased
-        fg_dx = (ex - sx) * eased
-        fg_dy = (ey - sy) * eased
-        bg_cx = 0.5 - fg_dx * 0.45
-        bg_cy = 0.5 - fg_dy * 0.45
-        bw_crop = bg_w / bg_zoom
-        bh_crop = bg_h / bg_zoom
-        bx0 = min(max(0.0, bg_cx * bg_w - bw_crop * 0.5), bg_w - bw_crop)
-        by0 = min(max(0.0, bg_cy * bg_h - bh_crop * 0.5), bg_h - bh_crop)
+        # Apple Spatial Photos restraint: unified gentle dolly + micro stereo orbital arc, zero counter-zoom
+        base_zoom = 1.032 + 0.028 * eased
+        arc_x = math.sin((eased - 0.5) * math.pi) * 0.014 * amp + (ex - sx) * 0.12 * amp * (eased - 0.5)
+        arc_y = -0.004 * amp * math.cos((eased - 0.5) * math.pi) + (ey - sy) * 0.10 * amp * (eased - 0.5)
 
-        sharp_crop = bg_sharp.transform(
-            (width, height), Image.Transform.EXTENT, (bx0, by0, bx0 + bw_crop, by0 + bh_crop), resample=resample_mode
+        frame = Image.new("RGB", (width, height))
+        layer_specs = ((-0.55, 0.994), (-0.18, 1.000), (0.18, 1.008), (0.55, 1.016))
+        for li, (d_mult, z_mul) in enumerate(layer_specs):
+            layer_img = mpi_layers[li]
+            lw, lh = layer_img.size
+            cur_z = base_zoom * z_mul
+            lcw = lw / cur_z
+            lch = lh / cur_z
+            lcx = 0.5 + d_mult * arc_x
+            lcy = 0.5 + d_mult * arc_y
+            lx0 = min(max(0.0, lcx * lw - lcw * 0.5), lw - lcw)
+            ly0 = min(max(0.0, lcy * lh - lch * 0.5), lh - lch)
+            cropped = layer_img.transform(
+                (width, height),
+                Image.Transform.EXTENT,
+                (lx0, ly0, lx0 + lcw, ly0 + lch),
+                resample=resample_mode,
+            )
+            if li == 0:
+                frame = cropped.convert("RGB")
+            else:
+                frame.paste(cropped.convert("RGB"), (0, 0), cropped.split()[3])
+
+    elif mode == "dolly_zoom_vertigo":
+        mpi_layers = ctx["mpi_layers"]
+        amp = float(ctx.get("parallax_amp", 1.0))
+        v_mix = eased * (0.55 + 0.45 * amp)
+        dx_v = (ex - sx) * 0.25 * eased
+        dy_v = (ey - sy) * 0.20 * eased
+
+        frame = Image.new("RGB", (width, height))
+        vertigo_specs = (
+            (1.045 - 0.030 * v_mix, -0.20),
+            (1.035 - 0.020 * v_mix, -0.06),
+            (1.026 - 0.011 * v_mix, 0.08),
+            (1.018 + 0.004 * v_mix, 0.20),
         )
-        bokeh_crop = bg_bokeh.transform(
-            (width, height), Image.Transform.EXTENT, (bx0, by0, bx0 + bw_crop, by0 + bh_crop), resample=resample_mode
-        )
-        bokeh_mix = min(0.88, 0.30 + 0.58 * eased)
-        frame = Image.blend(sharp_crop, bokeh_crop, bokeh_mix)
+        for li, (cur_z, d_shift) in enumerate(vertigo_specs):
+            layer_img = mpi_layers[li]
+            lw, lh = layer_img.size
+            lcw = lw / cur_z
+            lch = lh / cur_z
+            lcx = 0.5 + d_shift * dx_v
+            lcy = 0.5 + d_shift * dy_v
+            lx0 = min(max(0.0, lcx * lw - lcw * 0.5), lw - lcw)
+            ly0 = min(max(0.0, lcy * lh - lch * 0.5), lh - lch)
+            cropped = layer_img.transform(
+                (width, height),
+                Image.Transform.EXTENT,
+                (lx0, ly0, lx0 + lcw, ly0 + lch),
+                resample=resample_mode,
+            )
+            if li == 0:
+                frame = cropped.convert("RGB")
+            else:
+                frame.paste(cropped.convert("RGB"), (0, 0), cropped.split()[3])
 
-        # Plane 2: Foreground subject expands forward (1.00 -> 1.085) with true differential parallax
-        fg_zoom = 1.00 + 0.085 * eased
-        fg_cx = 0.5 + fg_dx * 0.35
-        fg_cy = 0.5 + fg_dy * 0.35
-        fw_crop = bg_w / fg_zoom
-        fh_crop = bg_h / fg_zoom
-        fx0 = min(max(0.0, fg_cx * bg_w - fw_crop * 0.5), bg_w - fw_crop)
-        fy0 = min(max(0.0, fg_cy * bg_h - fh_crop * 0.5), bg_h - fh_crop)
+    elif mode == "aperture_rack_focus":
+        rf_sharp: Image.Image = ctx["rf_sharp"]
+        rf_bokeh: Image.Image = ctx["rf_bokeh"]
+        rf_depth_q: np.ndarray = ctx["rf_depth_q"]
+        f_start = float(ctx["rf_focus_start"])
+        f_end = float(ctx["rf_focus_end"])
 
-        fg_warped = fg_rgba.transform(
-            (width, height), Image.Transform.EXTENT, (fx0, fy0, fx0 + fw_crop, fy0 + fh_crop), resample=resample_mode
+        rw, rh = rf_sharp.size
+        cur_zoom = 1.01 + 0.04 * eased
+        cx = 0.5 + (ex - sx) * 0.25 * eased
+        cy = 0.5 + (ey - sy) * 0.25 * eased
+        cw = rw / cur_zoom
+        ch = rh / cur_zoom
+        x0 = min(max(0.0, cx * rw - cw * 0.5), rw - cw)
+        y0 = min(max(0.0, cy * rh - ch * 0.5), rh - ch)
+
+        sharp_crop = rf_sharp.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
+        bokeh_crop = rf_bokeh.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
+
+        focus_p = _ease_in_out_cubic(min(1.0, t_norm / 0.85))
+        focus_d = f_start + (f_end - f_start) * focus_p
+        dist = np.abs(rf_depth_q - focus_d)
+        lin = np.clip((dist - 0.06) / 0.24, 0.0, 1.0)
+        blur_w_q = lin * lin * (3.0 - 2.0 * lin) * 0.85
+        qh, qw = blur_w_q.shape
+        qx0 = min(max(0.0, (x0 / rw) * qw), qw - 1.0)
+        qy0 = min(max(0.0, (y0 / rh) * qh), qh - 1.0)
+        qx1 = min(float(qw), qx0 + (cw / rw) * qw)
+        qy1 = min(float(qh), qy0 + (ch / rh) * qh)
+        blur_mask_img = Image.fromarray(np.clip(blur_w_q * 255.0, 0, 255).astype(np.uint8), mode="L").transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (qx0, qy0, qx1, qy1),
+            resample=Image.Resampling.BILINEAR,
         )
-        frame.paste(fg_warped.convert("RGB"), (0, 0), fg_warped.split()[3])
+        frame = sharp_crop.copy()
+        frame.paste(bokeh_crop, (0, 0), blur_mask_img)
+
+    elif mode == "archival_color_bloom":
+        bloom_color: Image.Image = ctx["bloom_color"]
+        bloom_bw: Image.Image = ctx["bloom_bw"]
+        bloom_depth_q: np.ndarray = ctx["bloom_depth_q"]
+
+        bw_w, bw_h = bloom_color.size
+        cur_zoom = 1.01 + 0.045 * eased
+        cx = 0.5 + (ex - sx) * 0.30 * eased
+        cy = 0.5 + (ey - sy) * 0.30 * eased
+        cw = bw_w / cur_zoom
+        ch = bw_h / cur_zoom
+        x0 = min(max(0.0, cx * bw_w - cw * 0.5), bw_w - cw)
+        y0 = min(max(0.0, cy * bw_h - ch * 0.5), bw_h - ch)
+
+        bw_crop = bloom_bw.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
+        col_crop = bloom_color.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
+
+        bloom_p = _ease_in_out_cubic(min(1.0, t_norm / 0.88))
+        thresh = 1.06 - 1.26 * bloom_p
+        soft_k = np.clip((bloom_depth_q - thresh) / 0.32, 0.0, 1.0)
+        color_w_q = soft_k * soft_k * (3.0 - 2.0 * soft_k)
+        qh, qw = color_w_q.shape
+        qx0 = min(max(0.0, (x0 / bw_w) * qw), qw - 1.0)
+        qy0 = min(max(0.0, (y0 / bw_h) * qh), qh - 1.0)
+        qx1 = min(float(qw), qx0 + (cw / bw_w) * qw)
+        qy1 = min(float(qh), qy0 + (ch / bw_h) * qh)
+        color_mask_img = Image.fromarray(np.clip(color_w_q * 255.0, 0, 255).astype(np.uint8), mode="L").transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (qx0, qy0, qx1, qy1),
+            resample=Image.Resampling.BILINEAR,
+        )
+        frame = bw_crop.copy()
+        frame.paste(col_crop, (0, 0), color_mask_img)
 
     elif mode == "curator_loupe":
         dimmed_c: Image.Image = ctx["loupe_dimmed"]
@@ -2265,14 +2418,14 @@ def _render_photo_frame_from_context(
         fg_dx = (ex - sx) * eased
         fg_dy = (ey - sy) * eased
         frame = _crop_plane_clamped(
-            bg_plane, (width, height), 1.10 - 0.04 * eased, 0.5 - fg_dx * 0.55, 0.5 - fg_dy * 0.55, resample_mode
+            bg_plane, (width, height), 1.07 - 0.025 * eased, 0.5 - fg_dx * 0.22, 0.5 - fg_dy * 0.22, resample_mode
         )
-        fg_scale = 0.96 + 0.05 * eased
+        fg_scale = 0.982 + 0.030 * eased
         cw = max(1, int(round(fg_card_1.width * fg_scale)))
         ch = max(1, int(round(fg_card_1.height * fg_scale)))
         scaled_card = fg_card_1.resize((cw, ch), resample=resample_mode)
-        pan_px_x = int(round(fg_dx * width * 0.28))
-        pan_px_y = int(round(fg_dy * height * 0.24))
+        pan_px_x = int(round(fg_dx * width * 0.06))
+        pan_px_y = int(round(fg_dy * height * 0.045))
         px = (width - cw) // 2 + pan_px_x
         py = int(height * card_cy_ratio) - ch // 2 + pan_px_y
         frame.paste(scaled_card, (px, max(10, py)), scaled_card)
@@ -3035,14 +3188,14 @@ def render_photo_effects_showcase_sheet(
     secondary_path: Optional[str | Path] = None,
     tertiary_path: Optional[str | Path] = None,
     caption_title: str = "Curated Architectural & Fine Art Showcase",
-    caption_subtitle: str = "16-Mode Cinema & Exhibition Suite + 8 Optical Finishers · 4K HDR",
+    caption_subtitle: str = "19-Mode Cinema & Exhibition Suite + 10 Optical Finishers · 4K HDR",
     camera_badge: str = "",
     tile_width: int = 960,
     tile_height: int = 540,
 ) -> Path:
     """
-    Mechanically render a 4x4 (16-tile) high-resolution visual comparison showcase sheet
-    covering all 16 Photo Presentation Modes and all 8 Atmospheric Finishers.
+    Mechanically render a 4x5 (20-tile) high-resolution visual comparison showcase sheet
+    covering all 19 Photo Presentation Modes and all 10 Atmospheric Finishers.
     """
     out_path = Path(output_jpg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3051,25 +3204,29 @@ def render_photo_effects_showcase_sheet(
     tert_str = str(tertiary_path) if (tertiary_path and Path(tertiary_path).exists()) else None
 
     showcase_specs: list[tuple[str, str, str]] = [
-        ("cinematic_depth_3d", "golden_light_leak", "1. 3D Depth Parallax + Golden Leak"),
-        ("contact_sheet_zoom", "none", "2. Darkroom Contact Sheet Push-In"),
-        ("split_diopter_focus", "prism_chromatic_edge", "3. Optical Split Diopter + Prism Edge"),
-        ("glassmorphic_pedestal", "none", "4. Frosted Glassmorphic Vitrine"),
-        ("medium_format_slide", "velvet_vignette_rembrandt", "5. 120 Medium-Format Lightbox Slide"),
-        ("floating_tilt_plate", "fine_art_rag_texture", "6. 3D Floating Tilt Plate + Rag Paper"),
-        ("criterion_atelier_split", "none", "7. Criterion 3-Viewport Atelier Grid"),
-        ("triptych_cinematic", "none", "8. 3-Panel Staggered Triptych"),
-        ("polaroid_scrapbook", "nostalgic_film_grain", "9. Vintage Polaroid + 35mm Grain"),
-        ("curator_loupe", "museum_spotlight", "10. 1.65x Optical Curator Loupe"),
-        ("editorial_magazine", "none", "11. 62/38 Editorial Magazine Spread"),
-        ("cinema_anamorphic", "anamorphic_streak", "12. 2.39:1 Anamorphic + Flare Streak"),
-        ("parallax_gallery", "museum_spotlight", "13. 2.5D Museum Parallax + Spotlight"),
-        ("diptych_frame", "golden_light_leak", "14. Side-by-Side Diptych Split-Screen"),
-        ("gallery_frame", "champagne_bokeh", "15. Classic Gallery Frame + Bokeh"),
-        ("full_bleed", "velvet_vignette_rembrandt", "16. Full-Bleed Ken Burns + Chiaroscuro"),
+        ("cinematic_depth_3d", "halation_bloom_35mm", "1. Neural 4-Layer MPI Depth + 35mm Halation"),
+        ("aperture_rack_focus", "museum_spotlight", "2. Continuous Depth Rack Focus + Spotlight"),
+        ("dolly_zoom_vertigo", "anamorphic_streak", "3. Optical Vertigo Counter-Dolly + Streak"),
+        ("archival_color_bloom", "caustic_water_shimmer", "4. Silver-Gelatin Color Bloom + Caustics"),
+        ("contact_sheet_zoom", "none", "5. Darkroom Contact Sheet Push-In"),
+        ("split_diopter_focus", "prism_chromatic_edge", "6. Optical Split Diopter + Prism Edge"),
+        ("glassmorphic_pedestal", "none", "7. Frosted Glassmorphic Vitrine"),
+        ("medium_format_slide", "velvet_vignette_rembrandt", "8. 120 Medium-Format Lightbox Slide"),
+        ("floating_tilt_plate", "fine_art_rag_texture", "9. 3D Floating Tilt Plate + Rag Paper"),
+        ("criterion_atelier_split", "none", "10. Criterion 3-Viewport Atelier Grid"),
+        ("triptych_cinematic", "none", "11. 3-Panel Staggered Triptych"),
+        ("polaroid_scrapbook", "nostalgic_film_grain", "12. Vintage Polaroid + 35mm Grain"),
+        ("curator_loupe", "museum_spotlight", "13. 1.65x Optical Curator Loupe"),
+        ("editorial_magazine", "none", "14. 62/38 Editorial Magazine Spread"),
+        ("cinema_anamorphic", "anamorphic_streak", "15. 2.39:1 Anamorphic + Flare Streak"),
+        ("parallax_gallery", "golden_light_leak", "16. Calmed Museum Parallax + Light Leak"),
+        ("diptych_frame", "golden_light_leak", "17. Side-by-Side Diptych Split-Screen"),
+        ("gallery_frame", "champagne_bokeh", "18. Classic Gallery Frame + Bokeh"),
+        ("full_bleed", "velvet_vignette_rembrandt", "19. Full-Bleed Ken Burns + Chiaroscuro"),
+        ("cinematic_depth_3d", "caustic_water_shimmer", "20. Neural Depth Parallax + Aqua Caustics"),
     ]
 
-    cols, rows = 4, 4
+    cols, rows = 4, 5
     pad = 18
     header_h = 68
     label_h = 36
@@ -3083,7 +3240,7 @@ def render_photo_effects_showcase_sheet(
 
     draw.text(
         (pad, 20),
-        "PREMIUM PHOTO EFFECTS SHOWCASE — 16 PRESENTATION MODES & 8 OPTICAL FINISHERS",
+        "PREMIUM PHOTO EFFECTS SHOWCASE — 19 PRESENTATION MODES & 10 OPTICAL FINISHERS",
         font=f_hdr,
         fill=(242, 238, 230),
     )

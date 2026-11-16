@@ -281,7 +281,10 @@ def generate_intake_questions(
             id="photo_effects_suite",
             question="3. Premium Photo Presentation Effects Suite (Multi-Select — Pick all styles to choreograph across chapters)",
             options=[
-                "cinematic_depth_3d (Recommended) — 3-Plane Subject Depth-Mask Parallax & Bokeh Rack-Focus (Hero Landmarks & Sculptures)",
+                "cinematic_depth_3d (Recommended) — Neural 4-Layer MPI Depth Parallax with Disocclusion Fill & Restrained Stereo Drift",
+                "aperture_rack_focus (Recommended) — Continuous Depth-Guided Optical Aperture Focus Pull",
+                "dolly_zoom_vertigo (Recommended) — Optical Hitchcock Counter-Dolly Neural Depth Reveal for Landmarks",
+                "archival_color_bloom (Recommended) — Silver-Gelatin Selenium B&W -> Depth-Driven Living Color Bloom",
                 "split_diopter_focus (Recommended) — A24 Split-Diopter 54/46 Wide Context + 2.2x Optical Macro Detail",
                 "contact_sheet_zoom (Recommended) — Magnum 3x2 Darkroom Contact Sheet Proof -> Eased Push-In onto Hero Frame",
                 "glassmorphic_pedestal (Recommended) — Apple VisionOS / Museum Frosted Acrylic Vitrine Card with Live Backdrop Blur",
@@ -293,19 +296,23 @@ def generate_intake_questions(
                 "curator_loupe (Recommended) — 1.65x Optical Magnifying Glass Spotlight (Architectural Carvings, Menus & Artworks)",
                 "editorial_magazine (Recommended) — Asymmetric 62/38 Luxury Architectural Monograph Spread (Chapter Openers)",
                 "cinema_anamorphic (Recommended) — 2.39:1 CinemaScope Widescreen Letterbox with 35mm Highlight Halation",
-                "parallax_gallery (Recommended) — 2.5D Counter-Panning Double Archival Matte Frame",
+                "parallax_gallery (Recommended) — Calmed 2.5D Museum Float Double Archival Matte Frame",
                 "diptych_frame (Recommended) — Side-by-Side Vertical Portrait Diptych Split-Screen",
                 "gallery_frame — Classic Static Floating Gallery Frame",
                 "full_bleed — Full-Screen 16:9 Crop with Classic Ken Burns Pan/Zoom",
             ],
             default_answer=(
-                "cinematic_depth_3d,split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,"
+                "cinematic_depth_3d,aperture_rack_focus,dolly_zoom_vertigo,archival_color_bloom,"
+                "split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,"
                 "medium_format_slide,floating_tilt_plate,criterion_atelier_split,triptych_cinematic,"
                 "polaroid_scrapbook,curator_loupe,editorial_magazine,cinema_anamorphic,parallax_gallery,diptych_frame"
             ),
             is_multi_select=True,
             recommended_options=[
                 "cinematic_depth_3d",
+                "aperture_rack_focus",
+                "dolly_zoom_vertigo",
+                "archival_color_bloom",
                 "split_diopter_focus",
                 "contact_sheet_zoom",
                 "glassmorphic_pedestal",
@@ -321,9 +328,9 @@ def generate_intake_questions(
                 "diptych_frame",
             ],
             recommendation_rationale=(
-                "Combining all 14 curated cinema-grade modes lets the Photo Curator & VFX Designer match every photo's geometry "
-                "(Split-Diopter macro for architectural details, Contact-Sheet proof push-ins for bursts, Glassmorphic Vitrine & 3D Tilt "
-                "for gallery heroes, Medium-Format 120 Slides & Polaroids for portraits, and Criterion Bento Grids for stories) cleanly."
+                "Combining all 17 curated cinema-grade modes lets the Photo Curator & VFX Designer match every photo's geometry "
+                "(Neural 4-layer MPI Depth Parallax, Continuous Aperture Rack-Focus, Vertigo Counter-Dolly, Archival Color Bloom, "
+                "Split-Diopter macro, Contact-Sheet proofs, Glassmorphic Vitrine, Medium-Format 120 Slides & Criterion Bento Grids) cleanly."
             ),
         ),
         InterviewQuestion(
@@ -338,11 +345,14 @@ def generate_intake_questions(
                 "prism_chromatic_edge (Recommended) — Subtle Optical Glass Chromatic Dispersion at Outer Periphery (Center Crisp)",
                 "velvet_vignette_rembrandt (Recommended) — Directional Chiaroscuro Upper-Left Warm Key Light + Deep Gallery Falloff",
                 "fine_art_rag_texture (Recommended) — Cold-Press Cotton-Rag Archival Fine-Art Paper Micro-Relief Finish",
+                "halation_bloom_35mm (Recommended) — Authentic Kodak Vision3 / Cinestill Warm Crimson-Amber Highlight Halation Glow",
+                "caustic_water_shimmer (Recommended) — Subtle Caribbean / Lakeside Caustic Specular Sun-Ripple Shimmer",
                 "none — Clean Unfiltered Digital Master Only",
             ],
             default_answer=(
                 "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain,"
-                "anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture"
+                "anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture,"
+                "halation_bloom_35mm,caustic_water_shimmer"
             ),
             is_multi_select=True,
             recommended_options=[
@@ -354,24 +364,29 @@ def generate_intake_questions(
                 "prism_chromatic_edge",
                 "velvet_vignette_rembrandt",
                 "fine_art_rag_texture",
+                "halation_bloom_35mm",
+                "caustic_water_shimmer",
             ],
             recommendation_rationale=(
-                "Blending subtle optical finishers (Panavision sapphire streaks on highlights, chiaroscuro Rembrandt key lighting, "
-                "cotton-rag museum paper relief, warm sun leaks, and champagne bokeh) gives every still frame authentic theatrical depth."
+                "Blending subtle optical finishers (35mm Vision3 highlight halation, caustic water sun-ripples, Panavision sapphire streaks, "
+                "chiaroscuro Rembrandt key lighting, cotton-rag museum paper relief, warm sun leaks, and champagne bokeh) gives every still frame authentic theatrical depth."
             ),
         ),
         InterviewQuestion(
             id="photo_mode",
             question="5. Primary Anchor Photo Mode (Default fallback when a single mode is used)",
             options=[
-                "cinematic_depth_3d (Recommended) — 3-Plane Subject Depth Parallax + Bokeh Defocus + Frosted Documentary Card",
+                "cinematic_depth_3d (Recommended) — Neural 4-Layer MPI Depth Parallax with Disocclusion Fill + Frosted Documentary Card",
+                "aperture_rack_focus — Continuous Depth-Guided Optical Aperture Focus Pull",
+                "dolly_zoom_vertigo — Optical Hitchcock Counter-Dolly Neural Depth Reveal",
+                "archival_color_bloom — Silver-Gelatin B&W -> Living Color Depth Bloom",
                 "split_diopter_focus — A24 Split-Diopter 54/46 Wide Context + 2.2x Macro Detail",
                 "contact_sheet_zoom — Magnum 3x2 Darkroom Contact Sheet Proof Push-In",
                 "glassmorphic_pedestal — VisionOS Frosted Acrylic Vitrine Card",
                 "medium_format_slide — Hasselblad 120 Transparency Slide Mount",
                 "floating_tilt_plate — True 3D Perspective Homography Orbit Plate",
                 "criterion_atelier_split — Criterion 3-Viewport Asymmetric Bento Grid",
-                "parallax_gallery — 2.5D Counter-Panning Museum Matte Frame",
+                "parallax_gallery — Calmed 2.5D Museum Float Matte Frame",
                 "editorial_magazine — Asymmetric 62/38 Luxury Magazine Monograph Spread",
                 "polaroid_scrapbook — Vintage Instant-Film Polaroid Scrapbook",
                 "cinema_anamorphic — 2.39:1 CinemaScope Widescreen Letterbox",
@@ -481,6 +496,9 @@ def _resolve_photo_suite_answers(
         if "photo_effects_suite" in q_by_id
         else [
             "cinematic_depth_3d",
+            "aperture_rack_focus",
+            "dolly_zoom_vertigo",
+            "archival_color_bloom",
             "split_diopter_focus",
             "contact_sheet_zoom",
             "glassmorphic_pedestal",
@@ -513,6 +531,8 @@ def _resolve_photo_suite_answers(
             "prism_chromatic_edge",
             "velvet_vignette_rembrandt",
             "fine_art_rag_texture",
+            "halation_bloom_35mm",
+            "caustic_water_shimmer",
         ]
     )
     enabled_overlays = _extract_multi_codes(

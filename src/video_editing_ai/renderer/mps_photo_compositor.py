@@ -167,15 +167,26 @@ class MPSPhotoCompositor:
         elif mode == "polaroid_scrapbook":
             t["polaroid_1"] = self._up(ctx["polaroid_1"], "RGBA")
             t["polaroid_2"] = self._up(ctx["polaroid_2"], "RGBA") if ctx.get("polaroid_2") is not None else None
-        elif mode == "cinematic_depth_3d":
-            t["depth_bg_sharp"] = self._up(ctx["depth_bg_sharp"], "RGB")
-            bokeh_img = ctx["depth_bg_bokeh"]
-            bw_q = max(32, bokeh_img.width // 4)
-            bh_q = max(32, bokeh_img.height // 4)
-            t["depth_bg_bokeh_small"] = self._up(
-                bokeh_img.resize((bw_q, bh_q), Image.Resampling.BILINEAR), "RGB"
+        elif mode in ("cinematic_depth_3d", "dolly_zoom_vertigo"):
+            t["mpi_layers"] = [self._up(layer, "RGBA") for layer in ctx["mpi_layers"]]
+        elif mode == "aperture_rack_focus":
+            t["rf_sharp"] = self._up(ctx["rf_sharp"], "RGB")
+            t["rf_bokeh"] = self._up(ctx["rf_bokeh"], "RGB")
+            t["rf_depth_q"] = (
+                torch.from_numpy(np.ascontiguousarray(ctx["rf_depth_q"], dtype=np.float32))
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .to(device=self.device, dtype=torch.float32)
             )
-            t["depth_fg_rgba"] = self._up(ctx["depth_fg_rgba"], "RGBA")
+        elif mode == "archival_color_bloom":
+            t["bloom_color"] = self._up(ctx["bloom_color"], "RGB")
+            t["bloom_bw"] = self._up(ctx["bloom_bw"], "RGB")
+            t["bloom_depth_q"] = (
+                torch.from_numpy(np.ascontiguousarray(ctx["bloom_depth_q"], dtype=np.float32))
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .to(device=self.device, dtype=torch.float32)
+            )
         elif mode == "curator_loupe":
             t["loupe_dimmed"] = self._up(ctx["loupe_dimmed"], "RGB")
             t["loupe_sharp"] = self._up(ctx["loupe_sharp"], "RGB")
@@ -242,6 +253,8 @@ class MPSPhotoCompositor:
             t["fx_vig_mask"] = self._up(fx["vig_mask"], "L") / 255.0
         elif fx_type == "fine_art_rag_texture":
             t["fx_rag"] = self._up(fx["rag_img"], "RGB")
+        elif fx_type == "caustic_water_shimmer":
+            t["fx_shimmer"] = self._up(fx["shimmer_img"], "RGB")
 
         # Plane 3 Frosted documentary lower-third card
         if ctx.get("has_card") and ctx.get("card_fg") is not None:
@@ -528,26 +541,115 @@ class MPSPhotoCompositor:
             return canvas
 
         if mode == "cinematic_depth_3d":
-            bg_zooms = [1.10 - 0.04 * e for e in eased_list]
-            bg_cxs = [0.5 - (ex - sx) * e * 0.45 for e in eased_list]
-            bg_cys = [0.5 - (ey - sy) * e * 0.45 for e in eased_list]
-            sharp_c = self._crop_plane_batch(tex["depth_bg_sharp"], (w, h), bg_zooms, bg_cxs, bg_cys)
-            qw, qh = max(16, w // 4), max(16, h // 4)
-            bokeh_q = self._crop_plane_batch(tex["depth_bg_bokeh_small"], (qw, qh), bg_zooms, bg_cxs, bg_cys)
-            bokeh_c = F.interpolate(bokeh_q.float(), size=(h, w), mode="bilinear", align_corners=False).to(
-                dtype=self.work_dtype
-            )
-            mix_t = torch.tensor(
-                [min(0.88, 0.30 + 0.58 * e) for e in eased_list], device=self.device, dtype=self.work_dtype
-            ).view(batch_n, 1, 1, 1)
-            canvas = sharp_c * (1.0 - mix_t) + bokeh_c * mix_t
+            amp = float(ctx.get("parallax_amp", 1.0))
+            mpi_layers: list[torch.Tensor] = tex["mpi_layers"]
+            base_zooms = [1.032 + 0.028 * e for e in eased_list]
+            arc_xs = [
+                math.sin((e - 0.5) * math.pi) * 0.014 * amp + (ex - sx) * 0.12 * amp * (e - 0.5)
+                for e in eased_list
+            ]
+            arc_ys = [
+                -0.004 * amp * math.cos((e - 0.5) * math.pi) + (ey - sy) * 0.10 * amp * (e - 0.5)
+                for e in eased_list
+            ]
+            layer_specs = ((-0.55, 0.994), (-0.18, 1.000), (0.18, 1.008), (0.55, 1.016))
+            canvas = torch.empty((batch_n, 3, h, w), device=self.device, dtype=self.work_dtype)
+            for li, (d_mult, z_mul) in enumerate(layer_specs):
+                zooms_i = [bz * z_mul for bz in base_zooms]
+                cxs_i = [0.5 + d_mult * ax for ax in arc_xs]
+                cys_i = [0.5 + d_mult * ay for ay in arc_ys]
+                cropped = self._crop_plane_batch(mpi_layers[li], (w, h), zooms_i, cxs_i, cys_i)
+                if li == 0:
+                    canvas = cropped[:, :3]
+                else:
+                    a = cropped[:, 3:4] / 255.0
+                    canvas = canvas * (1.0 - a) + cropped[:, :3] * a
+            return canvas
 
-            fg_zooms = [1.00 + 0.085 * e for e in eased_list]
-            fg_cxs = [0.5 + (ex - sx) * e * 0.35 for e in eased_list]
-            fg_cys = [0.5 + (ey - sy) * e * 0.35 for e in eased_list]
-            fg_warped = self._crop_plane_batch(tex["depth_fg_rgba"], (w, h), fg_zooms, fg_cxs, fg_cys)
-            a = fg_warped[:, 3:4] / 255.0
-            return canvas * (1.0 - a) + fg_warped[:, :3] * a
+        if mode == "dolly_zoom_vertigo":
+            amp = float(ctx.get("parallax_amp", 1.0))
+            mpi_layers = tex["mpi_layers"]
+            v_mixs = [e * (0.55 + 0.45 * amp) for e in eased_list]
+            dx_vs = [(ex - sx) * 0.25 * e for e in eased_list]
+            dy_vs = [(ey - sy) * 0.20 * e for e in eased_list]
+            vertigo_specs = ((1.045, 0.030, -0.20), (1.035, 0.020, -0.06), (1.026, 0.011, 0.08), (1.018, -0.004, 0.20))
+            canvas = torch.empty((batch_n, 3, h, w), device=self.device, dtype=self.work_dtype)
+            for li, (z0, z_delta, d_shift) in enumerate(vertigo_specs):
+                zooms_i = [z0 - z_delta * vm for vm in v_mixs]
+                cxs_i = [0.5 + d_shift * dx for dx in dx_vs]
+                cys_i = [0.5 + d_shift * dy for dy in dy_vs]
+                cropped = self._crop_plane_batch(mpi_layers[li], (w, h), zooms_i, cxs_i, cys_i)
+                if li == 0:
+                    canvas = cropped[:, :3]
+                else:
+                    a = cropped[:, 3:4] / 255.0
+                    canvas = canvas * (1.0 - a) + cropped[:, :3] * a
+            return canvas
+
+        if mode == "aperture_rack_focus":
+            rf_sharp = tex["rf_sharp"]
+            rf_bokeh = tex["rf_bokeh"]
+            rf_depth_q = tex["rf_depth_q"]
+            f_start = float(ctx["rf_focus_start"])
+            f_end = float(ctx["rf_focus_end"])
+            _, _, rh, rw = rf_sharp.shape
+            _, _, qh, qw = rf_depth_q.shape
+
+            zooms = [1.01 + 0.04 * e for e in eased_list]
+            cxs = [0.5 + (ex - sx) * 0.25 * e for e in eased_list]
+            cys = [0.5 + (ey - sy) * 0.25 * e for e in eased_list]
+            sharp_c = self._crop_plane_batch(rf_sharp, (w, h), zooms, cxs, cys)
+            bokeh_c = self._crop_plane_batch(rf_bokeh, (w, h), zooms, cxs, cys)
+
+            masks_b: list[torch.Tensor] = []
+            for t_norm, z, cx, cy in zip(t_norms, zooms, cxs, cys):
+                focus_p = _ease_in_out_cubic(min(1.0, t_norm / 0.85))
+                focus_d = f_start + (f_end - f_start) * focus_p
+                dist = (rf_depth_q - focus_d).abs()
+                lin = ((dist - 0.06) / 0.24).clamp(0.0, 1.0)
+                blur_w_q = lin * lin * (3.0 - 2.0 * lin) * 0.85
+                cw_r = rw / max(1.0, z)
+                ch_r = rh / max(1.0, z)
+                x0 = min(max(0.0, cx * rw - cw_r * 0.5), max(0.0, rw - cw_r))
+                y0 = min(max(0.0, cy * rh - ch_r * 0.5), max(0.0, rh - ch_r))
+                qx0 = min(max(0.0, (x0 / rw) * qw), qw - 1.0)
+                qy0 = min(max(0.0, (y0 / rh) * qh), qh - 1.0)
+                qx1 = min(float(qw), qx0 + (cw_r / rw) * qw)
+                qy1 = min(float(qh), qy0 + (ch_r / rh) * qh)
+                masks_b.append(self._warp_extents_batch(blur_w_q, (w, h), [(qx0, qy0, qx1, qy1)]))
+            blur_mask = torch.cat(masks_b, dim=0)
+            return sharp_c * (1.0 - blur_mask) + bokeh_c * blur_mask
+
+        if mode == "archival_color_bloom":
+            bloom_col = tex["bloom_color"]
+            bloom_bw = tex["bloom_bw"]
+            bloom_depth_q = tex["bloom_depth_q"]
+            _, _, bh, bw_w = bloom_col.shape
+            _, _, qh, qw = bloom_depth_q.shape
+
+            zooms = [1.01 + 0.045 * e for e in eased_list]
+            cxs = [0.5 + (ex - sx) * 0.30 * e for e in eased_list]
+            cys = [0.5 + (ey - sy) * 0.30 * e for e in eased_list]
+            bw_c = self._crop_plane_batch(bloom_bw, (w, h), zooms, cxs, cys)
+            col_c = self._crop_plane_batch(bloom_col, (w, h), zooms, cxs, cys)
+
+            masks_b = []
+            for t_norm, z, cx, cy in zip(t_norms, zooms, cxs, cys):
+                bloom_p = _ease_in_out_cubic(min(1.0, t_norm / 0.88))
+                thresh = 1.06 - 1.26 * bloom_p
+                soft_k = ((bloom_depth_q - thresh) / 0.32).clamp(0.0, 1.0)
+                color_w_q = soft_k * soft_k * (3.0 - 2.0 * soft_k)
+                cw_b = bw_w / max(1.0, z)
+                ch_b = bh / max(1.0, z)
+                x0 = min(max(0.0, cx * bw_w - cw_b * 0.5), max(0.0, bw_w - cw_b))
+                y0 = min(max(0.0, cy * bh - ch_b * 0.5), max(0.0, bh - ch_b))
+                qx0 = min(max(0.0, (x0 / bw_w) * qw), qw - 1.0)
+                qy0 = min(max(0.0, (y0 / bh) * qh), qh - 1.0)
+                qx1 = min(float(qw), qx0 + (cw_b / bw_w) * qw)
+                qy1 = min(float(qh), qy0 + (ch_b / bh) * qh)
+                masks_b.append(self._warp_extents_batch(color_w_q, (w, h), [(qx0, qy0, qx1, qy1)]))
+            col_mask = torch.cat(masks_b, dim=0)
+            return bw_c * (1.0 - col_mask) + col_c * col_mask
 
         if mode == "curator_loupe":
             canvas = tex["loupe_dimmed"].expand(batch_n, -1, -1, -1).clone()
@@ -604,20 +706,20 @@ class MPSPhotoCompositor:
             return self._crop_plane_batch(tex["anamorphic_base"], (w, h), zooms, cxs, cys)
 
         if mode == "parallax_gallery":
-            zooms = [1.10 - 0.04 * e for e in eased_list]
-            cxs = [0.5 - (ex - sx) * e * 0.55 for e in eased_list]
-            cys = [0.5 - (ey - sy) * e * 0.55 for e in eased_list]
+            zooms = [1.07 - 0.025 * e for e in eased_list]
+            cxs = [0.5 - (ex - sx) * e * 0.22 for e in eased_list]
+            cys = [0.5 - (ey - sy) * e * 0.22 for e in eased_list]
             canvas = self._crop_plane_batch(tex["bg_plane"], (w, h), zooms, cxs, cys)
             fg_card = tex["fg_card_1"]
             fh_orig, fw_orig = int(fg_card.shape[2]), int(fg_card.shape[3])
             for b, eased in enumerate(eased_list):
                 fg_dx = (ex - sx) * eased
                 fg_dy = (ey - sy) * eased
-                fg_scale = 0.96 + 0.05 * eased
+                fg_scale = 0.982 + 0.030 * eased
                 cw = max(1, int(round(fw_orig * fg_scale)))
                 ch = max(1, int(round(fh_orig * fg_scale)))
-                px = (w - cw) // 2 + int(round(fg_dx * w * 0.28))
-                py = max(10, int(h * card_cy_ratio) - ch // 2 + int(round(fg_dy * h * 0.24)))
+                px = (w - cw) // 2 + int(round(fg_dx * w * 0.06))
+                py = max(10, int(h * card_cy_ratio) - ch // 2 + int(round(fg_dy * h * 0.045)))
                 self._paste_rgba_single(canvas[b : b + 1], fg_card, px, py, dst_w=cw, dst_h=ch)
             return canvas
 
@@ -964,6 +1066,30 @@ class MPSPhotoCompositor:
 
         if fx_type == "fine_art_rag_texture":
             return canvas * 0.945 + tex["fx_rag"] * 0.055
+
+        if fx_type == "halation_bloom_35mm":
+            sw, sh = max(48, w // 6), max(27, h // 6)
+            small = F.interpolate(canvas.float(), size=(sh, sw), mode="bilinear", align_corners=False)
+            luma = 0.299 * small[:, 0:1] + 0.587 * small[:, 1:2] + 0.114 * small[:, 2:3]
+            hi = ((luma - 206.0) / 49.0).clamp(0.0, 1.0).to(dtype=self.work_dtype)
+            halo_s = self._gaussian_blur_2d(hi, sigma=4.0).clamp(0.0, 1.0)
+            tint = torch.tensor([255.0, 124.0, 68.0], device=self.device, dtype=torch.float32).view(1, 3, 1, 1)
+            halo_full = F.interpolate(halo_s.float() * tint, size=(h, w), mode="bilinear", align_corners=False).to(
+                dtype=self.work_dtype
+            )
+            screened = canvas + halo_full - (canvas * halo_full) / 255.0
+            weights = torch.tensor(
+                [0.24 + 0.08 * math.sin(math.pi * t) for t in t_norms], device=self.device, dtype=self.work_dtype
+            ).view(batch_n, 1, 1, 1)
+            return canvas * (1.0 - weights) + screened * weights
+
+        if fx_type == "caustic_water_shimmer":
+            shimmer = tex["fx_shimmer"]
+            screened = canvas + shimmer - (canvas * shimmer) / 255.0
+            weights = torch.tensor(
+                [0.09 + 0.045 * math.sin(math.pi * t) for t in t_norms], device=self.device, dtype=self.work_dtype
+            ).view(batch_n, 1, 1, 1)
+            return canvas * (1.0 - weights) + screened * weights
 
         return canvas
 

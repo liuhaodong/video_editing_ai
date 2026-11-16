@@ -546,7 +546,10 @@ class PhotoCuratorAgent(BaseEditingAgent):
         # and the client's multi-select photo_effects_suite & photo_overlay_finishers from CreativeBrief
         active_selects = [it for it in selected_items if it.subclip_id not in absorbed_partner_ids]
         default_fx_map: dict[str, str] = {
-            "cinematic_depth_3d": "golden_light_leak",
+            "cinematic_depth_3d": "halation_bloom_35mm",
+            "aperture_rack_focus": "museum_spotlight",
+            "dolly_zoom_vertigo": "anamorphic_streak",
+            "archival_color_bloom": "nostalgic_film_grain",
             "parallax_gallery": "museum_spotlight",
             "editorial_magazine": "fine_art_rag_texture",
             "curator_loupe": "velvet_vignette_rembrandt",
@@ -569,6 +572,9 @@ class PhotoCuratorAgent(BaseEditingAgent):
         if not client_modes:
             client_modes = [
                 "cinematic_depth_3d",
+                "aperture_rack_focus",
+                "dolly_zoom_vertigo",
+                "archival_color_bloom",
                 "parallax_gallery",
                 "editorial_magazine",
                 "curator_loupe",
@@ -586,9 +592,21 @@ class PhotoCuratorAgent(BaseEditingAgent):
         allow_overlays = not ("none" in client_overlays and len(client_overlays) == 1)
         non_none_overlays = [fx for fx in client_overlays if fx != "none"]
 
-        def _pick_overlay_for_mode(m_code: str, idx_hint: int) -> str:
+        def _pick_overlay_for_mode(m_code: str, idx_hint: int, semantic_blob: str = "") -> str:
             if not allow_overlays:
                 return "none"
+            if (
+                "caustic_water_shimmer" in client_overlays
+                and any(w in semantic_blob for w in ("beach", "ocean", "sea", "lagoon", "pool", "coast", "caribbean", "surf", "water"))
+                and m_code not in ("editorial_magazine", "curator_loupe")
+            ):
+                return "caustic_water_shimmer"
+            if (
+                "halation_bloom_35mm" in client_overlays
+                and any(w in semantic_blob for w in ("sunset", "golden", "sunrise", "sunlight", "lamp", "twilight", "candle", "lantern"))
+                and m_code not in ("archival_color_bloom",)
+            ):
+                return "halation_bloom_35mm"
             pref_fx = default_fx_map.get(m_code, "none")
             if pref_fx in client_overlays or pref_fx == "none":
                 return pref_fx
@@ -609,43 +627,57 @@ class PhotoCuratorAgent(BaseEditingAgent):
             blob_low = f"{sel_it.annotation_title} {sel_it.annotation_subtitle} {sel_it.subject_category}".lower()
             if any(k in blob_low for k in ("mosaic", "sculpture", "relief", "painting", "stained glass", "dome", "carving", "fresco", "detail", "masterpiece")):
                 semantic_prefs = [
+                    "aperture_rack_focus",
                     "split_diopter_focus",
                     "curator_loupe",
                     "glassmorphic_pedestal",
                     "floating_tilt_plate",
-                    "parallax_gallery",
                     "cinematic_depth_3d",
+                    "parallax_gallery",
                 ]
             elif any(k in blob_low for k in ("culinary", "bakery", "cheese", "café", "cafe", "menu", "dining", "food", "pastry", "candid", "smile", "selfie")):
                 semantic_prefs = [
                     "polaroid_scrapbook",
                     "medium_format_slide",
+                    "aperture_rack_focus",
                     "contact_sheet_zoom",
                     "cinematic_depth_3d",
                     "criterion_atelier_split",
                     "parallax_gallery",
                 ]
+            elif any(k in blob_low for k in ("ruin", "temple", "heritage", "historic", "museum", "ancient", "cathedral", "palace", "arch", "monument")):
+                semantic_prefs = [
+                    "archival_color_bloom",
+                    "dolly_zoom_vertigo",
+                    "editorial_magazine",
+                    "cinematic_depth_3d",
+                    "floating_tilt_plate",
+                    "split_diopter_focus",
+                ]
             elif sel_it.subject_category == "family_portrait" or sel_it.portrait_warmth_score >= 8.9:
                 semantic_prefs = [
                     "cinematic_depth_3d",
+                    "aperture_rack_focus",
                     "medium_format_slide",
                     "floating_tilt_plate",
                     "polaroid_scrapbook",
                     "glassmorphic_pedestal",
                     "parallax_gallery",
                 ]
-            elif any(k in blob_low for k in ("panorama", "skyline", "river", "waterfront", "twilight", "horizon", "illuminated", "night")):
+            elif any(k in blob_low for k in ("panorama", "skyline", "river", "waterfront", "twilight", "horizon", "illuminated", "night", "ocean", "beach", "coast")):
                 semantic_prefs = [
+                    "dolly_zoom_vertigo",
                     "cinema_anamorphic",
+                    "cinematic_depth_3d",
+                    "archival_color_bloom",
                     "split_diopter_focus",
                     "floating_tilt_plate",
                     "editorial_magazine",
-                    "parallax_gallery",
-                    "cinematic_depth_3d",
                 ]
             else:
                 semantic_prefs = [
                     "criterion_atelier_split",
+                    "aperture_rack_focus",
                     "contact_sheet_zoom",
                     "editorial_magazine",
                     "glassmorphic_pedestal",
@@ -669,7 +701,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
             chosen_mode = min(candidates, key=lambda m: (mode_usage.get(m, 0), rank_map.get(m, 999)))
             mode_usage[chosen_mode] = mode_usage.get(chosen_mode, 0) + 1
 
-            chosen_fx = _pick_overlay_for_mode(chosen_mode, idx_sel)
+            chosen_fx = _pick_overlay_for_mode(chosen_mode, idx_sel, blob_low)
             sel_it.recommended_photo_mode = chosen_mode  # type: ignore[assignment]
             sel_it.overlay_fx = chosen_fx  # type: ignore[assignment]
             prev_assigned_mode = chosen_mode
