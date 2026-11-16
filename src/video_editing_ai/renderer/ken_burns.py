@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from typing import Any, Optional
 
 import cv2
@@ -2932,13 +2933,13 @@ def render_photo_clip(
     try:
         hw = get_hardware_profile()
         if hw.has_cuda and total_frames > 0:
-            cuda_batch = (6 if hw.cuda_vram_gb >= 12.0 else 3) if width >= 3840 else 12
+            cuda_batch = (4 if hw.cuda_vram_gb >= 12.0 else 2) if width >= 3840 else 12
             cuda_ok = False
             stderr_bytes = b""
             ret = 1
             proc: Optional[subprocess.Popen[bytes]] = None
             with nvenc_encode_guard(v_enc):
-                for attempt_batch in (cuda_batch, max(2, cuda_batch // 2)):
+                for attempt_batch in (cuda_batch, max(1, cuda_batch // 2)):
                     cuda_ok = False
                     cuda_sem_held = False
                     proc = None
@@ -2962,12 +2963,23 @@ def render_photo_clip(
                         break
                     except Exception as exc:
                         if proc is not None:
+                            for pipe in (proc.stdin, proc.stderr):
+                                if pipe is not None:
+                                    try:
+                                        pipe.close()
+                                    except (BrokenPipeError, OSError, ValueError):
+                                        pass
                             try:
                                 proc.kill()
                                 proc.wait(timeout=5)
                             except Exception:
                                 pass
-                        tmp_out.unlink(missing_ok=True)
+                        for _attempt in range(3):
+                            try:
+                                tmp_out.unlink(missing_ok=True)
+                                break
+                            except OSError:
+                                time.sleep(0.05)
                         try:
                             import torch
 
@@ -2976,7 +2988,7 @@ def render_photo_clip(
                         except Exception:
                             pass
                         is_oom = "out of memory" in str(exc).lower()
-                        if is_oom and attempt_batch > max(2, cuda_batch // 2):
+                        if is_oom and attempt_batch > max(1, cuda_batch // 2):
                             continue
                         print(f"[ken_burns] CUDA photo compositor fallback to CPU: {exc}", file=sys.stderr)
                         break
@@ -3179,7 +3191,12 @@ def render_photo_clip(
         os.replace(tmp_out, out_path)
         return out_path
     finally:
-        tmp_out.unlink(missing_ok=True)
+        for _attempt in range(3):
+            try:
+                tmp_out.unlink(missing_ok=True)
+                break
+            except OSError:
+                time.sleep(0.05)
 
 
 def render_photo_effects_showcase_sheet(

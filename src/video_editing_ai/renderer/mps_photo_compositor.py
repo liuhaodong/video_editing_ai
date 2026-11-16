@@ -288,6 +288,20 @@ class MPSPhotoCompositor:
         """
         out_w, out_h = out_size
         batch_n = len(boxes)
+        if batch_n == 0:
+            return torch.empty((0, int(src.shape[1]), out_h, out_w), device=self.device, dtype=self.work_dtype)
+
+        # Micro-chunk large 4K multi-channel warps (e.g. 4-layer RGBA MPI) to bound peak float32 grid_sample VRAM
+        ch = int(src.shape[1])
+        pix_budget = 18_000_000 if ch <= 3 else 10_000_000
+        if self.device.type == "cuda" and (batch_n * out_h * out_w > pix_budget) and batch_n > 1:
+            sub_bs = 1 if (out_w >= 3840 and ch >= 4) else min(2, batch_n - 1)
+            if sub_bs < batch_n:
+                chunks: list[torch.Tensor] = []
+                for start_i in range(0, batch_n, sub_bs):
+                    chunks.append(self._warp_extents_batch(src, out_size, boxes[start_i : start_i + sub_bs]))
+                return torch.cat(chunks, dim=0)
+
         _, _, src_h, src_w = src.shape
         u_1d, v_1d = self._get_1d_grid(out_h, out_w)
 
