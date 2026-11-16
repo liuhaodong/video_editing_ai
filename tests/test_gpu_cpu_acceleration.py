@@ -112,7 +112,7 @@ def test_hardware_policy_cuda_detection_and_render_worker_count(monkeypatch: pyt
             has_cuda_hwaccel=True,
             cuda_vram_gb=16.0,
         )
-        assert hardware.get_render_worker_count(cuda_prof) == 6
+        assert hardware.get_render_worker_count(cuda_prof) == 8
     finally:
         monkeypatch.undo()
         hardware.reset_hardware_cache()

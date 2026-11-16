@@ -754,6 +754,7 @@ class CullerAgent(BaseEditingAgent):
                             annotation_title=v_title,
                             annotation_subtitle=v_sub,
                             recommended_transition=v_trans,
+                            recommended_speed=float(m_info.get("recommended_speed", 1.0)),
                             ai_rationale=f"{v_rat} [stability={m_stab:.2f}, peak={m_peak:.2f}s]",
                             is_discarded=is_disc,
                             discard_reason="excessive_camera_shake_or_low_score" if is_disc else None,

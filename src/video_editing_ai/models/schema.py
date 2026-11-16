@@ -126,6 +126,7 @@ TravelMapStyleType = Literal[
     "archival_expedition_parchment",
     "aerial_relief_hybrid",
     "kinfolk_minimal_monograph",
+    "google_road_navigator",
 ]
 
 VALID_TRAVEL_MAP_STYLES: tuple[str, ...] = (
@@ -134,6 +135,7 @@ VALID_TRAVEL_MAP_STYLES: tuple[str, ...] = (
     "archival_expedition_parchment",
     "aerial_relief_hybrid",
     "kinfolk_minimal_monograph",
+    "google_road_navigator",
 )
 
 TravelMapModeType = Literal[
@@ -568,6 +570,12 @@ class CulledSubClip(BaseModel):
     recommended_transition: Literal["none", "cut", "crossfade", "dissolve", "fade_black", "dip_to_white"] = Field(
         default="crossfade",
         description="AI-recommended transition style based on narrative and visual continuity",
+    )
+    recommended_speed: float = Field(
+        default=1.0,
+        ge=0.25,
+        le=2.0,
+        description="Playback speed multiplier (e.g. 0.65-0.75 slow-motion damping for brisk camera pans)",
     )
     ai_rationale: str = Field(
         default="",

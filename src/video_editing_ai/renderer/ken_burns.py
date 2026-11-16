@@ -2779,7 +2779,7 @@ def render_photo_clip(
     try:
         hw = get_hardware_profile()
         if hw.has_cuda and total_frames > 0:
-            cuda_batch = 4 if width >= 3840 else 12
+            cuda_batch = (8 if hw.cuda_vram_gb >= 12.0 else 4) if width >= 3840 else 12
             cuda_ok = False
             cuda_sem_held = False
             stderr_bytes = b""

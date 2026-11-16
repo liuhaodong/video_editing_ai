@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import re
 import subprocess
+import threading
 from typing import Any, Literal, Optional
 
 import cv2
@@ -199,8 +200,11 @@ def analyze_video_temporal_telemetry(
     vy_curve = np.zeros(n_steps, dtype=np.float32)
     div_curve = np.zeros(n_steps, dtype=np.float32)
 
+    mag_means = np.zeros(n_steps, dtype=np.float32)
+    flow_speed_4k_curve = np.zeros(n_steps, dtype=np.float32)
+
     if len(frames) >= 2:
-        use_ocl = configure_opencv_amd_opencl()
+        use_ocl = configure_opencv_amd_opencl() and (threading.current_thread() is threading.main_thread())
         umat_frames = None
         if use_ocl:
             try:
@@ -221,7 +225,6 @@ def analyze_video_temporal_telemetry(
         med_sharp = max(8.0, float(np.median(raw_sharp)))
         sharpness_curve = np.clip(raw_sharp / (med_sharp * 1.25), 0.10, 1.0).astype(np.float32)
 
-        mag_means = np.zeros(n_steps, dtype=np.float32)
         coherence = np.ones(n_steps, dtype=np.float32)
         frame_diffs = np.zeros(n_steps, dtype=np.float32)
 
@@ -299,14 +302,16 @@ def analyze_video_temporal_telemetry(
             coh = float(coherence[i])
 
             # Smooth tripod/gimbal pans have low jerk (< 2.8), high coherence (> 0.60), and crisp edges.
-            # Violent whip-pans, camera drops, or blurred motion shake exhibit high jerk, large frame_diff,
-            # incoherent flow, or sharp drop in Laplacian edge contrast.
+            # Violent whip-pans, camera drops, dizzying fast sweeps (> ~120 px/s @ 4K), or blurred motion
+            # exhibit high optical-flow velocity, high jerk, large frame_diff, or dropped Laplacian contrast.
             whip_pen = max(0.0, (m_val - 9.0) / 9.5) + max(0.0, (f_diff - 24.0) / 28.0)
+            dizzy_pan_pen = max(0.0, (m_val - 1.45) / 5.2)
             jerk_pen = max(0.0, (j_val - 2.1) / 4.8)
             incoh_pen = max(0.0, (0.55 - coh) * 0.85) if (m_val > 2.2 or f_diff > 18.0) else 0.0
             blur_pen = max(0.0, (0.52 - s_val) * 1.45)
-            stab = 1.0 - min(0.95, 0.50 * jerk_pen + 0.45 * whip_pen + incoh_pen + blur_pen)
+            stab = 1.0 - min(0.95, 0.45 * jerk_pen + 0.42 * whip_pen + 0.38 * dizzy_pan_pen + incoh_pen + blur_pen)
             stability_curve[i] = round(float(np.clip(stab, 0.05, 1.0)), 3)
+            flow_speed_4k_curve[i] = round(float(m_val * (3840.0 / 160.0) / step_sec), 1)
 
     prosody_curve = _decode_prosody_excitement_curve(video_path, n_steps=n_steps, step_sec=step_sec)
 
@@ -370,7 +375,9 @@ def analyze_video_temporal_telemetry(
         "clean_usable_out": clean_usable_out,
         "camera_movement": cam_motion,
         "mean_stability": round(float(np.mean(stability_curve[sl])), 3),
+        "mean_flow_4k_px_s": round(float(np.mean(flow_speed_4k_curve[sl])), 1),
         "stability_curve": [round(float(x), 3) for x in stability_curve],
+        "flow_speed_4k_curve": [round(float(x), 1) for x in flow_speed_4k_curve],
         "sharpness_curve": [round(float(x), 3) for x in sharpness_curve],
         "prosody_curve": [round(float(x), 3) for x in prosody_curve],
         "salience_curve": [round(float(x), 3) for x in salience_curve],
@@ -427,6 +434,7 @@ def _best_broll_window_in_span(
     step = float(telemetry.get("step_sec") or 0.25)
     stab = np.asarray(telemetry.get("stability_curve") or [0.85], dtype=np.float32)
     sal = np.asarray(telemetry.get("salience_curve") or [0.75], dtype=np.float32)
+    flow_4k = np.asarray(telemetry.get("flow_speed_4k_curve") or np.zeros(len(sal), dtype=np.float32), dtype=np.float32)
     n = len(sal)
 
     # Trim unstable edges inside this span if span is long enough
@@ -464,7 +472,10 @@ def _best_broll_window_in_span(
             w_stab = float(np.mean(stab[idx : idx + win_steps]))
             if w_stab < 0.40:
                 continue
-            w_sal = float(np.mean(sal[idx : idx + win_steps])) + margin_bonus
+            w_flow = float(np.mean(flow_4k[idx : idx + win_steps])) if len(flow_4k) >= idx + win_steps else 0.0
+            # Strongly prefer calmer camera motion (< 75 px/s @ 4K) over fast dizzying panning
+            pan_dizziness_pen = max(0.0, (w_flow - 70.0) / 220.0)
+            w_sal = float(np.mean(sal[idx : idx + win_steps])) + margin_bonus - pan_dizziness_pen
             if w_sal > best_score:
                 best_score = w_sal
                 best_in = round(max(u_in, min(u_out - target_dur, cand_in)), 2)
@@ -595,6 +606,18 @@ def extract_candidate_video_moments(
                 if moments and b_stab < 0.50:
                     continue
                 _, b_pros, b_sal, _ = _window_stats(telemetry, b_in, b_out)
+                # Recommend gentle slow-motion damping if the calmest available span still pans swiftly
+                step_t = float(telemetry.get("step_sec") or 0.25)
+                f_curve = telemetry.get("flow_speed_4k_curve") or []
+                rec_speed = 1.0
+                if f_curve:
+                    fi0 = max(0, min(len(f_curve) - 1, int(math.floor(b_in / step_t))))
+                    fi1 = max(fi0 + 1, min(len(f_curve), int(math.ceil(b_out / step_t))))
+                    win_flow = float(np.median(f_curve[fi0:fi1]))
+                    if win_flow >= 110.0:
+                        rec_speed = 0.65
+                    elif win_flow >= 60.0:
+                        rec_speed = 0.75
                 broll_candidates.append(
                     {
                         "roll_type": "b_roll",
@@ -609,6 +632,7 @@ def extract_candidate_video_moments(
                         "prosody_excitement_score": b_pros,
                         "salience_score": b_sal,
                         "action_peak_tc": b_peak,
+                        "recommended_speed": rec_speed,
                     }
                 )
 

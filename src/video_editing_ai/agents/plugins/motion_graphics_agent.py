@@ -490,12 +490,12 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
 
         if map_active and timeline.visual_track:
             n_total_legs = len(waypoints) - 1
-            if n_total_legs <= 3:
+            if n_total_legs <= 4:
                 chosen_legs = list(range(n_total_legs))
             else:
-                chosen_legs = sorted({0, n_total_legs // 2, n_total_legs - 1})
+                chosen_legs = sorted({0, 1, n_total_legs // 2, n_total_legs - 2, n_total_legs - 1})
 
-            allow_tiles = os.environ.get("AI_EDITOR_ENABLE_ONLINE_TILES", "0") == "1"
+            allow_tiles = os.environ.get("AI_EDITOR_OFFLINE_MAPS", "0") != "1"
             maps_dir = blackboard.project_dir / "cache" / "maps"
             tiles_cache_dir = maps_dir / "tiles"
             map_w = max(640, min(int(timeline.settings.width), 1920))
@@ -546,7 +546,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                                 abs(float(vc.timeline_start) - dest_t),
                             ),
                         )
-                        seg_dur = round(min(3.2, max(1.8, float(host_v1.duration) - 0.12)), 2)
+                        seg_dur = round(min(5.6, max(1.8, float(host_v1.duration) - 0.12)), 2)
                         seg_start = round(float(host_v1.timeline_start) + 0.06, 2)
                         map_mp4 = maps_dir / f"flyover_leg_{leg_i + 1:02d}.mp4"
                         render_travel_map_clip(

@@ -280,6 +280,10 @@ def _build_chapter_items(
             if in_tc + jl_offset < usable_lo:
                 jl_offset = round(max(-0.35, usable_lo - in_tc), 3)
 
+            clip_speed = 1.0 if eff_roll_type == "a_roll" else float(getattr(sc, "recommended_speed", 1.0) or 1.0)
+            clip_speed = max(0.5, min(2.0, clip_speed))
+            src_span = clip_dur * clip_speed
+
             v_item = VisualTrackItem(
                 id=clip_id,
                 type="video",
@@ -291,8 +295,8 @@ def _build_chapter_items(
                 timeline_start=round(cursor, 3),
                 duration=clip_dur,
                 source_in=round(in_tc, 3),
-                source_out=round(in_tc + clip_dur, 3),
-                speed=1.0,
+                source_out=round(in_tc + src_span, 3),
+                speed=round(clip_speed, 2),
                 volume=vol,
                 j_l_cut_audio_offset=jl_offset,
                 audio_crossfade_sec=0.33,

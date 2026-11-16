@@ -596,7 +596,8 @@ class StoryProducerAgent(BaseEditingAgent):
             def _hook_score(v: CulledSubClip) -> float:
                 mundane_pen = 2.5 if (v.spoken_text and _MUNDANE_HOOK_RE.search(v.spoken_text)) else 0.0
                 quote_bonus = 0.45 if (v.spoken_text and len(v.spoken_text.strip()) >= 8 and not mundane_pen) else 0.0
-                motion_bonus = 0.35 if v.camera_movement != "static" else 0.0
+                motion_bonus = 0.35 if (v.camera_movement != "static" and v.stability_score >= 0.72) else 0.0
+                dizzy_pen = 0.65 if v.stability_score < 0.65 else 0.0
                 later_teaser_bonus = 0.15 if vid_idx_map.get(v.subclip_id, 0) >= 1 else 0.0
                 return (
                     0.36 * v.emotion_score
@@ -607,6 +608,7 @@ class StoryProducerAgent(BaseEditingAgent):
                     + motion_bonus
                     + later_teaser_bonus
                     - mundane_pen
+                    - dizzy_pen
                 )
 
             best_hook = max(videos, key=_hook_score)

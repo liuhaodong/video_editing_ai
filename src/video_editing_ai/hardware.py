@@ -103,6 +103,8 @@ def get_render_worker_count(hw: Optional[HardwareProfile] = None) -> int:
     if prof.platform == "darwin":
         return min(5, max(1, prof.cpu_count // 4))
     if prof.has_cuda or "nvenc" in prof.best_hdr_encoder:
+        if prof.cuda_vram_gb >= 12.0:
+            return min(8, max(6, prof.cpu_count // 4))
         return min(6, max(4, prof.cpu_count // 5))
     return min(8, max(2, prof.cpu_count // 4))
 

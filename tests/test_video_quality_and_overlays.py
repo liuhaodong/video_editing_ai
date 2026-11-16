@@ -239,3 +239,83 @@ def test_hlg_highlight_rolloff_targets_hot_hlg_only() -> None:
     assert "lutyuv=" in _build_color_grade_filter(fx_hot)
     assert "lutyuv=" not in _build_color_grade_filter(fx_normal)
     assert HDRColoristAgent._measure_clip_stats is not None
+
+
+def test_travel_map_origin_destination_photos_annotations_and_pacing(tmp_path: Path) -> None:
+    """Verify travel map draws both FROM/TO photos, route annotations, and arrival-dwell pacing."""
+    import inspect
+    from PIL import Image
+    from video_editing_ai.renderer.travel_map import (
+        _cartography_travel_progress,
+        render_travel_map_clip,
+        render_travel_map_frame,
+    )
+
+    assert _cartography_travel_progress(0.03) == 0.0
+    assert _cartography_travel_progress(0.90) == 1.0
+    assert 0.0 < _cartography_travel_progress(0.45) < 1.0
+    assert inspect.signature(render_travel_map_clip).parameters["duration"].default == 5.2
+
+    orig_jpg = tmp_path / "orig.jpg"
+    dest_jpg = tmp_path / "dest.jpg"
+    Image.new("RGB", (320, 200), (24, 118, 172)).save(orig_jpg, "JPEG")
+    Image.new("RGB", (320, 200), (196, 72, 48)).save(dest_jpg, "JPEG")
+
+    wps_with_photos = [
+        {"label": "Paris", "lat": 48.8460, "lon": 2.3688, "alt_m": 35.0, "hero_thumbnail_path": str(orig_jpg)},
+        {"label": "Versailles", "lat": 48.8049, "lon": 2.1204, "alt_m": 135.0, "hero_thumbnail_path": str(dest_jpg)},
+    ]
+    wps_no_photos = [
+        {"label": "Paris", "lat": 48.8460, "lon": 2.3688, "alt_m": 35.0},
+        {"label": "Versailles", "lat": 48.8049, "lon": 2.1204, "alt_m": 135.0},
+    ]
+    anns = [{"lat": 48.8584, "lon": 2.2945, "title": "Tour Eiffel", "sub": "RIVE GAUCHE", "reveal_u": 0.1}]
+
+    f_early_photos = np.asarray(render_travel_map_frame(wps_with_photos, width=640, height=360, t_norm=0.05, annotations=anns), dtype=np.float32)
+    f_early_plain = np.asarray(render_travel_map_frame(wps_no_photos, width=640, height=360, t_norm=0.05), dtype=np.float32)
+    assert float(np.mean(np.abs(f_early_photos - f_early_plain))) > 0.8
+
+    f_late_photos = np.asarray(render_travel_map_frame(wps_with_photos, width=640, height=360, t_norm=0.90, annotations=anns), dtype=np.float32)
+    f_late_plain = np.asarray(render_travel_map_frame(wps_no_photos, width=640, height=360, t_norm=0.90), dtype=np.float32)
+    assert float(np.mean(np.abs(f_late_photos - f_late_plain))) > 1.5
+
+
+def test_calm_motion_selection_and_slow_mo_damping() -> None:
+    """Verify analyzer prefers calm low-flow spans and suggests slow-motion damping for brisk pans."""
+    from video_editing_ai.analyzer.video_moment_analyzer import extract_candidate_video_moments
+    from video_editing_ai.models.schema import VideoAsset
+
+    vid = VideoAsset(id="v1", path="pan.mp4", filename="pan.mp4", duration=10.0)
+    # First 5s: fast dizzying pan (145 px/s @ 4K); last 5s: calm steady shot (25 px/s @ 4K)
+    n_steps = 40
+    stab = [0.76] * 20 + [0.95] * 20
+    flow = [145.0] * 20 + [25.0] * 20
+    telemetry = {
+        "step_sec": 0.25,
+        "n_steps": n_steps,
+        "clean_usable_in": 0.0,
+        "clean_usable_out": 10.0,
+        "camera_movement": "pan_right",
+        "stability_curve": stab,
+        "flow_speed_4k_curve": flow,
+        "prosody_curve": [0.4] * n_steps,
+        "salience_curve": [0.72] * 20 + [0.85] * 20,
+    }
+    moments = extract_candidate_video_moments(vid, telemetry)
+    assert moments and moments[0]["in_tc"] >= 4.5
+    assert moments[0]["recommended_speed"] == 1.0
+
+    # When entire clip pans swiftly (125 px/s @ 4K), recommend 0.65 slow-motion damping
+    brisk_tel = {
+        "step_sec": 0.25,
+        "n_steps": n_steps,
+        "clean_usable_in": 0.0,
+        "clean_usable_out": 10.0,
+        "camera_movement": "pan_left",
+        "stability_curve": [0.78] * n_steps,
+        "flow_speed_4k_curve": [125.0] * n_steps,
+        "prosody_curve": [0.3] * n_steps,
+        "salience_curve": [0.72] * n_steps,
+    }
+    brisk_moments = extract_candidate_video_moments(vid, brisk_tel)
+    assert brisk_moments and brisk_moments[0]["recommended_speed"] == 0.65

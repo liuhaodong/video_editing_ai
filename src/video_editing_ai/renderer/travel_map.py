@@ -10,6 +10,7 @@ homography, synchronized elevation sparklines, and ~203-nit HDR clamping.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
@@ -77,8 +78,40 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "neatline": False,
         "compass_color": (160, 198, 228),
         "horizon_mist": (12, 22, 38),
-        "tile_url": "https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png",
-        "tile_blend": 0.62,
+        "tile_url": "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+        "tile_blend": 0.88,
+    },
+    "google_road_navigator": {
+        "display_name": "Google-Style Road & Terrain Navigator",
+        "water_deep": (162, 204, 240),
+        "water_shallow": (182, 218, 246),
+        "bathymetry_rgb": (146, 190, 230),
+        "land_low": (236, 234, 226),
+        "land_mid": (228, 224, 212),
+        "land_high": (212, 206, 192),
+        "coast_rgb": (118, 152, 188),
+        "contour_rgba": (168, 160, 146, 52),
+        "graticule_rgba": (132, 146, 164, 34),
+        "route_glow": (26, 115, 232),
+        "route_core": (66, 133, 244),
+        "route_future": (120, 134, 152),
+        "route_history": (52, 168, 83),
+        "accent": (234, 67, 53),
+        "pin_fill": (255, 255, 255),
+        "pin_text": (32, 33, 36),
+        "hud_fill": (255, 255, 255, 236),
+        "hud_border": (26, 115, 232, 170),
+        "hud_title": (32, 33, 36),
+        "hud_sub": (95, 99, 104),
+        "hud_metric": (26, 115, 232),
+        "title_tier": "sans",
+        "sub_tier": "mono",
+        "light_paper": True,
+        "neatline": False,
+        "compass_color": (60, 64, 67),
+        "horizon_mist": (244, 246, 248),
+        "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        "tile_blend": 0.96,
     },
     "archival_expedition_parchment": {
         "display_name": "Archival Expedition Parchment",
@@ -109,8 +142,8 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "neatline": True,
         "compass_color": (82, 64, 44),
         "horizon_mist": (218, 210, 190),
-        "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}",
-        "tile_blend": 0.44,
+        "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        "tile_blend": 0.90,
     },
     "aerial_relief_hybrid": {
         "display_name": "Aerial Relief Hybrid",
@@ -190,6 +223,8 @@ def resolve_travel_map_style(
         return req
 
     low = (prompt_text or "").lower()
+    if any(k in low for k in ("google", "road", "street", "highway", "navigator", "driving map")):
+        return "google_road_navigator"
     if any(k in low for k in ("parchment", "vintage", "archival", "expedition", "indiana", "sepia", "treasure")):
         return "archival_expedition_parchment"
     if any(k in low for k in ("aerial", "satellite", "terrain", "alpine", "mountain", "relief", "topograph")):
@@ -719,16 +754,21 @@ def _compute_viewport(
     waypoints: list[MapWaypointSpec],
     world_w: int,
     world_h: int,
+    focus_leg_index: int = -1,
 ) -> _MapViewport:
-    lats = [w.lat for w in waypoints]
-    lons = [w.lon for w in waypoints]
+    if 0 <= focus_leg_index < len(waypoints) - 1:
+        focus_wps = [waypoints[focus_leg_index], waypoints[focus_leg_index + 1]]
+    else:
+        focus_wps = waypoints
+    lats = [w.lat for w in focus_wps]
+    lons = [w.lon for w in focus_wps]
     min_lat, max_lat = min(lats), max(lats)
     min_lon, max_lon = min(lons), max(lons)
     mid_lat = 0.5 * (min_lat + max_lat)
     mid_lon = 0.5 * (min_lon + max_lon)
 
     best_zoom = 5
-    for z in range(13, 1, -1):
+    for z in range(15, 1, -1):
         x0, y1 = _latlon_to_world_px(min_lat, min_lon, z)
         x1, y0 = _latlon_to_world_px(max_lat, max_lon, z)
         dx = abs(x1 - x0)
@@ -781,7 +821,8 @@ def _try_fetch_slippy_mosaic(
     tx_max = int(math.floor(viewport.x1_world / 256.0))
     ty_min = max(0, int(math.floor(viewport.y0_world / 256.0)))
     ty_max = min(n_tiles - 1, int(math.floor(viewport.y1_world / 256.0)))
-    if (tx_max - tx_min + 1) * (ty_max - ty_min + 1) > 48:
+    total_tiles = (tx_max - tx_min + 1) * (ty_max - ty_min + 1)
+    if total_tiles > 160:
         return None
 
     tile_root = (cache_dir or Path("cache")) / "map_tiles" / style / str(viewport.zoom)
@@ -793,28 +834,39 @@ def _try_fetch_slippy_mosaic(
     mosaic = Image.new("RGB", (canvas_w, canvas_h), spec["water_deep"])
     fetched_ok = 0
 
-    for tx_raw in range(tx_min, tx_max + 1):
+    def _fetch_one(tx_raw: int, ty: int) -> tuple[int, int, Optional[Path]]:
         tx_wrap = tx_raw % n_tiles
-        for ty in range(ty_min, ty_max + 1):
-            local_png = tile_root / f"{tx_wrap}_{ty}.png"
-            if not local_png.exists():
-                url = url_tpl.format(z=viewport.zoom, x=tx_wrap, y=ty)
-                req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
-                try:
-                    with urllib.request.urlopen(req, timeout=1.6, context=ctx) as resp:
-                        data = resp.read()
-                    if len(data) > 200:
-                        local_png.write_bytes(data)
-                except Exception:
-                    return None if fetched_ok == 0 else None
+        local_png = tile_root / f"{tx_wrap}_{ty}.png"
+        if not local_png.exists():
+            url = url_tpl.format(z=viewport.zoom, x=tx_wrap, y=ty)
+            req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
             try:
-                with Image.open(local_png) as t_im:
-                    mosaic.paste(t_im.convert("RGB"), ((tx_raw - tx_min) * 256, (ty - ty_min) * 256))
-                    fetched_ok += 1
+                with urllib.request.urlopen(req, timeout=2.5, context=ctx) as resp:
+                    data = resp.read()
+                if len(data) > 200:
+                    local_png.write_bytes(data)
             except Exception:
-                return None
+                return tx_raw, ty, None
+        return tx_raw, ty, local_png if local_png.exists() else None
 
-    if fetched_ok == 0:
+    coords = [(tx_raw, ty) for tx_raw in range(tx_min, tx_max + 1) for ty in range(ty_min, ty_max + 1)]
+    results: list[tuple[int, int, Optional[Path]]] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = [pool.submit(_fetch_one, tx_r, ty_v) for tx_r, ty_v in coords]
+        for fut in as_completed(futs):
+            results.append(fut.result())
+
+    for tx_raw, ty, local_png in results:
+        if local_png is None:
+            continue
+        try:
+            with Image.open(local_png) as t_im:
+                mosaic.paste(t_im.convert("RGB"), ((tx_raw - tx_min) * 256, (ty - ty_min) * 256))
+                fetched_ok += 1
+        except Exception:
+            continue
+
+    if fetched_ok < max(1, total_tiles // 2):
         return None
 
     # Crop exact pixel window and resize cleanly into (viewport.width, viewport.height)
@@ -881,6 +933,49 @@ def _draw_compass_rose(
     draw.text((cx - max(4, r // 9), cy - r - max(12, r // 3)), "N", font=sub_font, fill=dark_c)
 
 
+def _fetch_osrm_route_latlon(
+    orig: MapWaypointSpec,
+    dest: MapWaypointSpec,
+    cache_dir: Optional[Path] = None,
+) -> Optional[list[tuple[float, float]]]:
+    """Fetch and disk-cache real road-network driving geometry between (orig, dest) via OSRM."""
+    import json as _json
+
+    key = f"{orig.lat:.4f}_{orig.lon:.4f}_{dest.lat:.4f}_{dest.lon:.4f}"
+    r_dir = (cache_dir or Path("cache")) / "map_routes"
+    r_dir.mkdir(parents=True, exist_ok=True)
+    r_file = r_dir / f"{key}.json"
+    if r_file.exists():
+        try:
+            pts = _json.loads(r_file.read_text(encoding="utf-8"))
+            if isinstance(pts, list) and len(pts) >= 2:
+                return [(float(p[0]), float(p[1])) for p in pts]
+        except Exception:
+            pass
+    url = (
+        f"https://router.project-osrm.org/route/v1/driving/"
+        f"{orig.lon:.5f},{orig.lat:.5f};{dest.lon:.5f},{dest.lat:.5f}"
+        "?overview=full&geometries=geojson"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
+        with urllib.request.urlopen(req, timeout=2.2, context=_build_ssl_ctx()) as resp:
+            payload = _json.loads(resp.read().decode("utf-8"))
+        routes = payload.get("routes") or []
+        coords = routes[0].get("geometry", {}).get("coordinates", []) if routes else []
+        if len(coords) >= 2:
+            # GeoJSON coordinates are [lon, lat]; thin slightly to ~160 points max for smooth AA drawing
+            step = max(1, len(coords) // 160)
+            latlons = [(float(c[1]), float(c[0])) for c in coords[::step]]
+            if latlons[-1] != (float(coords[-1][1]), float(coords[-1][0])):
+                latlons.append((float(coords[-1][1]), float(coords[-1][0])))
+            r_file.write_text(_json.dumps(latlons), encoding="utf-8")
+            return latlons
+    except Exception:
+        return None
+    return None
+
+
 @lru_cache(maxsize=24)
 def _cached_world_baseplate(
     style: str,
@@ -889,6 +984,7 @@ def _cached_world_baseplate(
     wp_sig: tuple[tuple[float, float, float, str], ...],
     allow_tile_fetch: bool,
     cache_dir_str: str,
+    focus_leg_index: int = -1,
 ) -> Image.Image:
     """Build or retrieve cached oversampled RGB cartographic world baseplate with 2.5D relief."""
     waypoints = [
@@ -896,7 +992,7 @@ def _cached_world_baseplate(
         for i, (lat, lon, alt, lbl) in enumerate(wp_sig)
     ]
     spec = CART_THEME_SPECS[style]
-    vp = _compute_viewport(waypoints, world_w, world_h)
+    vp = _compute_viewport(waypoints, world_w, world_h, focus_leg_index=focus_leg_index)
 
     # Synthesize terrain field at fast intermediate resolution and upscale
     sim_w = min(960, max(320, world_w // 2))
@@ -992,34 +1088,36 @@ def _cached_world_baseplate(
     rgb = water_rgb * (1.0 - coast_alpha) + land_rgb * coast_alpha
 
     # Optional online cached slippy-tile blend
+    has_real_tiles = False
     if allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
         tile_arr = _try_fetch_slippy_mosaic(vp, style=style, cache_dir=Path(cache_dir_str) if cache_dir_str else None)
         if tile_arr is not None and tile_arr.shape == rgb.shape:
-            # Preserve real coastline/street detail while tinting smoothly into cinema palette
+            has_real_tiles = True
             blend = float(spec.get("tile_blend", 0.52))
-            tile_luma = (0.299 * tile_arr[:, :, 0] + 0.587 * tile_arr[:, :, 1] + 0.114 * tile_arr[:, :, 2])[..., None] / 255.0
-            if style in ("midnight_vox_atlas", "archival_expedition_parchment", "kinfolk_minimal_monograph"):
-                tinted = water_d + (land_h - water_d) * tile_luma
-                rgb = rgb * (1.0 - blend) + tinted * blend
+            if style in ("google_road_navigator", "aerial_relief_hybrid", "archival_expedition_parchment"):
+                warm = np.array([1.01, 0.995, 0.965], dtype=np.float32) if style == "archival_expedition_parchment" else 1.0
+                rgb = np.clip(tile_arr * warm, 0, 255) * blend + rgb * (1.0 - blend)
+            elif style == "midnight_vox_atlas":
+                rgb = np.clip(tile_arr * 1.15, 0, 255) * blend + rgb * (1.0 - blend)
             else:
-                # aerial_relief_hybrid keeps full warm natural imagery + subtle terrain hillshade
-                rgb = np.clip(tile_arr * (0.85 + 0.25 * (shade[..., None] - 0.5)), 0, 255) * blend + rgb * (1.0 - blend)
+                rgb = np.clip(tile_arr, 0, 255) * blend + rgb * (1.0 - blend)
 
-    # Quantized marching iso-elevation contour hairlines on land
-    land_u8 = (elev >= sea_level).astype(np.uint8)
-    edges = cv2.Canny(land_u8 * 255, 80, 180)
-    edges_d = cv2.dilate(edges, np.ones((2, 2), dtype=np.uint8), iterations=1)
-    coast_mask = (edges_d > 0)[..., None]
-    coast_arr = np.array(spec["coast_rgb"], dtype=np.float32)
-    rgb = np.where(coast_mask, rgb * 0.35 + coast_arr * 0.65, rgb)
+    # Quantized marching iso-elevation contour hairlines on land (only when using offline synthetic terrain)
+    if not has_real_tiles:
+        land_u8 = (elev >= sea_level).astype(np.uint8)
+        edges = cv2.Canny(land_u8 * 255, 80, 180)
+        edges_d = cv2.dilate(edges, np.ones((2, 2), dtype=np.uint8), iterations=1)
+        coast_mask = (edges_d > 0)[..., None]
+        coast_arr = np.array(spec["coast_rgb"], dtype=np.float32)
+        rgb = np.where(coast_mask, rgb * 0.35 + coast_arr * 0.65, rgb)
 
-    contour_col = np.array(spec["contour_rgba"][:3], dtype=np.float32)
-    contour_a = spec["contour_rgba"][3] / 255.0
-    step_levels = np.floor(h_norm * 7.0).astype(np.uint8)
-    iso_gx = np.abs(np.diff(step_levels, axis=1, prepend=step_levels[:, :1])) > 0
-    iso_gy = np.abs(np.diff(step_levels, axis=0, prepend=step_levels[:1, :])) > 0
-    iso_mask = ((iso_gx | iso_gy) & (elev >= sea_level + 0.02))[..., None]
-    rgb = np.where(iso_mask, rgb * (1.0 - contour_a) + contour_col * contour_a, rgb)
+        contour_col = np.array(spec["contour_rgba"][:3], dtype=np.float32)
+        contour_a = spec["contour_rgba"][3] / 255.0
+        step_levels = np.floor(h_norm * 7.0).astype(np.uint8)
+        iso_gx = np.abs(np.diff(step_levels, axis=1, prepend=step_levels[:, :1])) > 0
+        iso_gy = np.abs(np.diff(step_levels, axis=0, prepend=step_levels[:1, :])) > 0
+        iso_mask = ((iso_gx | iso_gy) & (elev >= sea_level + 0.02))[..., None]
+        rgb = np.where(iso_mask, rgb * (1.0 - contour_a) + contour_col * contour_a, rgb)
 
     base_img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
     draw = ImageDraw.Draw(base_img, "RGBA")
@@ -1074,6 +1172,16 @@ def _cached_world_baseplate(
 def _ease_in_out_cubic(u: float) -> float:
     x = max(0.0, min(1.0, float(u)))
     return 4.0 * x * x * x if x < 0.5 else 1.0 - ((-2.0 * x + 2.0) ** 3) * 0.5
+
+
+def _cartography_travel_progress(t_norm: float) -> float:
+    """Departure anchor (0..6%) -> smooth cubic travel (6..82%) -> arrival dwell (82..100%)."""
+    t = max(0.0, min(1.0, float(t_norm)))
+    if t <= 0.06:
+        return 0.0
+    if t >= 0.82:
+        return 1.0
+    return _ease_in_out_cubic((t - 0.06) / (0.82 - 0.06))
 
 
 def _catmull_rom_xy(pts: list[tuple[float, float]], samples_per_seg: int = 120) -> list[tuple[float, float]]:
@@ -1236,15 +1344,82 @@ def _draw_transport_icon(
         d.line([_rot(-r * 0.85, 0.0), _rot(-r * 1.25, r * 0.38)], fill=(*stroke_rgb, 185), width=max(2, int(ss * 0.03)))
         d.line([_rot(-r * 0.85, 0.0), _rot(-r * 1.25, -r * 0.38)], fill=(*stroke_rgb, 185), width=max(2, int(ss * 0.03)))
     else:
-        # Touring chevron / grand-tourer beacon puck
-        d.ellipse([m - r * 0.68, m - r * 0.68, m + r * 0.68, m + r * 0.68], fill=(*fill_rgb, 248), outline=(*stroke_rgb, 255), width=max(3, int(ss * 0.04)))
-        chev = [
-            _rot(r * 0.46, 0.0),
-            _rot(-r * 0.28, r * 0.34),
-            _rot(-r * 0.10, 0.0),
-            _rot(-r * 0.28, -r * 0.34),
+        # Top-down Touring SUV / Car pointing along +X with tires, windshield, roof glass & headlights
+        # Glowing warm headlight beams ahead (+X)
+        beam_l = [_rot(r * 0.90, -r * 0.24), _rot(r * 1.52, -r * 0.42), _rot(r * 1.52, -r * 0.06)]
+        beam_r = [_rot(r * 0.90, r * 0.24), _rot(r * 1.52, r * 0.06), _rot(r * 1.52, r * 0.42)]
+        d.polygon(beam_l, fill=(255, 240, 175, 115))
+        d.polygon(beam_r, fill=(255, 240, 175, 115))
+
+        # 4 dark wheel arches protruding slightly from sides
+        tire_col = (22, 26, 34, 245)
+        for tx, ty in ((r * 0.50, -r * 0.44), (r * 0.50, r * 0.44), (-r * 0.48, -r * 0.44), (-r * 0.48, r * 0.44)):
+            tire = [
+                _rot(tx - r * 0.17, ty - r * 0.07),
+                _rot(tx + r * 0.17, ty - r * 0.07),
+                _rot(tx + r * 0.17, ty + r * 0.07),
+                _rot(tx - r * 0.17, ty + r * 0.07),
+            ]
+            d.polygon(tire, fill=tire_col)
+
+        # Side mirrors
+        for my_sign in (-1.0, 1.0):
+            mir = [
+                _rot(r * 0.26, my_sign * r * 0.39),
+                _rot(r * 0.16, my_sign * r * 0.53),
+                _rot(r * 0.08, my_sign * r * 0.50),
+                _rot(r * 0.16, my_sign * r * 0.39),
+            ]
+            d.polygon(mir, fill=(242, 245, 250, 250), outline=(24, 32, 46, 255))
+
+        # Rounded SUV chassis (pearl-white with dark contrasting outline so visible on both light/dark maps)
+        chassis = [
+            _rot(r * 0.96, -r * 0.26),
+            _rot(r * 1.02, 0.0),
+            _rot(r * 0.96, r * 0.26),
+            _rot(r * 0.58, r * 0.39),
+            _rot(-r * 0.82, r * 0.38),
+            _rot(-r * 0.95, r * 0.26),
+            _rot(-r * 0.95, -r * 0.26),
+            _rot(-r * 0.82, -r * 0.38),
+            _rot(r * 0.58, -r * 0.39),
         ]
-        d.polygon(chev, fill=(*stroke_rgb, 245))
+        d.polygon(chassis, fill=(248, 250, 252, 255), outline=(24, 32, 46, 255), width=max(2, int(ss * 0.025)))
+
+        # Dark tinted front windshield & panoramic glass roof + rear window
+        windshield = [
+            _rot(r * 0.44, -r * 0.30),
+            _rot(r * 0.52, 0.0),
+            _rot(r * 0.44, r * 0.30),
+            _rot(r * 0.16, r * 0.27),
+            _rot(r * 0.16, -r * 0.27),
+        ]
+        d.polygon(windshield, fill=(28, 42, 60, 242))
+        sunroof = [
+            _rot(r * 0.08, -r * 0.25),
+            _rot(r * 0.08, r * 0.25),
+            _rot(-r * 0.54, r * 0.25),
+            _rot(-r * 0.54, -r * 0.25),
+        ]
+        d.polygon(sunroof, fill=(38, 54, 76, 232))
+        rear_glass = [
+            _rot(-r * 0.62, -r * 0.26),
+            _rot(-r * 0.62, r * 0.26),
+            _rot(-r * 0.82, r * 0.24),
+            _rot(-r * 0.82, -r * 0.24),
+        ]
+        d.polygon(rear_glass, fill=(28, 42, 60, 242))
+
+        # Amber/white headlights & red taillights
+        for hy_sign in (-1.0, 1.0):
+            d.polygon(
+                [_rot(r * 0.92, hy_sign * r * 0.16), _rot(r * 1.00, hy_sign * r * 0.24), _rot(r * 0.88, hy_sign * r * 0.31)],
+                fill=(255, 224, 120, 255),
+            )
+            d.polygon(
+                [_rot(-r * 0.90, hy_sign * r * 0.16), _rot(-r * 0.95, hy_sign * r * 0.26), _rot(-r * 0.85, hy_sign * r * 0.30)],
+                fill=(230, 48, 48, 255),
+            )
 
     down = sub.resize((box, box), Image.Resampling.LANCZOS)
     canvas.alpha_composite(down, (int(round(cx - box * 0.5)), int(round(cy - box * 0.5))))
@@ -1260,29 +1435,35 @@ def _paste_hero_photo_callout(
     world_w: int,
     world_h: int,
     avoid_pts: Optional[list[tuple[float, float]]] = None,
-) -> None:
-    """Draw a tilted double-matte gallery thumbnail card beside destination waypoint."""
+    caption_prefix: str = "TO",
+    tilt_deg: float = 2.2,
+    accent_override: Optional[tuple[int, int, int]] = None,
+) -> Optional[tuple[float, float]]:
+    """Draw a tilted gallery photo card with caption & pin leader beside an origin/destination stop."""
     if not thumb_path or bloom_p <= 0.01:
-        return
+        return None
     p = Path(thumb_path)
     if not p.exists():
-        return
+        return None
     try:
         with Image.open(p) as raw:
             im = ImageOps.exif_transpose(raw).convert("RGB")
     except Exception:
-        return
+        return None
 
     s = world_w / 1920.0
-    card_w = int(round(220 * s * (0.78 + 0.22 * bloom_p)))
-    card_h = int(round(card_w * 0.66))
+    accent_rgb = accent_override or spec["accent"]
+    card_w = int(round(224 * s * (0.82 + 0.18 * bloom_p)))
+    img_h = int(round(card_w * 0.60))
+    cap_h = max(14, int(round(24 * s)))
+    card_h = img_h + cap_h + int(round(12 * s))
     pad = max(6, int(round(8 * s)))
     inner_w = max(24, card_w - pad * 2)
-    inner_h = max(20, card_h - pad * 2)
+    inner_h = max(20, img_h - pad)
     im = ImageOps.fit(im, (inner_w, inner_h), method=Image.Resampling.LANCZOS)
 
-    matte_bg = (*spec["pin_fill"], int(round(240 * bloom_p))) if not spec["light_paper"] else (246, 242, 234, int(round(242 * bloom_p)))
-    border_c = (*spec["accent"], int(round(215 * bloom_p)))
+    matte_bg = (*spec["pin_fill"], int(round(244 * bloom_p))) if not spec["light_paper"] else (248, 245, 238, int(round(246 * bloom_p)))
+    border_c = (*accent_rgb, int(round(225 * bloom_p)))
     card = Image.new("RGBA", (card_w + 16, card_h + 16), (0, 0, 0, 0))
     dc = ImageDraw.Draw(card, "RGBA")
     dc.rounded_rectangle([10, 10, card_w + 10, card_h + 10], radius=max(4, int(round(8 * s))), fill=(6, 10, 16, int(round(135 * bloom_p))))
@@ -1293,7 +1474,12 @@ def _paste_hero_photo_callout(
         im_rgba.putalpha(alpha)
     card.alpha_composite(im_rgba, (4 + pad, 4 + pad))
 
-    card = card.rotate(2.4, resample=Image.Resampling.BICUBIC, expand=True)
+    f_cap = _load_font_tier(max(9, int(round(12 * s))), tier="mono", bold=True)
+    cap_txt = f"{caption_prefix} · {label}"[:24].upper()
+    cap_col = (*spec["hud_title"], int(round(245 * bloom_p)))
+    dc.text((4 + pad + 2, 4 + pad + inner_h + max(3, int(round(5 * s)))), cap_txt, font=f_cap, fill=cap_col)
+
+    card = card.rotate(tilt_deg, resample=Image.Resampling.BICUBIC, expand=True)
     dx, dy = dest_px
     margin = int(round(26 * s))
     cand_slots = [
@@ -1324,7 +1510,68 @@ def _paste_hero_photo_callout(
     assert best_xy is not None
     place_x = max(8, min(world_w - card.width - 8, best_xy[0]))
     place_y = max(8, min(world_h - card.height - 8, best_xy[1]))
+
+    # Leader connector hairline linking the Polaroid corner back to the exact map pin
+    wd_conn = ImageDraw.Draw(world_rgba, "RGBA")
+    anc_x = max(float(place_x + 10), min(float(place_x + card.width - 10), dx))
+    anc_y = max(float(place_y + 10), min(float(place_y + card.height - 10), dy))
+    wd_conn.line([(dx, dy), (anc_x, anc_y)], fill=(250, 248, 242, int(round(210 * bloom_p))), width=max(2, int(round(3.5 * s))))
+    wd_conn.line([(dx, dy), (anc_x, anc_y)], fill=(*accent_rgb, int(round(230 * bloom_p))), width=max(1, int(round(1.8 * s))))
+    r_dot = max(2, int(round(3.5 * s)))
+    wd_conn.ellipse([anc_x - r_dot, anc_y - r_dot, anc_x + r_dot, anc_y + r_dot], fill=(*accent_rgb, int(round(240 * bloom_p))))
+
     world_rgba.alpha_composite(card, (place_x, place_y))
+    return (place_x + card.width * 0.5, place_y + card.height * 0.5)
+
+
+def _draw_route_annotations(
+    world_rgba: Image.Image,
+    annotations: Optional[list[dict[str, Any]]],
+    vp: _MapViewport,
+    u: float,
+    spec: dict[str, Any],
+    world_w: int,
+    world_h: int,
+) -> None:
+    """Draw optional corridor / landmark callout badges along the active travel route."""
+    if not annotations:
+        return
+    wd = ImageDraw.Draw(world_rgba, "RGBA")
+    s = world_w / 1920.0
+    f_t = _load_font_tier(max(10, int(round(14 * s))), tier=spec["title_tier"], bold=True)
+    f_s = _load_font_tier(max(8, int(round(11 * s))), tier="mono", bold=True)
+    for ann in annotations:
+        reveal_u = float(ann.get("reveal_u", 0.0))
+        if u < reveal_u:
+            continue
+        fade = min(1.0, (u - reveal_u) / 0.16) if reveal_u > 0 else 1.0
+        if fade <= 0.05 or "lat" not in ann or "lon" not in ann:
+            continue
+        ax, ay = vp.latlon_to_px(float(ann["lat"]), float(ann["lon"]))
+        dx, dy = ann.get("offset", (14 * s, -48 * s))
+        title = str(ann.get("title") or "").strip()
+        sub = str(ann.get("sub") or "").strip()
+        if not title:
+            continue
+        bb_t = wd.textbbox((0, 0), title, font=f_t)
+        wt, ht = bb_t[2] - bb_t[0], bb_t[3] - bb_t[1]
+        ws, hs = (0, 0)
+        if sub:
+            bb_s = wd.textbbox((0, 0), sub, font=f_s)
+            ws, hs = bb_s[2] - bb_s[0], bb_s[3] - bb_s[1]
+        bw = max(wt, ws) + int(round(20 * s))
+        bh = ht + (hs + int(round(10 * s)) if sub else 0) + int(round(14 * s))
+        tx = int(round(max(16, min(world_w - bw - 16, ax + float(dx)))))
+        ty = int(round(max(16, min(world_h - bh - 16, ay + float(dy)))))
+        bx = tx + (bw if float(dx) < 0 else 0)
+        by = ty + bh * 0.5
+        wd.line([(ax, ay), (bx, by)], fill=(*spec["hud_border"][:3], int(round(200 * fade))), width=max(1, int(round(2 * s))))
+        r_a = max(3, int(round(4 * s)))
+        wd.ellipse([ax - r_a, ay - r_a, ax + r_a, ay + r_a], fill=(*spec["pin_fill"], int(round(235 * fade))), outline=(*spec["accent"], int(round(235 * fade))), width=2)
+        wd.rounded_rectangle([tx, ty, tx + bw, ty + bh], radius=max(4, int(round(6 * s))), fill=(*spec["hud_fill"][:3], int(round(228 * fade))), outline=(*spec["hud_border"][:3], int(round(170 * fade))), width=1)
+        wd.text((tx + int(round(10 * s)), ty + int(round(6 * s))), title, font=f_t, fill=(*spec["hud_title"], int(round(248 * fade))))
+        if sub:
+            wd.text((tx + int(round(10 * s)), ty + int(round(6 * s)) + ht + int(round(7 * s))), sub, font=f_s, fill=(*spec["hud_metric"], int(round(235 * fade))))
 
 
 def _apply_camera_homography(
@@ -1406,7 +1653,7 @@ def _render_screen_hud(
     i1 = min(len(waypoints) - 1, i0 + 1)
     orig = waypoints[i0]
     dest = waypoints[i1]
-    u = _ease_in_out_cubic(t_norm)
+    u = _cartography_travel_progress(t_norm)
     leg_km = haversine_km(orig.lat, orig.lon, dest.lat, dest.lon)
     cur_km = leg_km * u
     cur_lat = orig.lat + (dest.lat - orig.lat) * u
@@ -1552,6 +1799,7 @@ def render_travel_map_frame(
     compact_hud: bool = False,
     allow_tile_fetch: bool = False,
     cache_dir: Optional[str | Path] = None,
+    annotations: Optional[list[dict[str, Any]]] = None,
 ) -> Image.Image:
     """
     Render a single keyframe of the Cinema 2.5D Travel Map engine as an RGB PIL Image.
@@ -1592,6 +1840,7 @@ def render_travel_map_frame(
     world_h = max(360, min(1620, int(round(height * 1.45))))
     wp_sig = tuple((round(w.lat, 5), round(w.lon, 5), round(w.alt_m, 1), w.label) for w in norm_wps)
 
+    focus_leg = max(0, min(len(norm_wps) - 2, leg_index)) if len(norm_wps) >= 2 else -1
     base_rgb = _cached_world_baseplate(
         use_style,
         world_w,
@@ -1599,8 +1848,9 @@ def render_travel_map_frame(
         wp_sig,
         bool(allow_tile_fetch),
         str(Path(cache_dir).resolve()) if cache_dir else "",
+        focus_leg,
     )
-    vp = _compute_viewport(norm_wps, world_w, world_h)
+    vp = _compute_viewport(norm_wps, world_w, world_h, focus_leg_index=focus_leg)
 
     i0 = max(0, min(len(norm_wps) - 2, leg_index))
     i1 = i0 + 1
@@ -1610,10 +1860,17 @@ def render_travel_map_frame(
     resolved_mode = infer_transport_mode(leg_km, orig.label, dest.label, hint=transport_mode)
 
     px_stops = [vp.latlon_to_px(w.lat, w.lon) for w in norm_wps]
-    all_leg_splines = [
-        _catmull_rom_xy([px_stops[k], px_stops[k + 1]], samples_per_seg=140)
-        for k in range(len(px_stops) - 1)
-    ]
+    c_dir_p = Path(cache_dir).resolve() if cache_dir else None
+    all_leg_splines: list[list[tuple[float, float]]] = []
+    for k in range(len(px_stops) - 1):
+        road_lls: Optional[list[tuple[float, float]]] = None
+        if allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
+            if resolved_mode in ("drive", "walk", "train"):
+                road_lls = _fetch_osrm_route_latlon(norm_wps[k], norm_wps[k + 1], cache_dir=c_dir_p)
+        if road_lls:
+            all_leg_splines.append([vp.latlon_to_px(lat, lon) for lat, lon in road_lls])
+        else:
+            all_leg_splines.append(_catmull_rom_xy([px_stops[k], px_stops[k + 1]], samples_per_seg=140))
 
     # Composite dynamic route layer onto world canvas
     world_rgba = base_rgb.convert("RGBA")
@@ -1621,15 +1878,15 @@ def render_travel_map_frame(
     s_w = world_w / 1920.0
     stroke_w = max(2, int(round(5.0 * s_w)))
 
-    # 1. History legs (< i0) + subtle dashed planned future path
+    # 1. History legs (< i0) + subtle dashed remaining path on active/next leg
     for k, seg_pts in enumerate(all_leg_splines):
         if k < i0:
-            _draw_aa_polyline(route_arr, seg_pts, (*spec["route_history"], 175), max(2, stroke_w - 1))
-        elif k >= i0:
-            _draw_dashed_aa_polyline(route_arr, seg_pts, (*spec["route_future"], 140), max(1, stroke_w // 2 + 1), dash_px=11.0 * s_w, gap_px=8.0 * s_w)
+            _draw_aa_polyline(route_arr, seg_pts, (*spec["route_history"], 165), max(2, stroke_w - 1))
+        elif k == i0:
+            _draw_dashed_aa_polyline(route_arr, seg_pts, (*spec["route_future"], 145), max(1, stroke_w // 2 + 1), dash_px=11.0 * s_w, gap_px=8.0 * s_w)
 
-    # 2. Active animated leg progress
-    u = _ease_in_out_cubic(t_norm)
+    # 2. Active animated leg progress (departure hold -> cubic travel -> arrival dwell)
+    u = _cartography_travel_progress(t_norm)
     active_pts = all_leg_splines[i0]
     head_idx = max(1, min(len(active_pts) - 1, int(round(u * (len(active_pts) - 1)))))
     prog_ground = active_pts[: head_idx + 1]
@@ -1657,14 +1914,35 @@ def render_travel_map_frame(
 
     world_rgba = Image.alpha_composite(world_rgba, Image.fromarray(route_arr))
 
-    # 3. Waypoint pins + destination arrival pulse rings + hero thumbnail callout
+    # 3. Waypoint pins + destination arrival pulse rings + hero thumbnail callout (active pins prioritized, collision-free labels)
     wd = ImageDraw.Draw(world_rgba, "RGBA")
     f_pin = _load_font_tier(max(10, int(round(13 * s_w))), tier="mono", bold=True)
     f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_w))), tier=spec["title_tier"], bold=True)
+    occupied_rects: list[tuple[float, float, float, float]] = [
+        (0.0, 0.0, world_w * 0.48, world_h * 0.24),
+        (world_w * 0.72, world_h * 0.78, float(world_w), float(world_h)),
+    ]
     for k, (wx, wy) in enumerate(px_stops):
+        if -40 <= wx <= world_w + 40 and -40 <= wy <= world_h + 40:
+            pr = max(8.0, 14.0 * s_w)
+            occupied_rects.append((wx - pr, wy - pr, wx + pr, wy + pr))
+
+    def _overlaps_any(box: tuple[float, float, float, float], pad: float = 4.0) -> bool:
+        bx0, by0, bx1, by1 = box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad
+        for rx0, ry0, rx1, ry1 in occupied_rects:
+            if not (bx1 < rx0 or bx0 > rx1 or by1 < ry0 or by0 > ry1):
+                return True
+        return False
+
+    draw_order = [k for k in range(len(px_stops)) if k not in (i0, i1)] + [i0, i1]
+    tag_order = [i0, i1] + [k for k in range(len(px_stops)) if k not in (i0, i1)]
+
+    for k in draw_order:
+        wx, wy = px_stops[k]
+        if wx < -80 or wx > world_w + 80 or wy < -80 or wy > world_h + 80:
+            continue
         is_orig = k == i0
         is_dest = k == i1
-        is_done = k <= i0
         pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_w)))
         if is_dest and u >= 0.72:
             pulse_p = (u - 0.72) / 0.28
@@ -1682,31 +1960,97 @@ def render_travel_map_frame(
         nw, nh = measure_tracked_text(wd, num_str, f_pin)
         wd.text((wx - nw * 0.5, wy - nh * 0.62), num_str, font=f_pin, fill=(*spec["pin_text"], 250))
 
-        # Crisp waypoint city tag (place active destination pill below pin so incoming vehicle stays clear)
+    for k in tag_order:
+        wx, wy = px_stops[k]
+        if wx < -80 or wx > world_w + 80 or wy < -80 or wy > world_h + 80:
+            continue
+        is_orig = k == i0
+        is_dest = k == i1
+        is_done = k <= i0
+        pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_w)))
+        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 220)
         tag = norm_wps[k].label
-        tw, th = measure_tracked_text(wd, tag, f_wp_lbl)
+        tb0 = wd.textbbox((0, 0), tag, font=f_wp_lbl)
+        tw = tb0[2] - tb0[0]
+        th = tb0[3] - tb0[1]
+        pad_x = int(round(10 * s_w))
+        pad_y = int(round(7 * s_w))
+
+        candidates: list[tuple[float, float]] = [
+            (wx + pin_r + 12 * s_w, wy - th * 0.55 - tb0[1]),
+            (wx - tw * 0.5 - tb0[0], wy + pin_r + 16 * s_w - tb0[1]),
+            (wx - tw * 0.5 - tb0[0], wy - pin_r - th - 16 * s_w - tb0[1]),
+            (wx - pin_r - tw - 22 * s_w - tb0[0], wy - th * 0.55 - tb0[1]),
+            (wx + pin_r + 12 * s_w, wy + pin_r + 12 * s_w - tb0[1]),
+            (wx + pin_r + 12 * s_w, wy - pin_r - th - 12 * s_w - tb0[1]),
+        ]
         if is_dest:
-            tx = int(round(wx - tw * 0.5))
-            ty = int(round(wy + pin_r + int(round(14 * s_w))))
+            candidates = [candidates[1], candidates[0], candidates[3], candidates[2], candidates[4], candidates[5]]
+
+        chosen: Optional[tuple[int, int]] = None
+        for cx_c, cy_c in candidates:
+            tx_c = int(round(max(18, min(world_w - tw - 22, cx_c))))
+            ty_c = int(round(max(20, min(world_h - th - 20, cy_c))))
+            tb_c = wd.textbbox((tx_c, ty_c), tag, font=f_wp_lbl)
+            cand_box = (tb_c[0] - pad_x, tb_c[1] - pad_y, tb_c[2] + pad_x, tb_c[3] + pad_y)
+            hit = False
+            for r_idx, (rx0, ry0, rx1, ry1) in enumerate(occupied_rects):
+                if not (cand_box[2] + 4 < rx0 or cand_box[0] - 4 > rx1 or cand_box[3] + 4 < ry0 or cand_box[1] - 4 > ry1):
+                    if not (rx0 <= wx <= rx1 and ry0 <= wy <= ry1 and r_idx >= 2):
+                        hit = True
+                        break
+            if not hit:
+                chosen = (tx_c, ty_c)
+                occupied_rects.append(cand_box)
+                break
+
+        if chosen is None:
+            if not (is_orig or is_dest):
+                continue
+            tx = int(round(max(18, min(world_w - tw - 22, candidates[0][0]))))
+            ty = int(round(max(int(round(world_h * 0.25)), min(world_h - th - 20, candidates[0][1]))))
+            tb_f = wd.textbbox((tx, ty), tag, font=f_wp_lbl)
+            occupied_rects.append((tb_f[0] - pad_x, tb_f[1] - pad_y, tb_f[2] + pad_x, tb_f[3] + pad_y))
         else:
-            tx = int(round(wx + pin_r + int(round(9 * s_w))))
-            ty = int(round(wy - th * 0.55))
-            if tx + tw + 16 > world_w:
-                tx = int(round(wx - pin_r - tw - int(round(18 * s_w))))
-        tx = max(16, min(world_w - int(tw) - 18, tx))
-        ty = max(14, min(world_h - int(th) - 14, ty))
+            tx, ty = chosen
+
+        tb = wd.textbbox((tx, ty), tag, font=f_wp_lbl)
         wd.rounded_rectangle(
-            [tx - int(round(7 * s_w)), ty - int(round(3 * s_w)), tx + tw + int(round(9 * s_w)), ty + th + int(round(5 * s_w))],
-            radius=max(3, int(round(5 * s_w))),
-            fill=(*spec["hud_fill"][:3], 188 if is_done or is_dest else 138),
-            outline=ring_col if (is_orig or is_dest) else (*spec["hud_border"][:3], 90),
+            [tb[0] - pad_x, tb[1] - pad_y, tb[2] + pad_x, tb[3] + pad_y],
+            radius=max(4, int(round(6 * s_w))),
+            fill=(*spec["hud_fill"][:3], 230 if (is_done or is_dest) else 170),
+            outline=ring_col if (is_orig or is_dest) else (*spec["hud_border"][:3], 125),
             width=1,
         )
-        wd.text((tx, ty), tag, font=f_wp_lbl, fill=(*spec["hud_title"], 246))
+        wd.text((tx, ty), tag, font=f_wp_lbl, fill=(*spec["hud_title"], 250))
 
-    # Hero photo pop-up callout near destination (select clear quadrant away from other waypoints)
-    if u >= 0.68 and dest.hero_thumbnail_path:
-        bloom_p = min(1.0, (u - 0.68) / 0.22)
+    # 2b. Optional corridor / landmark annotations
+    _draw_route_annotations(world_rgba, annotations, vp, u, spec, world_w, world_h)
+
+    # 3. Waypoint pins + destination arrival pulse rings + FROM/TO hero photo callouts
+    orig_card_center: Optional[tuple[float, float]] = None
+    if orig.hero_thumbnail_path:
+        orig_bloom = min(1.0, 0.50 + float(t_norm) * 3.0)
+        orig_card_center = _paste_hero_photo_callout(
+            world_rgba=world_rgba,
+            dest_px=px_stops[i0],
+            thumb_path=orig.hero_thumbnail_path,
+            label=orig.label,
+            bloom_p=orig_bloom,
+            spec=spec,
+            world_w=world_w,
+            world_h=world_h,
+            avoid_pts=[p for idx_p, p in enumerate(px_stops) if idx_p != i0],
+            caption_prefix="FROM",
+            tilt_deg=-1.6,
+            accent_override=spec["route_history"],
+        )
+
+    if u >= 0.45 and dest.hero_thumbnail_path:
+        bloom_p = min(1.0, (u - 0.45) / 0.28)
+        dest_avoid = [p for idx_p, p in enumerate(px_stops) if idx_p != i1]
+        if orig_card_center is not None:
+            dest_avoid.append(orig_card_center)
         _paste_hero_photo_callout(
             world_rgba=world_rgba,
             dest_px=px_stops[i1],
@@ -1716,7 +2060,9 @@ def render_travel_map_frame(
             spec=spec,
             world_w=world_w,
             world_h=world_h,
-            avoid_pts=[p for idx_p, p in enumerate(px_stops) if idx_p != i1],
+            avoid_pts=dest_avoid,
+            caption_prefix="TO",
+            tilt_deg=2.0,
         )
 
     # 4. Tangent-aligned vector transport silhouette
@@ -1732,7 +2078,7 @@ def render_travel_map_frame(
         scale=s_w * (0.92 if compact_hud else 1.05),
     )
 
-    # 5. Virtual 2.5D drone camera pan/zoom/pitch/bank homography
+    # 5. Virtual camera pan/zoom projection (crisp low-tilt when real street/topo tiles are loaded)
     orig_px = px_stops[i0]
     dest_px = px_stops[i1]
     mid_cam_x = 0.5 * (orig_px[0] + dest_px[0])
@@ -1742,8 +2088,9 @@ def render_travel_map_frame(
     cam_cx = 0.42 * mid_cam_x + 0.58 * follow_x
     cam_cy = 0.42 * mid_cam_y + 0.58 * follow_y
     cam_zoom = 0.94 + 0.14 * math.sin(math.pi * u) + 0.08 * u
-    pitch_deg = 16.0 if compact_hud else (21.0 + 5.0 * math.sin(math.pi * u))
-    bank_deg = 0.0 if compact_hud else (-2.4 + 4.8 * u)
+    crisp_real_tiles = bool(allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1")
+    pitch_deg = 0.0 if crisp_real_tiles else (16.0 if compact_hud else (21.0 + 5.0 * math.sin(math.pi * u)))
+    bank_deg = 0.0 if (compact_hud or crisp_real_tiles) else (-2.4 + 4.8 * u)
 
     warped_rgb = _apply_camera_homography(
         world_rgba.convert("RGB"),
@@ -1816,7 +2163,7 @@ def render_travel_map_clip(
     waypoints: list[MapWaypointSpec | dict[str, Any]],
     output_mp4: str | Path,
     style: str = "midnight_vox_atlas",
-    duration: float = 3.2,
+    duration: float = 5.2,
     width: int = 1920,
     height: int = 1080,
     fps: int = 30,
@@ -1826,6 +2173,7 @@ def render_travel_map_clip(
     allow_tile_fetch: bool = False,
     with_audio: bool = False,
     cache_dir: Optional[str | Path] = None,
+    annotations: Optional[list[dict[str, Any]]] = None,
 ) -> Path:
     """
     Encode a multi-frame Cinema 2.5D Travel Map sequence to an H.264 MP4 clip.
@@ -1924,6 +2272,7 @@ def render_travel_map_clip(
                 compact_hud=False,
                 allow_tile_fetch=allow_tile_fetch,
                 cache_dir=cache_dir,
+                annotations=annotations,
             )
             if im.size != (w_even, h_even):
                 im = im.resize((w_even, h_even), Image.Resampling.BILINEAR)
