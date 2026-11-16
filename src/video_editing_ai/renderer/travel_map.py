@@ -164,8 +164,8 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_mid": (118, 108, 82),
         "land_high": (172, 162, 144),
         "coast_rgb": (146, 206, 202),
-        "contour_rgba": (228, 212, 174, 56),
-        "graticule_rgba": (196, 216, 220, 42),
+        "contour_rgba": (228, 212, 174, 42),
+        "graticule_rgba": (196, 216, 220, 14),
         "route_glow": (244, 184, 74),
         "route_core": (250, 216, 120),
         "route_casing": (14, 22, 32),
@@ -187,10 +187,10 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "horizon_mist": (24, 40, 50),
         "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
-        "hillshade_strength": 0.26,
+        "hillshade_strength": 0.30,
         "roads_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
         "labels_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-        "tile_blend": 0.92,
+        "tile_blend": 0.97,
     },
     "satellite_hybrid_4k": {
         "display_name": "Satellite Hybrid 4K",
@@ -201,8 +201,8 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_mid": (98, 90, 70),
         "land_high": (154, 146, 128),
         "coast_rgb": (132, 198, 212),
-        "contour_rgba": (214, 202, 168, 48),
-        "graticule_rgba": (180, 208, 224, 38),
+        "contour_rgba": (214, 202, 168, 36),
+        "graticule_rgba": (180, 208, 224, 14),
         "route_glow": (56, 189, 248),
         "route_core": (255, 214, 102),
         "route_casing": (12, 18, 28),
@@ -224,10 +224,10 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "horizon_mist": (14, 24, 34),
         "tile_url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         "hillshade_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
-        "hillshade_strength": 0.25,
+        "hillshade_strength": 0.32,
         "roads_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
         "labels_overlay_url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-        "tile_blend": 0.96,
+        "tile_blend": 0.98,
     },
     "kinfolk_minimal_monograph": {
         "display_name": "Kinfolk Minimal Monograph",
@@ -905,7 +905,8 @@ def _fetch_tile_mosaic_pil(
     retina_boost: bool = True,
 ) -> Optional[Image.Image]:
     """Fetch parallel disk-cached slippy tiles at Retina (z+1) density with automatic tile-cap fallback."""
-    z_fetch = min(15, viewport.zoom + (1 if retina_boost else 0))
+    use_retina = retina_boost and viewport.zoom < 13
+    z_fetch = min(14, viewport.zoom + (1 if use_retina else 0))
     n_tiles, tx_min, tx_max, ty_min, ty_max, total_tiles, scale_f = _compute_tile_grid_for_zoom(viewport, z_fetch)
     if total_tiles > 324 and z_fetch > viewport.zoom:
         z_fetch = viewport.zoom
@@ -1253,6 +1254,20 @@ def _cached_world_baseplate(
                     relief = np.clip(1.0 + hs_strength * ((hs_luma - 0.62) * 2.2), 0.72, 1.24)[..., None]
                     rgb = np.clip(rgb * relief, 0, 255)
 
+            if style in ("satellite_hybrid_4k", "aerial_relief_hybrid"):
+                # Google Earth clarity grade: micro-contrast CLAHE + clean ocean/land vibrancy
+                rgb_u8 = np.clip(rgb, 0, 255).astype(np.uint8)
+                lab = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2LAB)
+                l_ch, a_ch, b_ch = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(12, 12))
+                l_eq = clahe.apply(l_ch)
+                l_mix = cv2.addWeighted(l_ch, 0.72, l_eq, 0.28, 0)
+                lab_clean = cv2.merge((l_mix, a_ch, b_ch))
+                hsv = cv2.cvtColor(cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB), cv2.COLOR_RGB2HSV).astype(np.float32)
+                hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.15, 0, 255)
+                hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.03, 0, 238)
+                rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32)
+
     # Quantized marching iso-elevation contour hairlines on land (only when using offline synthetic terrain)
     if not has_real_tiles:
         land_u8 = (elev >= sea_level).astype(np.uint8)
@@ -1271,7 +1286,7 @@ def _cached_world_baseplate(
         rgb = np.where(iso_mask, rgb * (1.0 - contour_a) + contour_col * contour_a, rgb)
 
     base_img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
-    if has_real_tiles and spec.get("roads_overlay_url"):
+    if has_real_tiles and spec.get("roads_overlay_url") and (vp.zoom >= 7 or not is_transoceanic):
         roads_im = _try_fetch_rgba_tile_layer(
             vp,
             url_tpl=str(spec["roads_overlay_url"]),
@@ -1287,18 +1302,19 @@ def _cached_world_baseplate(
     s = world_w / 1920.0
     f_mono = _load_font_tier(max(10, int(round(12 * s))), tier="mono", bold=False)
 
-    # Lat/Lon cartographic graticule grid + coordinate edge ticks
+    # Lat/Lon cartographic graticule grid (omitted on crisp satellite_hybrid_4k & continental Earth views)
     grat_col = tuple(spec["graticule_rgba"])
-    for gx_frac in (0.18, 0.34, 0.50, 0.66, 0.82):
-        px = int(round(world_w * gx_frac))
-        draw.line([(px, 0), (px, world_h)], fill=grat_col, width=max(1, int(round(1.0 * s))))
-        _, g_lon = vp.px_to_latlon(px, world_h * 0.5)
-        draw.text((px + int(round(4 * s)), world_h - int(round(20 * s))), _format_coord_dms(g_lon, False), font=f_mono, fill=(*spec["coast_rgb"], 150))
-    for gy_frac in (0.20, 0.38, 0.56, 0.74):
-        py = int(round(world_h * gy_frac))
-        draw.line([(0, py), (world_w, py)], fill=grat_col, width=max(1, int(round(1.0 * s))))
-        g_lat, _ = vp.px_to_latlon(world_w * 0.5, py)
-        draw.text((int(round(14 * s)), py + int(round(3 * s))), _format_coord_dms(g_lat, True), font=f_mono, fill=(*spec["coast_rgb"], 150))
+    if grat_col[3] >= 20:
+        for gx_frac in (0.18, 0.34, 0.50, 0.66, 0.82):
+            px = int(round(world_w * gx_frac))
+            draw.line([(px, 0), (px, world_h)], fill=grat_col, width=max(1, int(round(1.0 * s))))
+            _, g_lon = vp.px_to_latlon(px, world_h * 0.5)
+            draw.text((px + int(round(4 * s)), world_h - int(round(20 * s))), _format_coord_dms(g_lon, False), font=f_mono, fill=(*spec["coast_rgb"], 150))
+        for gy_frac in (0.20, 0.38, 0.56, 0.74):
+            py = int(round(world_h * gy_frac))
+            draw.line([(0, py), (world_w, py)], fill=grat_col, width=max(1, int(round(1.0 * s))))
+            g_lat, _ = vp.px_to_latlon(world_w * 0.5, py)
+            draw.text((int(round(14 * s)), py + int(round(3 * s))), _format_coord_dms(g_lat, True), font=f_mono, fill=(*spec["coast_rgb"], 150))
 
     # Optional engraved alternating cartographic neatline border (Archival / Kinfolk)
     if spec.get("neatline"):
@@ -2158,6 +2174,7 @@ def _paste_hero_photo_callout(
     caption_prefix: str = "TO",
     tilt_deg: float = 2.2,
     accent_override: Optional[tuple[int, int, int]] = None,
+    avoid_rects: Optional[list[tuple[float, float, float, float]]] = None,
 ) -> Optional[tuple[float, float]]:
     """Draw a tilted gallery photo card with caption & pin leader beside an origin/destination stop."""
     if not thumb_path or bloom_p <= 0.01:
@@ -2173,7 +2190,7 @@ def _paste_hero_photo_callout(
 
     s = world_w / 1920.0
     accent_rgb = accent_override or spec["accent"]
-    card_w = int(round(224 * s * (0.82 + 0.18 * bloom_p)))
+    card_w = int(round(212 * s * (0.84 + 0.16 * bloom_p)))
     img_h = int(round(card_w * 0.60))
     cap_h = max(14, int(round(24 * s)))
     card_h = img_h + cap_h + int(round(12 * s))
@@ -2201,35 +2218,39 @@ def _paste_hero_photo_callout(
 
     card = card.rotate(tilt_deg, resample=Image.Resampling.BICUBIC, expand=True)
     dx, dy = dest_px
-    margin = int(round(26 * s))
+    margin = int(round(28 * s))
     cand_slots = [
-        (dx - card.width - margin, dy - card.height - int(round(18 * s))),
-        (dx + margin, dy - card.height - int(round(18 * s))),
-        (dx - card.width - margin, dy + int(round(28 * s))),
-        (dx + margin, dy + int(round(28 * s))),
+        (dx - card.width - margin, dy + int(round(36 * s))),
+        (dx + margin, dy + int(round(36 * s))),
+        (dx + int(round(14 * s)), dy + int(round(68 * s))),
+        (dx - card.width - margin, dy - card.height - int(round(28 * s))),
+        (dx + margin, dy - card.height - int(round(28 * s))),
+        (dx - card.width * 0.35, dy + int(round(72 * s))),
+        (dx - card.width * 0.5, dy - card.height - int(round(68 * s))),
     ]
     others = list(avoid_pts or [])
+    rects = list(avoid_rects or [])
     best_xy: Optional[tuple[int, int]] = None
-    best_score = -1.0
+    best_score = -1e12
+    pad_rect = 12.0 * s
     for cx_raw, cy_raw in cand_slots:
-        px_c = int(round(cx_raw))
-        py_c = int(round(cy_raw))
-        in_bounds = (
-            px_c >= int(round(world_w * 0.05))
-            and py_c >= int(round(world_h * 0.14))
-            and (px_c + card.width) <= int(round(world_w * 0.95))
-            and (py_c + card.height) <= int(round(world_h * 0.88))
-        )
+        px_c = int(round(max(14.0, min(float(world_w - card.width - 14), cx_raw))))
+        py_c = int(round(max(float(world_h * 0.22), min(float(world_h - card.height - 14), cy_raw))))
         cx_mid = px_c + card.width * 0.5
         cy_mid = py_c + card.height * 0.5
         min_d = min((math.hypot(cx_mid - ax, cy_mid - ay) for ax, ay in others), default=9999.0)
-        score = min_d + (2000.0 if in_bounds else 0.0)
+        # Penalize strongly any intersection with HUD boxes, pins, text tags, or sibling card
+        ov_area = 0.0
+        for rx0, ry0, rx1, ry1 in rects:
+            ix = max(0.0, min(px_c + card.width + pad_rect, rx1) - max(px_c - pad_rect, rx0))
+            iy = max(0.0, min(py_c + card.height + pad_rect, ry1) - max(py_c - pad_rect, ry0))
+            ov_area += ix * iy
+        score = min_d - ov_area * 2.5
         if score > best_score:
             best_score = score
             best_xy = (px_c, py_c)
     assert best_xy is not None
-    place_x = max(8, min(world_w - card.width - 8, best_xy[0]))
-    place_y = max(8, min(world_h - card.height - 8, best_xy[1]))
+    place_x, place_y = best_xy
 
     # Leader connector hairline linking the Polaroid corner back to the exact map pin
     wd_conn = ImageDraw.Draw(world_rgba, "RGBA")
@@ -2241,6 +2262,8 @@ def _paste_hero_photo_callout(
     wd_conn.ellipse([anc_x - r_dot, anc_y - r_dot, anc_x + r_dot, anc_y + r_dot], fill=(*accent_rgb, int(round(240 * bloom_p))))
 
     world_rgba.alpha_composite(card, (place_x, place_y))
+    if avoid_rects is not None:
+        avoid_rects.append((float(place_x), float(place_y), float(place_x + card.width), float(place_y + card.height)))
     return (place_x + card.width * 0.5, place_y + card.height * 0.5)
 
 
@@ -2302,55 +2325,153 @@ def _apply_camera_homography(
     zoom: float,
     pitch_deg: float,
     bank_deg: float,
-) -> np.ndarray:
-    """Project oversampled 2D world atlas through a 2.5D virtual drone camera homography."""
+    globe_strength: float = 0.0,
+) -> tuple[np.ndarray, Any, Any]:
+    """
+    Project oversampled 2D world atlas through a 2.5D virtual drone / Google Earth orbital camera.
+
+    Returns `(warped_rgb_u8, project_world_pt_fn, horizon_y_fn)` so sky-layer aircraft, 3D altitude
+    ribbons, and screen-space hero callouts align to Earth's surface while remaining razor sharp.
+    """
     ww, wh = world_rgb.size
     arr = np.asarray(world_rgb, dtype=np.uint8)
 
-    # 3D pinhole projection mapping world plane z=0 around center_xy -> screen pixels
     cx, cy = center_xy
-    focal = float(max(out_w, out_h)) * 1.15 * max(0.65, zoom)
     pitch = math.radians(max(0.0, min(42.0, pitch_deg)))
     bank = math.radians(max(-12.0, min(12.0, bank_deg)))
+    g_str = max(0.0, min(1.0, float(globe_strength)))
 
-    # 4 target screen corners -> corresponding 4 world coordinates
-    # Compute via inverse planar homography from screen plane
-    dist = focal / max(0.35, zoom)
-    # Screen coordinates centered at (out_w/2, out_h/2)
     dst_pts = np.array(
         [[0.0, 0.0], [float(out_w), 0.0], [float(out_w), float(out_h)], [0.0, float(out_h)]],
         dtype=np.float32,
     )
     src_pts: list[list[float]] = []
     half_sw = out_w * 0.5
-    half_sh = out_h * 0.5
+    half_sh = out_h * (0.58 if g_str > 0.1 else 0.50)
     cb, sb = math.cos(bank), math.sin(bank)
-    cp, sp = math.cos(pitch), math.sin(pitch)
+    cp = math.cos(pitch)
 
-    # Scale factor converting screen pixel offsets back to oversampled world pixels
-    base_scale = (ww / max(1.0, float(out_w))) * (0.72 / max(0.55, zoom))
+    base_frac = 0.56 if g_str > 0.1 else 0.72
+    base_scale = (ww / max(1.0, float(out_w))) * (base_frac / max(0.55, zoom))
+    # Clamp camera center before sampling 4 frustum corners so no individual corner pinches at world boundary
+    max_rx = abs(half_sw * cb) + abs(half_sh * sb)
+    max_ry = abs(half_sw * sb) + abs(half_sh * cb)
+    far_persp = 1.0 / max(0.42, 1.0 - 0.5 * math.tan(pitch) * 0.72)
+    req_hx = max_rx * far_persp * base_scale
+    req_hy = max_ry * far_persp * (base_scale / max(0.52, cp))
+    if ww > 2.0 * req_hx + 4.0:
+        cx = max(req_hx + 2.0, min(float(ww - 3) - req_hx, cx))
+    if wh > 2.0 * req_hy + 4.0:
+        cy = max(req_hy + 2.0, min(float(wh - 3) - req_hy, cy))
+
     for sx_c, sy_c in dst_pts:
-        nx = (sx_c - half_sw)
-        ny = (sy_c - half_sh)
-        # Apply subtle perspective trapezoid: top edges look farther (wider world span), bottom closer
-        # Normalized vertical [-0.5..0.5]
+        nx = sx_c - half_sw
+        ny = sy_c - half_sh
         v_norm = ny / max(1.0, float(out_h))
-        persp = 1.0 / max(0.45, 1.0 + v_norm * math.tan(pitch) * 0.72)
+        persp = 1.0 / max(0.42, 1.0 + v_norm * math.tan(pitch) * 0.72)
         rx = (nx * cb - ny * sb) * persp * base_scale
-        ry = (nx * sb + ny * cb) * persp * (base_scale / max(0.55, cp))
+        ry = (nx * sb + ny * cb) * persp * (base_scale / max(0.52, cp))
         wx = max(0.0, min(float(ww - 1), cx + rx))
         wy = max(0.0, min(float(wh - 1), cy + ry))
         src_pts.append([wx, wy])
 
-    h_mat = cv2.getPerspectiveTransform(np.array(src_pts, dtype=np.float32), dst_pts)
-    warped = cv2.warpPerspective(
+    src_arr = np.array(src_pts, dtype=np.float32)
+    h_inv = cv2.getPerspectiveTransform(dst_pts, src_arr)  # screen -> world
+    h_fwd = cv2.getPerspectiveTransform(src_arr, dst_pts)  # world -> screen
+
+    if g_str <= 0.02:
+        warped = cv2.warpPerspective(
+            arr,
+            h_fwd,
+            (out_w, out_h),
+            flags=cv2.INTER_LANCZOS4,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+
+        def _proj_flat(wx: float, wy: float) -> tuple[float, float]:
+            pt = np.array([[[float(wx), float(wy)]]], dtype=np.float32)
+            res = cv2.perspectiveTransform(pt, h_fwd)
+            return (float(res[0, 0, 0]), float(res[0, 0, 1]))
+
+        return warped, _proj_flat, (lambda _sx: -100.0)
+
+    # Google Earth curved planetary limb & aerial perspective sphere projection
+    y_h0 = out_h * (0.105 * g_str)
+    curve_drop = out_h * (0.095 * g_str)
+    bank_slope = math.tan(bank) * (out_w * 0.08)
+
+    def _horizon_y(sx_val: float) -> float:
+        nx_v = (2.0 * sx_val / max(1.0, float(out_w - 1))) - 1.0
+        return y_h0 + curve_drop * (nx_v * nx_v) + bank_slope * nx_v
+
+    gx_grid = np.arange(out_w, dtype=np.float32)[None, :].repeat(out_h, axis=0)
+    gy_grid = np.arange(out_h, dtype=np.float32)[:, None].repeat(out_w, axis=1)
+    nx_norm = (2.0 * gx_grid / max(1.0, float(out_w - 1))) - 1.0
+    y_limb = y_h0 + curve_drop * (nx_norm * nx_norm) + bank_slope * nx_norm
+
+    # Remap curved screen pixels back onto planar screen domain smoothly
+    span_h = np.maximum(1.0, float(out_h) - y_limb)
+    t_y = np.clip((gy_grid - y_limb) / span_h, 0.0, 1.0)
+    # Subtle spherical compression near the limb so continents bow around Earth horizon cleanly
+    sy_planar = t_y * float(out_h)
+    sx_planar = out_w * 0.5 + (gx_grid - out_w * 0.5) * (1.0 + 0.08 * g_str * np.power(1.0 - t_y, 1.4))
+
+    denom = h_inv[2, 0] * sx_planar + h_inv[2, 1] * sy_planar + h_inv[2, 2]
+    denom = np.where(np.abs(denom) < 1e-6, 1e-6, denom)
+    map_x = ((h_inv[0, 0] * sx_planar + h_inv[0, 1] * sy_planar + h_inv[0, 2]) / denom).astype(np.float32)
+    map_y = ((h_inv[1, 0] * sx_planar + h_inv[1, 1] * sy_planar + h_inv[1, 2]) / denom).astype(np.float32)
+
+    earth_warped = cv2.remap(
         arr,
-        h_mat,
-        (out_w, out_h),
-        flags=cv2.INTER_LANCZOS4,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LANCZOS4,
         borderMode=cv2.BORDER_REPLICATE,
-    )
-    return warped
+    ).astype(np.float32)
+
+    # Space dome + crisp stars above y_limb + luminous Google Earth Rayleigh blue atmosphere halo
+    d_limb = gy_grid - y_limb  # >= 0 on Earth, < 0 in space
+    scale_h = max(0.5, out_h / 1080.0)
+
+    # Soft Rayleigh scatter veil fading over distant Earth horizon
+    haze_w = np.where(d_limb >= 0.0, np.exp(-d_limb / (58.0 * scale_h)) * 0.52, 0.0).astype(np.float32)[..., None]
+    atmo_rgb = np.array([92.0, 178.0, 250.0], dtype=np.float32)
+    earth_lit = earth_warped * (1.0 - haze_w) + atmo_rgb * haze_w
+
+    # Deep cosmos backdrop with deterministic faint starlight above limb
+    space_bg = np.full((out_h, out_w, 3), np.array([3.0, 6.0, 14.0], dtype=np.float32), dtype=np.float32)
+    rng = np.random.default_rng(1972)
+    n_stars = max(80, int(140 * scale_h))
+    star_xs = rng.integers(4, max(5, out_w - 4), size=n_stars)
+    star_ys = rng.integers(2, max(4, int(out_h * 0.24)), size=n_stars)
+    star_b = rng.uniform(95.0, 205.0, size=n_stars)
+    for st_x, st_y, br in zip(star_xs, star_ys, star_b):
+        if st_y < y_limb[st_y, st_x] - 6.0:
+            space_bg[st_y, st_x] = [br * 0.88, br * 0.94, br]
+
+    # Atmospheric rim bloom fading outward into space & softening horizon seam
+    rim_out = np.where(d_limb < 0.0, np.exp(d_limb / (14.0 * scale_h)) * 0.82, 0.0).astype(np.float32)[..., None]
+    space_lit = space_bg * (1.0 - rim_out) + np.array([82.0, 172.0, 252.0], dtype=np.float32) * rim_out
+
+    # Smooth anti-aliased transition across +/- 2.5px of horizon limb + specular blue limb crest
+    earth_mask = np.clip((d_limb + 2.5) / 5.0, 0.0, 1.0).astype(np.float32)[..., None]
+    crest = np.exp(-(d_limb / (5.5 * scale_h)) ** 2) * 0.45
+    comp = space_lit * (1.0 - earth_mask) + earth_lit * earth_mask
+    comp = np.clip(comp + crest[..., None] * np.array([128.0, 208.0, 255.0], dtype=np.float32), 0, 255).astype(np.uint8)
+
+    def _proj_globe(wx: float, wy: float) -> tuple[float, float]:
+        pt = np.array([[[float(wx), float(wy)]]], dtype=np.float32)
+        res = cv2.perspectiveTransform(pt, h_fwd)
+        sx_p, sy_p = float(res[0, 0, 0]), float(res[0, 0, 1])
+        t_v = sy_p / max(1.0, float(out_h))
+        nx_approx = (2.0 * sx_p / max(1.0, float(out_w - 1))) - 1.0
+        yl_approx = y_h0 + curve_drop * (nx_approx * nx_approx) + bank_slope * nx_approx
+        sy_g = yl_approx + t_v * max(1.0, float(out_h) - yl_approx)
+        span_f = 1.0 + 0.08 * g_str * (max(0.0, 1.0 - t_v) ** 1.4)
+        sx_g = out_w * 0.5 + (sx_p - out_w * 0.5) / max(0.5, span_f)
+        return (sx_g, sy_g)
+
+    return comp, _proj_globe, _horizon_y
 
 
 def _draw_hud_mode_glyph(
@@ -2616,8 +2737,8 @@ def render_travel_map_frame(
     use_style = style if style in CART_THEME_SPECS else "midnight_vox_atlas"
     spec = CART_THEME_SPECS[use_style]
 
-    # Oversample world canvas up to 4608x2592 (true 4K supersampling; 1.45x at 1080p)
-    oversample = 1.25 if width > 2000 else 1.45
+    # Oversample world canvas up to 4608x2592 (1.60x at 1080p for zero camera-tilt edge pinching)
+    oversample = 1.30 if width > 2000 else 1.60
     world_w = max(640, min(4608, int(round(width * oversample))))
     world_h = max(360, min(2592, int(round(height * oversample))))
     wp_sig = tuple((round(w.lat, 5), round(w.lon, 5), round(w.alt_m, 1), w.label) for w in norm_wps)
@@ -2670,14 +2791,24 @@ def render_travel_map_frame(
     s_w = world_w / 1920.0
     stroke_w = max(2, int(round(5.0 * s_w)))
 
-    # 1. History legs (< i0) + subtle dashed remaining path on active leg
+    # 1. History legs (< i0) + subtle dashed ground-track chord on active leg (projected onto Earth's surface)
     for k, seg_pts in enumerate(all_leg_splines):
         if k < i0:
-            _draw_aa_polyline(route_arr, seg_pts, (*spec["route_history"], 165), max(2, stroke_w - 1))
+            hist_km = haversine_km(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon)
+            if leg_km < 120.0 and hist_km > max(150.0, leg_km * 30.0):
+                continue
+            _draw_aa_polyline(route_arr, seg_pts, (*spec["route_history"], 170), max(2, stroke_w - 1))
         elif k == i0:
-            _draw_dashed_aa_polyline(route_arr, seg_pts, (*spec["route_future"], 145), max(1, stroke_w // 2 + 1), dash_px=11.0 * s_w, gap_px=8.0 * s_w)
+            _draw_dashed_aa_polyline(
+                route_arr,
+                seg_pts,
+                (*spec["route_future"], 145 if resolved_mode != "flight" else 118),
+                max(1, stroke_w // 2 + 1),
+                dash_px=11.0 * s_w,
+                gap_px=8.0 * s_w,
+            )
 
-    # 2. Exact arc-length parameterized route animation + 4-pass cased shader
+    # 2. Ground route progress on Earth surface (flight arc & plane itself fly in crisp 3D screen space ABOVE Earth)
     u = _cartography_travel_progress(t_norm)
     active_pts = all_leg_splines[i0]
     ground_arc_path = _ArcLengthPath(active_pts)
@@ -2686,24 +2817,10 @@ def render_travel_map_frame(
     bank_factor = 0.0
     ground_head_pt = ground_arc_path.point_at_s(u * ground_arc_path.total_len)
     if resolved_mode == "flight":
-        span_px = math.hypot(active_pts[-1][0] - active_pts[0][0], active_pts[-1][1] - active_pts[0][1])
-        lift_max = min(world_h * 0.22, max(28.0 * s_w, span_px * 0.24))
-        arc_pts: list[tuple[float, float]] = []
-        prefix_arc_len = ground_arc_path.total_len * max(1e-6, u)
-        prefix_cum = 0.0
-        for idx_p, (gx, gy) in enumerate(prog_ground):
-            if idx_p > 0:
-                prefix_cum += math.hypot(gx - prog_ground[idx_p - 1][0], gy - prog_ground[idx_p - 1][1])
-            global_frac = min(1.0, (prefix_cum / max(1e-6, ground_arc_path.total_len)))
-            arc_pts.append((gx, gy - lift_max * math.sin(math.pi * global_frac)))
-        _draw_cased_route(route_arr, arc_pts, spec, stroke_w, s_w, is_flight=True, ground_pts=prog_ground)
-        elev_arc_path = _ArcLengthPath(arc_pts)
-        head_pt = elev_arc_path.point_at_s(elev_arc_path.total_len)
-        heading, bank_factor = elev_arc_path.tangent_and_curvature(1.0, window_px=24.0 * s_w)
-        smooth_cam_pt = elev_arc_path.smoothed_camera_point(0.95, window_px=160.0 * s_w)
-        # Keep camera smoothly following ground chord + arc
-        cam_g = ground_arc_path.smoothed_camera_point(u, window_px=160.0 * s_w)
-        smooth_cam_pt = (cam_g[0], cam_g[1] - 0.55 * lift_max * math.sin(math.pi * u))
+        # Draw subtle ground-projected flight track shadow ribbon along Earth's terrain
+        _draw_aa_polyline(route_arr, prog_ground, (12, 18, 28, 128), max(2, stroke_w))
+        _draw_aa_polyline(route_arr, prog_ground, (*spec["route_glow"], 115), max(1, stroke_w // 2))
+        smooth_cam_pt = ground_arc_path.smoothed_camera_point(u, window_px=160.0 * s_w)
     else:
         arc_pts = prog_ground
         _draw_cased_route(route_arr, prog_ground, spec, stroke_w, s_w, is_flight=False)
@@ -2713,38 +2830,24 @@ def render_travel_map_frame(
 
     world_rgba = Image.alpha_composite(world_rgba, Image.fromarray(route_arr))
 
-    # 2a. Composite crisp floating place labels above route casing when theme uses separate RGBA labels layer
+    # 2a. Composite crisp floating place labels with dark contrast halo above satellite imagery
     labels_ov = _cached_labels_overlay(use_style, world_w, world_h, wp_sig, bool(allow_tile_fetch), cache_dir_s, focus_leg)
     if labels_ov is not None:
-        l_alpha = labels_ov.getchannel("A").point(lambda v: int(round(v * 0.90)))
-        lbl_copy = labels_ov.copy()
-        lbl_copy.putalpha(l_alpha)
-        world_rgba.alpha_composite(lbl_copy)
+        l_rgb = np.asarray(labels_ov.convert("RGB"), dtype=np.float32)
+        l_a = np.asarray(labels_ov.getchannel("A"), dtype=np.float32) / 255.0
+        if float(l_a.max()) > 0.01:
+            shadow_a = cv2.dilate((l_a * 255.0).astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1).astype(np.float32) / 255.0
+            shadow_a = np.clip(shadow_a * 0.72, 0.0, 0.72)
+            base_w_arr = np.asarray(world_rgba.convert("RGB"), dtype=np.float32)
+            # Carve clean subtle dark contrast halo around satellite text, then composite crisp bright label
+            base_w_arr = base_w_arr * (1.0 - shadow_a[..., None])
+            lbl_mix = np.clip(l_a * 0.96, 0.0, 1.0)[..., None]
+            out_lbl_rgb = np.clip(base_w_arr * (1.0 - lbl_mix) + l_rgb * lbl_mix, 0, 255).astype(np.uint8)
+            world_rgba = Image.fromarray(out_lbl_rgb).convert("RGBA")
 
-    # 3. Waypoint pins + destination arrival pulse rings + hero thumbnail callout (active pins prioritized, collision-free labels)
+    # 2b. Surface pins, destination arrival pulse & ground shadow riding Earth's terrain BEFORE orbital warp
     wd = ImageDraw.Draw(world_rgba, "RGBA")
-    f_pin = _load_font_tier(max(10, int(round(13 * s_w))), tier="mono", bold=True)
-    f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_w))), tier=spec["title_tier"], bold=True)
-    occupied_rects: list[tuple[float, float, float, float]] = [
-        (0.0, 0.0, world_w * 0.48, world_h * 0.24),
-        (world_w * 0.72, world_h * 0.78, float(world_w), float(world_h)),
-    ]
-    for k, (wx, wy) in enumerate(px_stops):
-        if -40 <= wx <= world_w + 40 and -40 <= wy <= world_h + 40:
-            pr = max(8.0, 14.0 * s_w)
-            occupied_rects.append((wx - pr, wy - pr, wx + pr, wy + pr))
-
-    def _overlaps_any(box: tuple[float, float, float, float], pad: float = 4.0) -> bool:
-        bx0, by0, bx1, by1 = box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad
-        for rx0, ry0, rx1, ry1 in occupied_rects:
-            if not (bx1 < rx0 or bx0 > rx1 or by1 < ry0 or by0 > ry1):
-                return True
-        return False
-
-    draw_order = [k for k in range(len(px_stops)) if k not in (i0, i1)] + [i0, i1]
-    tag_order = [i0, i1] + [k for k in range(len(px_stops)) if k not in (i0, i1)]
-
-    for k in draw_order:
+    for k in [idx for idx in range(len(px_stops)) if idx not in (i0, i1)] + [i0, i1]:
         wx, wy = px_stops[k]
         if wx < -80 or wx > world_w + 80 or wy < -80 or wy > world_h + 80:
             continue
@@ -2753,206 +2856,74 @@ def render_travel_map_frame(
         pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_w)))
         if is_dest and u >= 0.72:
             pulse_p = (u - 0.72) / 0.28
-            r_pulse = pin_r + int(round(26 * s_w * pulse_p))
-            p_alpha = int(round(190 * (1.0 - pulse_p)))
+            r_pulse = pin_r + int(round(28 * s_w * pulse_p))
+            p_alpha = int(round(205 * (1.0 - pulse_p)))
             wd.ellipse([wx - r_pulse, wy - r_pulse, wx + r_pulse, wy + r_pulse], outline=(*spec["accent"], p_alpha), width=max(1, int(round(2.5 * s_w))))
-            r_pulse2 = pin_r + int(round(14 * s_w * pulse_p))
+            r_pulse2 = pin_r + int(round(15 * s_w * pulse_p))
             wd.ellipse([wx - r_pulse2, wy - r_pulse2, wx + r_pulse2, wy + r_pulse2], outline=(*spec["route_core"], int(round(p_alpha * 0.8))), width=max(1, int(round(2.0 * s_w))))
-
-        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 220)
-        fill_col = (*spec["pin_fill"], 248)
+        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 210)
         wd.ellipse([wx - pin_r - 3, wy - pin_r - 3, wx + pin_r + 3, wy + pin_r + 3], fill=ring_col)
-        wd.ellipse([wx - pin_r, wy - pin_r, wx + pin_r, wy + pin_r], fill=fill_col)
-        num_str = f"{k + 1:02d}"
-        nw, nh = measure_tracked_text(wd, num_str, f_pin)
-        wd.text((wx - nw * 0.5, wy - nh * 0.62), num_str, font=f_pin, fill=(*spec["pin_text"], 250))
+        wd.ellipse([wx - pin_r, wy - pin_r, wx + pin_r, wy + pin_r], fill=(*spec["pin_fill"], 248))
 
-    for k in tag_order:
-        wx, wy = px_stops[k]
-        if wx < -80 or wx > world_w + 80 or wy < -80 or wy > world_h + 80:
-            continue
-        is_orig = k == i0
-        is_dest = k == i1
-        is_done = k <= i0
-        pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_w)))
-        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 220)
-        tag = norm_wps[k].label
-        tb0 = wd.textbbox((0, 0), tag, font=f_wp_lbl)
-        tw = tb0[2] - tb0[0]
-        th = tb0[3] - tb0[1]
-        pad_x = int(round(10 * s_w))
-        pad_y = int(round(7 * s_w))
-
-        candidates: list[tuple[float, float]] = [
-            (wx + pin_r + 12 * s_w, wy - th * 0.55 - tb0[1]),
-            (wx - tw * 0.5 - tb0[0], wy + pin_r + 16 * s_w - tb0[1]),
-            (wx - tw * 0.5 - tb0[0], wy - pin_r - th - 16 * s_w - tb0[1]),
-            (wx - pin_r - tw - 22 * s_w - tb0[0], wy - th * 0.55 - tb0[1]),
-            (wx + pin_r + 12 * s_w, wy + pin_r + 12 * s_w - tb0[1]),
-            (wx + pin_r + 12 * s_w, wy - pin_r - th - 12 * s_w - tb0[1]),
-        ]
-        if is_dest:
-            candidates = [candidates[1], candidates[0], candidates[3], candidates[2], candidates[4], candidates[5]]
-
-        chosen: Optional[tuple[int, int]] = None
-        for cx_c, cy_c in candidates:
-            tx_c = int(round(max(18, min(world_w - tw - 22, cx_c))))
-            ty_c = int(round(max(20, min(world_h - th - 20, cy_c))))
-            tb_c = wd.textbbox((tx_c, ty_c), tag, font=f_wp_lbl)
-            cand_box = (tb_c[0] - pad_x, tb_c[1] - pad_y, tb_c[2] + pad_x, tb_c[3] + pad_y)
-            hit = False
-            for r_idx, (rx0, ry0, rx1, ry1) in enumerate(occupied_rects):
-                if not (cand_box[2] + 4 < rx0 or cand_box[0] - 4 > rx1 or cand_box[3] + 4 < ry0 or cand_box[1] - 4 > ry1):
-                    if not (rx0 <= wx <= rx1 and ry0 <= wy <= ry1 and r_idx >= 2):
-                        hit = True
-                        break
-            if not hit:
-                chosen = (tx_c, ty_c)
-                occupied_rects.append(cand_box)
-                break
-
-        if chosen is None:
-            if not (is_orig or is_dest):
-                continue
-            tx = int(round(max(18, min(world_w - tw - 22, candidates[0][0]))))
-            ty = int(round(max(int(round(world_h * 0.25)), min(world_h - th - 20, candidates[0][1]))))
-            tb_f = wd.textbbox((tx, ty), tag, font=f_wp_lbl)
-            occupied_rects.append((tb_f[0] - pad_x, tb_f[1] - pad_y, tb_f[2] + pad_x, tb_f[3] + pad_y))
-        else:
-            tx, ty = chosen
-
-        tb = wd.textbbox((tx, ty), tag, font=f_wp_lbl)
-        wd.rounded_rectangle(
-            [tb[0] - pad_x, tb[1] - pad_y, tb[2] + pad_x, tb[3] + pad_y],
-            radius=max(4, int(round(6 * s_w))),
-            fill=(*spec["hud_fill"][:3], 230 if (is_done or is_dest) else 170),
-            outline=ring_col if (is_orig or is_dest) else (*spec["hud_border"][:3], 125),
-            width=1,
-        )
-        wd.text((tx, ty), tag, font=f_wp_lbl, fill=(*spec["hud_title"], 250))
-
-    # 2b. Optional corridor / landmark annotations
-    _draw_route_annotations(world_rgba, annotations, vp, u, spec, world_w, world_h)
-
-    # 3. Waypoint pins + destination arrival pulse rings + FROM/TO hero photo callouts
-    orig_card_center: Optional[tuple[float, float]] = None
-    if orig.hero_thumbnail_path:
-        orig_bloom = min(1.0, 0.50 + float(t_norm) * 3.0)
-        orig_card_center = _paste_hero_photo_callout(
-            world_rgba=world_rgba,
-            dest_px=px_stops[i0],
-            thumb_path=orig.hero_thumbnail_path,
-            label=orig.label,
-            bloom_p=orig_bloom,
-            spec=spec,
-            world_w=world_w,
-            world_h=world_h,
-            avoid_pts=[p for idx_p, p in enumerate(px_stops) if idx_p != i0],
-            caption_prefix="FROM",
-            tilt_deg=-1.6,
-            accent_override=spec["route_history"],
-        )
-
-    if u >= 0.45 and dest.hero_thumbnail_path:
-        bloom_p = min(1.0, (u - 0.45) / 0.28)
-        dest_avoid = [p for idx_p, p in enumerate(px_stops) if idx_p != i1]
-        if orig_card_center is not None:
-            dest_avoid.append(orig_card_center)
-        _paste_hero_photo_callout(
-            world_rgba=world_rgba,
-            dest_px=px_stops[i1],
-            thumb_path=dest.hero_thumbnail_path,
-            label=dest.label,
-            bloom_p=bloom_p,
-            spec=spec,
-            world_w=world_w,
-            world_h=world_h,
-            avoid_pts=dest_avoid,
-            caption_prefix="TO",
-            tilt_deg=2.0,
-        )
-
-    # 4. Physics-coupled secondary effects + 4x-supersampled vehicle + route-tethered camera
-    veh_scale = s_w * (0.90 if compact_hud else 1.05)
+    # Draw aircraft ground shadow right on Earth terrain/ocean below the jet
+    veh_scale_w = s_w * (0.90 if compact_hud else 1.05)
     stroke_col = spec["pin_fill"] if not spec["light_paper"] else (248, 244, 238)
     if resolved_mode == "flight":
         alt_sin = math.sin(math.pi * u)
         g_heading, _ = ground_arc_path.tangent_and_curvature(u, window_px=24.0 * s_w)
         _draw_aircraft_ground_shadow(
             world_rgba,
-            gx=ground_head_pt[0],
-            gy=ground_head_pt[1],
+            gx=ground_head_pt[0] + 10.0 * s_w * alt_sin,
+            gy=ground_head_pt[1] + 12.0 * s_w * alt_sin,
             angle_rad=g_heading,
-            scale=veh_scale * (0.88 - 0.22 * alt_sin),
-            alpha=int(round(115 - 55 * alt_sin)),
-        )
-        _draw_flight_contrails(world_rgba, arc_pts, scale=veh_scale, alt_sin=alt_sin)
-        _draw_transport_icon(
-            world_rgba,
-            cx=head_pt[0],
-            cy=head_pt[1],
-            angle_rad=heading,
-            mode="flight",
-            fill_rgb=spec["route_core"],
-            stroke_rgb=stroke_col,
-            scale=veh_scale * (0.78 + 0.34 * alt_sin),
-            bank_factor=bank_factor,
+            scale=veh_scale_w * (0.92 - 0.28 * alt_sin),
+            alpha=int(round(125 - 65 * alt_sin)),
         )
     elif resolved_mode == "train":
-        _draw_articulated_train(
-            world_rgba,
-            arc_path=ground_arc_path,
-            u=u,
-            fill_rgb=spec["route_core"],
-            stroke_rgb=stroke_col,
-            scale=veh_scale,
-        )
+        _draw_articulated_train(world_rgba, arc_path=ground_arc_path, u=u, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w)
     elif resolved_mode == "boat":
-        _draw_boat_kelvin_wake(world_rgba, arc_path=ground_arc_path, u=u, scale=veh_scale)
-        _draw_transport_icon(
-            world_rgba,
-            cx=head_pt[0],
-            cy=head_pt[1],
-            angle_rad=heading,
-            mode="boat",
-            fill_rgb=spec["route_core"],
-            stroke_rgb=stroke_col,
-            scale=veh_scale,
-            bank_factor=bank_factor,
-        )
+        _draw_boat_kelvin_wake(world_rgba, arc_path=ground_arc_path, u=u, scale=veh_scale_w)
+        _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode="boat", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=bank_factor)
     else:
-        _draw_transport_icon(
-            world_rgba,
-            cx=head_pt[0],
-            cy=head_pt[1],
-            angle_rad=heading,
-            mode=resolved_mode,
-            fill_rgb=spec["route_core"],
-            stroke_rgb=stroke_col,
-            scale=veh_scale,
-            bank_factor=bank_factor,
-        )
+        _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode=resolved_mode, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=bank_factor)
 
-    # 5. Route-tethered Lanczos virtual camera projection (crisp gentle tilt with real tiles)
+    # Corridor annotations rendered onto Earth's terrain before camera warp
+    _draw_route_annotations(world_rgba, annotations, vp, u, spec, world_w, world_h)
+
+    # 3. Google Earth 3D Globe / Drone Chase-Camera Projection
     orig_px = px_stops[i0]
     dest_px = px_stops[i1]
     mid_cam_x = 0.5 * (orig_px[0] + dest_px[0])
     mid_cam_y = 0.5 * (orig_px[1] + dest_px[1])
-    cam_cx = 0.36 * mid_cam_x + 0.64 * smooth_cam_pt[0]
-    cam_cy = 0.36 * mid_cam_y + 0.64 * smooth_cam_pt[1]
-    cam_zoom = 1.02 - 0.06 * math.sin(math.pi * u) + 0.08 * (u ** 2)
+    cam_cx = 0.34 * mid_cam_x + 0.66 * smooth_cam_pt[0]
+    cam_cy = 0.34 * mid_cam_y + 0.66 * smooth_cam_pt[1]
+    use_globe = (
+        not compact_hud
+        and resolved_mode == "flight"
+        and leg_km >= 180.0
+        and use_style in ("satellite_hybrid_4k", "aerial_relief_hybrid", "midnight_vox_atlas", "archival_expedition_parchment")
+    )
+    if use_globe:
+        cam_zoom = 0.98 + 0.08 * (u ** 2) - 0.05 * math.sin(math.pi * u)
+    elif leg_km < 15.0:
+        cam_zoom = 1.24 - 0.04 * math.sin(math.pi * u) + 0.08 * (u ** 2)
+    else:
+        cam_zoom = 1.08 - 0.04 * math.sin(math.pi * u) + 0.06 * (u ** 2)
     crisp_real_tiles = bool(allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1")
     if compact_hud:
         pitch_deg = 0.0 if crisp_real_tiles else 16.0
         bank_deg = 0.0
+    elif use_globe:
+        pitch_deg = 25.0 + 4.5 * math.sin(math.pi * u)
+        bank_deg = bank_factor * 1.5 - 1.2 + 2.4 * u
     elif crisp_real_tiles:
-        pitch_deg = 8.5 + 3.0 * math.sin(math.pi * u)
-        bank_deg = bank_factor * 1.8 if resolved_mode == "flight" else 0.0
+        pitch_deg = 10.5 + 2.5 * math.sin(math.pi * u)
+        bank_deg = bank_factor * 0.9
     else:
-        pitch_deg = 21.0 + 5.0 * math.sin(math.pi * u)
+        pitch_deg = 22.0 + 5.0 * math.sin(math.pi * u)
         bank_deg = -2.4 + 4.8 * u + bank_factor * 1.4
 
-    warped_rgb = _apply_camera_homography(
+    warped_rgb, proj_fn, horizon_y_fn = _apply_camera_homography(
         world_rgba.convert("RGB"),
         out_w=width,
         out_h=height,
@@ -2960,10 +2931,211 @@ def render_travel_map_frame(
         zoom=cam_zoom,
         pitch_deg=pitch_deg,
         bank_deg=bank_deg,
+        globe_strength=1.0 if use_globe else 0.0,
     )
-
-    # 6. Composite crisp screen-space HUD over 2.5D warped plate
     out_rgba = Image.fromarray(warped_rgb).convert("RGBA")
+    s_out = width / 1920.0
+    screen_stops = [proj_fn(wx, wy) for wx, wy in px_stops]
+
+    # 4. Screen-space crisp pin numerals + 3D Elevated Flight Arc + Contrails + Un-squashed Jetliner ABOVE Earth!
+    if resolved_mode == "flight":
+        alt_sin = math.sin(math.pi * u)
+        scr_ground = [proj_fn(gx, gy) for gx, gy in prog_ground]
+        if len(scr_ground) >= 2:
+            gx0, gy0 = screen_stops[i0]
+            gx1, gy1 = screen_stops[i1]
+            scr_span = math.hypot(gx1 - gx0, gy1 - gy0)
+            lift_px = min(height * 0.25, max(54.0 * s_out, scr_span * 0.26))
+            scr_arc_pts: list[tuple[float, float]] = []
+            # Smooth arc-length fraction in screen space for parabolic atmospheric climb
+            cum_s = [0.0]
+            for j in range(1, len(scr_ground)):
+                cum_s.append(cum_s[-1] + math.hypot(scr_ground[j][0] - scr_ground[j - 1][0], scr_ground[j][1] - scr_ground[j - 1][1]))
+            # Estimate total chord fraction using world progress ratio u
+            tot_s = max(1e-6, cum_s[-1] / max(1e-4, u))
+            for j, (sx_g, sy_g) in enumerate(scr_ground):
+                g_frac = min(1.0, cum_s[j] / tot_s)
+                scr_arc_pts.append((sx_g, sy_g - lift_px * math.sin(math.pi * g_frac)))
+
+            # Subtle dashed vertical altitude tethers linking arc down to Earth ground track
+            sky_arr = np.zeros((height, width, 4), dtype=np.uint8)
+            if len(scr_ground) >= 12:
+                step_teth = max(8, len(scr_ground) // 6)
+                for j in range(step_teth, len(scr_ground) - 2, step_teth):
+                    _draw_dashed_aa_polyline(
+                        sky_arr,
+                        [scr_ground[j], scr_arc_pts[j]],
+                        (*spec["route_future"], 92),
+                        max(1, int(round(1.4 * s_out))),
+                        dash_px=4.0 * s_out,
+                        gap_px=5.0 * s_out,
+                    )
+
+            sky_sw = max(2, int(round(5.5 * s_out)))
+            _draw_cased_route(sky_arr, scr_arc_pts, spec, sky_sw, s_out, is_flight=False)
+            out_rgba = Image.alpha_composite(out_rgba, Image.fromarray(sky_arr))
+
+            elev_scr_path = _ArcLengthPath(scr_arc_pts)
+            scr_head = elev_scr_path.point_at_s(elev_scr_path.total_len)
+            scr_heading, scr_bank = elev_scr_path.tangent_and_curvature(1.0, window_px=26.0 * s_out)
+            veh_scr_scale = s_out * (0.95 if compact_hud else 1.12) * (0.86 + 0.44 * alt_sin)
+            _draw_flight_contrails(out_rgba, scr_arc_pts, scale=veh_scr_scale, alt_sin=alt_sin)
+            _draw_transport_icon(
+                out_rgba,
+                cx=scr_head[0],
+                cy=scr_head[1],
+                angle_rad=scr_heading,
+                mode="flight",
+                fill_rgb=spec["route_core"],
+                stroke_rgb=stroke_col,
+                scale=veh_scr_scale,
+                bank_factor=scr_bank,
+            )
+
+    # 5. Crisp Screen-Space Collision-Free Waypoint Labels & FROM / TO Polaroids (never clip HUD!)
+    od = ImageDraw.Draw(out_rgba, "RGBA")
+    f_pin = _load_font_tier(max(10, int(round(13 * s_out))), tier="mono", bold=True)
+    f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_out))), tier=spec["title_tier"], bold=True)
+
+    for k in [idx for idx in range(len(screen_stops)) if idx not in (i0, i1)] + [i0, i1]:
+        sx_w, sy_w = screen_stops[k]
+        if k not in (i0, i1):
+            if min(math.hypot(sx_w - screen_stops[i0][0], sy_w - screen_stops[i0][1]), math.hypot(sx_w - screen_stops[i1][0], sy_w - screen_stops[i1][1])) < 26.0 * s_out:
+                continue
+        if -40 <= sx_w <= width + 40 and -40 <= sy_w <= height + 40:
+            num_str = f"{k + 1:02d}"
+            nw, nh = measure_tracked_text(od, num_str, f_pin)
+            od.text((sx_w - nw * 0.5, sy_w - nh * 0.62), num_str, font=f_pin, fill=(*spec["pin_text"], 250))
+
+    occupied_rects: list[tuple[float, float, float, float]] = [
+        (0.0, 0.0, width * 0.45, height * 0.22),                          # Top-left HUD bar
+        (width * 0.71, height * 0.76, float(width), float(height)),       # Bottom-right Elevation box
+        (0.0, 0.0, float(width), max(height * 0.14, horizon_y_fn(width * 0.5) + 12.0)),  # Earth horizon sky band
+    ]
+    for k, (sx_w, sy_w) in enumerate(screen_stops):
+        if -40 <= sx_w <= width + 40 and -40 <= sy_w <= height + 40:
+            pr = max(12.0, 22.0 * s_out)
+            occupied_rects.append((sx_w - pr, sy_w - pr, sx_w + pr, sy_w + pr))
+
+    def _overlaps_any(box: tuple[float, float, float, float], pad: float = 4.0) -> bool:
+        bx0, by0, bx1, by1 = box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad
+        for rx0, ry0, rx1, ry1 in occupied_rects:
+            if not (bx1 < rx0 or bx0 > rx1 or by1 < ry0 or by0 > ry1):
+                return True
+        return False
+
+    pending_labels: list[tuple[tuple[int, int, int, int], int, int, str, tuple[int, int, int, int], bool, bool]] = []
+    tag_order = [i0, i1] + [k for k in range(len(screen_stops)) if k not in (i0, i1)]
+    for k in tag_order:
+        sx_w, sy_w = screen_stops[k]
+        if sx_w < -60 or sx_w > width + 60 or sy_w < -60 or sy_w > height + 60:
+            continue
+        is_orig = k == i0
+        is_dest = k == i1
+        is_done = k <= i0
+        # Skip inactive cluster stop tags within 72px of active origin/destination pins (clean readability)
+        if not (is_orig or is_dest):
+            if min(math.hypot(sx_w - screen_stops[i0][0], sy_w - screen_stops[i0][1]), math.hypot(sx_w - screen_stops[i1][0], sy_w - screen_stops[i1][1])) < 72.0 * s_out:
+                continue
+
+        pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_out)))
+        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 220)
+        tag = norm_wps[k].label
+        tb0 = od.textbbox((0, 0), tag, font=f_wp_lbl)
+        tw = tb0[2] - tb0[0]
+        th = tb0[3] - tb0[1]
+        pad_x = int(round(10 * s_out))
+        pad_y = int(round(7 * s_out))
+
+        candidates: list[tuple[float, float]] = [
+            (sx_w + pin_r + 14 * s_out, sy_w - th * 0.55 - tb0[1]),
+            (sx_w - tw * 0.5 - tb0[0], sy_w + pin_r + 18 * s_out - tb0[1]),
+            (sx_w - tw * 0.5 - tb0[0], sy_w - pin_r - th - 18 * s_out - tb0[1]),
+            (sx_w - pin_r - tw - 24 * s_out - tb0[0], sy_w - th * 0.55 - tb0[1]),
+            (sx_w + pin_r + 14 * s_out, sy_w + pin_r + 14 * s_out - tb0[1]),
+            (sx_w + pin_r + 14 * s_out, sy_w - pin_r - th - 14 * s_out - tb0[1]),
+        ]
+        if is_dest:
+            candidates = [candidates[0], candidates[1], candidates[3], candidates[2], candidates[4], candidates[5]]
+
+        chosen: Optional[tuple[int, int]] = None
+        for cx_c, cy_c in candidates:
+            tx_c = int(round(max(18, min(width - tw - 22, cx_c))))
+            ty_c = int(round(max(int(round(height * 0.21)), min(height - th - 20, cy_c))))
+            tb_c = od.textbbox((tx_c, ty_c), tag, font=f_wp_lbl)
+            cand_box = (tb_c[0] - pad_x, tb_c[1] - pad_y, tb_c[2] + pad_x, tb_c[3] + pad_y)
+            if not _overlaps_any(cand_box):
+                chosen = (tx_c, ty_c)
+                occupied_rects.append(cand_box)
+                break
+
+        if chosen is None:
+            if not (is_orig or is_dest):
+                continue
+            tx = int(round(max(18, min(width - tw - 22, candidates[0][0]))))
+            ty = int(round(max(int(round(height * 0.23)), min(height - th - 20, candidates[0][1]))))
+            tb_f = od.textbbox((tx, ty), tag, font=f_wp_lbl)
+            occupied_rects.append((tb_f[0] - pad_x, tb_f[1] - pad_y, tb_f[2] + pad_x, tb_f[3] + pad_y))
+        else:
+            tx, ty = chosen
+
+        tb = od.textbbox((tx, ty), tag, font=f_wp_lbl)
+        pending_labels.append(
+            ((tb[0] - pad_x, tb[1] - pad_y, tb[2] + pad_x, tb[3] + pad_y), tx, ty, tag, ring_col, is_orig or is_dest, is_done or is_dest)
+        )
+
+    # Screen-space FROM / TO hero photo Polaroids placed cleanly outside label/HUD rects, BEFORE drawing text pills on top
+    orig_card_center: Optional[tuple[float, float]] = None
+    if orig.hero_thumbnail_path:
+        orig_bloom = min(1.0, 0.50 + float(t_norm) * 3.0)
+        orig_card_center = _paste_hero_photo_callout(
+            world_rgba=out_rgba,
+            dest_px=screen_stops[i0],
+            thumb_path=orig.hero_thumbnail_path,
+            label=orig.label,
+            bloom_p=orig_bloom,
+            spec=spec,
+            world_w=width,
+            world_h=height,
+            avoid_pts=[p for idx_p, p in enumerate(screen_stops) if idx_p != i0],
+            caption_prefix="FROM",
+            tilt_deg=-1.6,
+            accent_override=spec["route_history"],
+            avoid_rects=occupied_rects,
+        )
+
+    if u >= 0.45 and dest.hero_thumbnail_path:
+        bloom_p = min(1.0, (u - 0.45) / 0.28)
+        dest_avoid = [p for idx_p, p in enumerate(screen_stops) if idx_p != i1]
+        if orig_card_center is not None:
+            dest_avoid.append(orig_card_center)
+        _paste_hero_photo_callout(
+            world_rgba=out_rgba,
+            dest_px=screen_stops[i1],
+            thumb_path=dest.hero_thumbnail_path,
+            label=dest.label,
+            bloom_p=bloom_p,
+            spec=spec,
+            world_w=width,
+            world_h=height,
+            avoid_pts=dest_avoid,
+            caption_prefix="TO",
+            tilt_deg=2.0,
+            avoid_rects=occupied_rects,
+        )
+
+    od_top = ImageDraw.Draw(out_rgba, "RGBA")
+    for pill_box, tx, ty, tag, ring_col, is_active_pin, is_bright in pending_labels:
+        od_top.rounded_rectangle(
+            list(pill_box),
+            radius=max(4, int(round(6 * s_out))),
+            fill=(*spec["hud_fill"][:3], 238 if is_bright else 180),
+            outline=ring_col if is_active_pin else (*spec["hud_border"][:3], 125),
+            width=1,
+        )
+        od_top.text((tx, ty), tag, font=f_wp_lbl, fill=(*spec["hud_title"], 252))
+
+    # 6. Composite crisp screen-space HUD over 2.5D/Globe scene
     _render_screen_hud(
         frame_rgba=out_rgba,
         style=use_style,
