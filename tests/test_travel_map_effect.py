@@ -458,3 +458,32 @@ def test_all_vehicles_and_satellite_hybrid_4k_hdr(tmp_path: Path) -> None:
     assert arr_sdr.shape == (360, 640, 3)
     assert int(arr_sdr.max()) > 0
 
+
+def test_google_earth_dynamic_zoom_and_multimodal_leg_modes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from video_editing_ai.renderer.travel_map import _draw_aa_polyline, render_google_earth_flyover_frame
+
+    # Ensure NaN/Inf off-horizon points never raise warnings or errors
+    buf = np.zeros((100, 100, 4), dtype=np.uint8)
+    _draw_aa_polyline(buf, [(10.0, 10.0), (float("nan"), 20.0), (50.0, 50.0)], (255, 255, 255, 255), 2)
+
+    # Verify offline-safe dynamic zoom frame & 'name' fallback label
+    monkeypatch.setenv("AI_EDITOR_OFFLINE_MAPS", "1")
+    wps = [
+        {"name": "Lucerne Pier", "lat": 47.0502, "lon": 8.3093, "alt_m": 434.0},
+        {"name": "Vitznau", "lat": 47.0094, "lon": 8.4836, "alt_m": 436.0},
+        {"name": "Rigi Kulm", "lat": 47.0567, "lon": 8.4855, "alt_m": 1798.0},
+    ]
+    f_boat = render_google_earth_flyover_frame(
+        waypoints=wps, style="satellite_hybrid_4k", width=640, height=360,
+        global_t=0.25, leg_modes=["boat", "train"], hdr_safe=True, cache_dir=tmp_path / "tiles",
+    )
+    f_train = render_google_earth_flyover_frame(
+        waypoints=wps, style="satellite_hybrid_4k", width=640, height=360,
+        global_t=0.80, leg_modes=["boat", "train"], hdr_safe=True, cache_dir=tmp_path / "tiles",
+    )
+    assert np.asarray(f_boat).shape == (360, 640, 3)
+    assert np.asarray(f_train).shape == (360, 640, 3)
+    assert int(np.asarray(f_boat).max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+    assert int(np.asarray(f_train).max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+
+

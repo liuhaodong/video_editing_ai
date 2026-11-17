@@ -1072,23 +1072,28 @@ def _fetch_osrm_route_latlon(
     orig: MapWaypointSpec,
     dest: MapWaypointSpec,
     cache_dir: Optional[Path] = None,
+    profile: str = "driving",
 ) -> Optional[list[tuple[float, float]]]:
-    """Fetch and disk-cache real road-network driving geometry between (orig, dest) via OSRM."""
+    """Fetch and disk-cache real road/pedestrian network geometry between (orig, dest) via OSRM."""
     import json as _json
 
+    clean_prof = "foot" if str(profile).lower() in ("walk", "foot", "pedestrian") else "driving"
     key = f"{orig.lat:.4f}_{orig.lon:.4f}_{dest.lat:.4f}_{dest.lon:.4f}"
     r_dir = (cache_dir or Path("cache")) / "map_routes"
     r_dir.mkdir(parents=True, exist_ok=True)
-    r_file = r_dir / f"{key}.json"
-    if r_file.exists():
-        try:
-            pts = _json.loads(r_file.read_text(encoding="utf-8"))
-            if isinstance(pts, list) and len(pts) >= 2:
-                return [(float(p[0]), float(p[1])) for p in pts]
-        except Exception:
-            pass
+    # Prefer profile-specific cache when present, falling back to legacy coordinate key
+    r_file_prof = r_dir / f"{clean_prof}_{key}.json"
+    r_file_legacy = r_dir / f"{key}.json"
+    for candidate in (r_file_legacy, r_file_prof):
+        if candidate.exists():
+            try:
+                pts = _json.loads(candidate.read_text(encoding="utf-8"))
+                if isinstance(pts, list) and len(pts) >= 2:
+                    return [(float(p[0]), float(p[1])) for p in pts]
+            except Exception:
+                pass
     url = (
-        f"https://router.project-osrm.org/route/v1/driving/"
+        f"https://router.project-osrm.org/route/v1/{clean_prof}/"
         f"{orig.lon:.5f},{orig.lat:.5f};{dest.lon:.5f},{dest.lat:.5f}"
         "?overview=full&geometries=geojson"
     )
@@ -1104,7 +1109,7 @@ def _fetch_osrm_route_latlon(
             latlons = [(float(c[1]), float(c[0])) for c in coords[::step]]
             if latlons[-1] != (float(coords[-1][1]), float(coords[-1][0])):
                 latlons.append((float(coords[-1][1]), float(coords[-1][0])))
-            r_file.write_text(_json.dumps(latlons), encoding="utf-8")
+            r_file_prof.write_text(_json.dumps(latlons), encoding="utf-8")
             return latlons
     except Exception:
         return None
@@ -1584,9 +1589,10 @@ def _draw_aa_polyline(
     rgba: tuple[int, int, int, int],
     thickness: int,
 ) -> None:
-    if len(pts) < 2:
+    clean_pts = [(x, y) for x, y in pts if math.isfinite(x) and math.isfinite(y) and abs(x) < 1e6 and abs(y) < 1e6]
+    if len(clean_pts) < 2:
         return
-    arr = np.round(np.asarray(pts, dtype=np.float64) * 16.0).astype(np.int32).reshape((-1, 1, 2))
+    arr = np.round(np.asarray(clean_pts, dtype=np.float64) * 16.0).astype(np.int32).reshape((-1, 1, 2))
     cv2.polylines(
         overlay_bgr_a,
         [arr],
@@ -2728,7 +2734,7 @@ def render_travel_map_frame(
                 MapWaypointSpec(
                     waypoint_id=str(w.get("waypoint_id") or f"wp_{idx_w + 1:02d}"),
                     chapter_id=str(w.get("chapter_id") or ""),
-                    label=str(w.get("label") or f"Stop {idx_w + 1}"),
+                    label=str(w.get("label") or w.get("name") or f"Stop {idx_w + 1}"),
                     subtitle=str(w.get("subtitle") or ""),
                     lat=float(w.get("lat", 37.77 + idx_w * 0.35)),
                     lon=float(w.get("lon", -122.42 + idx_w * 0.45)),
@@ -2785,7 +2791,12 @@ def render_travel_map_frame(
         road_lls: Optional[list[tuple[float, float]]] = None
         if allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
             if leg_mode_k in ("drive", "walk", "train"):
-                road_lls = _fetch_osrm_route_latlon(norm_wps[k], norm_wps[k + 1], cache_dir=c_dir_p)
+                road_lls = _fetch_osrm_route_latlon(
+                    norm_wps[k],
+                    norm_wps[k + 1],
+                    cache_dir=c_dir_p,
+                    profile="foot" if leg_mode_k == "walk" else "driving",
+                )
         if road_lls:
             all_leg_splines.append([vp.latlon_to_px(lat, lon) for lat, lon in road_lls])
         elif leg_mode_k == "flight":
@@ -2913,24 +2924,22 @@ def render_travel_map_frame(
         and use_style in ("satellite_hybrid_4k", "aerial_relief_hybrid", "midnight_vox_atlas", "archival_expedition_parchment")
     )
     if use_globe:
-        cam_zoom = 0.98 + 0.08 * (u ** 2) - 0.05 * math.sin(math.pi * u)
+        cam_zoom = 0.98 + 0.06 * _ease_in_out_cubic(u)
     elif leg_km < 15.0:
-        cam_zoom = 1.24 - 0.04 * math.sin(math.pi * u) + 0.08 * (u ** 2)
+        cam_zoom = 1.18 + 0.06 * _ease_in_out_cubic(u)
     else:
-        cam_zoom = 1.08 - 0.04 * math.sin(math.pi * u) + 0.06 * (u ** 2)
+        cam_zoom = 1.04 + 0.06 * _ease_in_out_cubic(u)
     crisp_real_tiles = bool(allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1")
+    # Lock horizon completely level (bank_deg = 0.0) and use constant pitch so the camera never wobbles or shakes
+    bank_deg = 0.0
     if compact_hud:
-        pitch_deg = 0.0 if crisp_real_tiles else 16.0
-        bank_deg = 0.0
+        pitch_deg = 0.0 if crisp_real_tiles else 14.0
     elif use_globe:
-        pitch_deg = 25.0 + 4.5 * math.sin(math.pi * u)
-        bank_deg = bank_factor * 1.5 - 1.2 + 2.4 * u
+        pitch_deg = 24.0
     elif crisp_real_tiles:
-        pitch_deg = 10.5 + 2.5 * math.sin(math.pi * u)
-        bank_deg = bank_factor * 0.9
+        pitch_deg = 8.0
     else:
-        pitch_deg = 22.0 + 5.0 * math.sin(math.pi * u)
-        bank_deg = -2.4 + 4.8 * u + bank_factor * 1.4
+        pitch_deg = 20.0
 
     warped_rgb, proj_fn, horizon_y_fn = _apply_camera_homography(
         world_rgba.convert("RGB"),
@@ -3200,6 +3209,410 @@ def _synthesize_flyover_wav(output_wav: Path, duration_sec: float, sample_rate: 
     return output_wav
 
 
+# ---------------------------------------------------------------------------
+# Multi-Resolution Google Earth Dynamic-Zoom Pyramid Engine
+# ---------------------------------------------------------------------------
+
+_PYRAMID_TILE_MEM: dict[tuple[str, int, int, int], Optional[np.ndarray]] = {}
+
+
+def _load_or_fetch_pyramid_tile(
+    layer_tag: str,
+    url_tpl: str,
+    z: int,
+    tx: int,
+    ty: int,
+    mode: str = "RGB",
+    cache_dir: Optional[Path] = None,
+) -> Optional[np.ndarray]:
+    """Fetch and disk/memory-cache a single 256x256 slippy tile for dynamic multi-zoom sampling."""
+    n = 1 << z
+    if ty < 0 or ty >= n:
+        return None
+    tx_w = tx % n
+    key = (layer_tag, z, tx_w, ty)
+    if key in _PYRAMID_TILE_MEM:
+        return _PYRAMID_TILE_MEM[key]
+
+    zdir = (cache_dir or Path("cache")) / "map_tiles" / layer_tag / str(z)
+    zdir.mkdir(parents=True, exist_ok=True)
+    local_p = zdir / f"{tx_w}_{ty}.png"
+    if not local_p.exists() and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
+        url = url_tpl.format(z=z, x=tx_w, y=ty)
+        req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=3.5, context=_build_ssl_ctx()) as resp:
+                data = resp.read()
+            if len(data) > 120:
+                local_p.write_bytes(data)
+        except Exception:
+            _PYRAMID_TILE_MEM[key] = None
+            return None
+    if not local_p.exists():
+        _PYRAMID_TILE_MEM[key] = None
+        return None
+    try:
+        with Image.open(local_p) as im:
+            arr = np.asarray(im.convert(mode), dtype=np.uint8)
+        _PYRAMID_TILE_MEM[key] = arr
+        return arr
+    except Exception:
+        _PYRAMID_TILE_MEM[key] = None
+        return None
+
+
+def _sample_pyramid_mosaic(
+    layer_tag: str,
+    url_tpl: str,
+    z: int,
+    wx0: float,
+    wy0: float,
+    wx1: float,
+    wy1: float,
+    out_w: int,
+    out_h: int,
+    mode: str = "RGB",
+    fill_val: tuple[int, ...] = (12, 22, 36),
+    cache_dir: Optional[Path] = None,
+) -> np.ndarray:
+    """Assemble and sub-pixel warp exact Web Mercator region [wx0..wx1, wy0..wy1] at zoom z."""
+    n = 1 << z
+    tx_min = int(math.floor(wx0 / 256.0))
+    tx_max = int(math.floor(wx1 / 256.0))
+    ty_min = max(0, int(math.floor(wy0 / 256.0)))
+    ty_max = min(n - 1, int(math.floor(wy1 / 256.0)))
+
+    ch = 3 if mode == "RGB" else 4
+    cw = max(256, (tx_max - tx_min + 1) * 256)
+    ch_px = max(256, (ty_max - ty_min + 1) * 256)
+    canvas = np.zeros((ch_px, cw, ch), dtype=np.uint8)
+    canvas[:, :] = fill_val
+
+    for ty in range(ty_min, ty_max + 1):
+        for tx in range(tx_min, tx_max + 1):
+            t_arr = _load_or_fetch_pyramid_tile(layer_tag, url_tpl, z, tx, ty, mode=mode, cache_dir=cache_dir)
+            if t_arr is not None:
+                oy = (ty - ty_min) * 256
+                ox = (tx - tx_min) * 256
+                canvas[oy : oy + 256, ox : ox + 256] = t_arr
+
+    ox = wx0 - tx_min * 256.0
+    oy = wy0 - ty_min * 256.0
+    ow = max(4.0, wx1 - wx0)
+    oh = max(4.0, wy1 - wy0)
+    src_pts = np.array([[ox, oy], [ox + ow, oy], [ox, oy + oh]], dtype=np.float32)
+    dst_pts = np.array([[0.0, 0.0], [float(out_w), 0.0], [0.0, float(out_h)]], dtype=np.float32)
+    m_aff = cv2.getAffineTransform(src_pts, dst_pts)
+    return cv2.warpAffine(canvas, m_aff, (out_w, out_h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REPLICATE)
+
+
+def render_google_earth_flyover_frame(
+    waypoints: list[MapWaypointSpec | dict[str, Any]],
+    style: str = "satellite_hybrid_4k",
+    width: int = 1920,
+    height: int = 1080,
+    global_t: float = 0.5,
+    leg_modes: Optional[list[str]] = None,
+    transport_mode: str = "auto",
+    hdr_safe: bool = False,
+    cache_dir: Optional[str | Path] = None,
+) -> Image.Image:
+    """
+    Render a Google Earth Studio-style dynamic-zoom frame with zero camera roll/shake
+    (`bank_deg = 0.0`), multi-resolution Retina tile streaming, and unobstructed corner photo callouts.
+    """
+    norm_wps: list[MapWaypointSpec] = []
+    for idx_w, w in enumerate(waypoints):
+        if isinstance(w, MapWaypointSpec):
+            norm_wps.append(w)
+        else:
+            norm_wps.append(
+                MapWaypointSpec(
+                    waypoint_id=str(w.get("waypoint_id") or f"wp_{idx_w + 1:02d}"),
+                    chapter_id=str(w.get("chapter_id") or ""),
+                    label=str(w.get("label") or w.get("name") or f"Stop {idx_w + 1}"),
+                    subtitle=str(w.get("subtitle") or ""),
+                    lat=float(w.get("lat", 37.77 + idx_w * 0.35)),
+                    lon=float(w.get("lon", -122.42 + idx_w * 0.45)),
+                    alt_m=float(w.get("alt_m", 40.0)),
+                    source=w.get("source", "exif_gps") if w.get("source") in ("exif_gps", "gazetteer", "synthetic") else "exif_gps",
+                    hero_thumbnail_path=w.get("hero_thumbnail_path"),
+                )
+            )
+    if len(norm_wps) < 2:
+        norm_wps = [
+            MapWaypointSpec(waypoint_id="wp_01", label="Origin", lat=35.6762, lon=139.6503, alt_m=40.0),
+            MapWaypointSpec(waypoint_id="wp_02", label="Destination", lat=35.0116, lon=135.7681, alt_m=50.0),
+        ]
+
+    use_style = style if style in CART_THEME_SPECS else "satellite_hybrid_4k"
+    spec = CART_THEME_SPECS[use_style]
+    c_dir_p = Path(cache_dir).resolve() if cache_dir else None
+
+    n_legs = len(norm_wps) - 1
+    resolved_modes: list[str] = []
+    leg_splines_ll: list[list[tuple[float, float]]] = []
+    for k in range(n_legs):
+        km_k = haversine_km(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon)
+        hint_k = leg_modes[k] if (leg_modes and k < len(leg_modes)) else transport_mode
+        m_k = infer_transport_mode(km_k, norm_wps[k].label, norm_wps[k + 1].label, hint=hint_k)
+        resolved_modes.append(m_k)
+        if m_k in ("drive", "walk", "train") and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
+            r_pts = _fetch_osrm_route_latlon(
+                norm_wps[k],
+                norm_wps[k + 1],
+                cache_dir=c_dir_p,
+                profile="foot" if m_k == "walk" else "driving",
+            )
+            if r_pts:
+                leg_splines_ll.append(r_pts)
+                continue
+        if m_k == "flight":
+            leg_splines_ll.append(_great_circle_latlon_pts(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon, n_samples=200))
+        else:
+            leg_splines_ll.append([(norm_wps[k].lat, norm_wps[k].lon), (norm_wps[k + 1].lat, norm_wps[k + 1].lon)])
+
+    g_u = _cartography_travel_progress(global_t)
+    scaled = g_u * n_legs
+    active_leg = min(n_legs - 1, int(math.floor(scaled)))
+    leg_u = 1.0 if g_u >= 1.0 else (scaled - active_leg)
+    cur_mode = resolved_modes[active_leg]
+
+    # Compute smooth Google Earth dynamic camera trajectory (center_lat, center_lon, zoom_float, pitch, globe_strength)
+    total_span_km = max(
+        haversine_km(norm_wps[0].lat, norm_wps[0].lon, norm_wps[-1].lat, norm_wps[-1].lon),
+        max((haversine_km(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon) for k in range(n_legs)), default=1.0),
+    )
+    if cur_mode == "flight" and total_span_km >= 250.0 and n_legs == 1:
+        pts_ll = leg_splines_ll[0]
+        idx_f = leg_u * (len(pts_ll) - 1)
+        ia = min(len(pts_ll) - 2, int(math.floor(idx_f)))
+        f = idx_f - ia
+        center_lat = pts_ll[ia][0] + (pts_ll[ia + 1][0] - pts_ll[ia][0]) * f
+        center_lon = pts_ll[ia][1] + (pts_ll[ia + 1][1] - pts_ll[ia][1]) * f
+        cruise_dip = math.sin(math.pi * leg_u) ** 0.72
+        z_cruise = 3.6 if total_span_km > 2500.0 else 5.4
+        zoom_float = (8.8 * (1.0 - leg_u) + 9.6 * leg_u) * (1.0 - cruise_dip) + z_cruise * cruise_dip
+        globe_strength = float(np.clip((6.8 - zoom_float) / 2.6, 0.0, 1.0))
+        pitch_deg = 16.0 + 10.0 * globe_strength
+    else:
+        # Regional / city dynamic zoom with smooth destination arrival flyover
+        fit_vp = _compute_viewport(norm_wps, int(round(width * 1.35)), int(round(height * 1.35)), focus_leg_index=-1)
+        base_z = float(min(15.2, max(6.0, fit_vp.zoom + (0.6 if total_span_km < 5.0 else 0.0))))
+        if n_legs == 1 and total_span_km >= 8.0:
+            # Train/drive corridor + smooth arrival flyover zoom-in over destination!
+            if global_t < 0.72:
+                u_c = _cartography_travel_progress(global_t / 0.72)
+                pts_ll = leg_splines_ll[0]
+                ia = min(len(pts_ll) - 2, int(math.floor(u_c * (len(pts_ll) - 1))))
+                center_lat = 0.65 * pts_ll[ia][0] + 0.35 * (0.5 * (norm_wps[0].lat + norm_wps[-1].lat))
+                center_lon = 0.65 * pts_ll[ia][1] + 0.35 * (0.5 * (norm_wps[0].lon + norm_wps[-1].lon))
+                zoom_float = base_z
+                pitch_deg = 8.0
+            else:
+                e = _ease_in_out_cubic((global_t - 0.72) / 0.28)
+                pts_ll = leg_splines_ll[0]
+                c0_lat = 0.65 * pts_ll[-1][0] + 0.35 * (0.5 * (norm_wps[0].lat + norm_wps[-1].lat))
+                c0_lon = 0.65 * pts_ll[-1][1] + 0.35 * (0.5 * (norm_wps[0].lon + norm_wps[-1].lon))
+                center_lat = c0_lat + (norm_wps[-1].lat - c0_lat) * e
+                center_lon = c0_lon + (norm_wps[-1].lon - c0_lon) * e
+                zoom_float = base_z + min(2.8, 14.3 - base_z) * e
+                pitch_deg = 8.0 + 10.0 * e
+        else:
+            mid_lat = sum(w.lat for w in norm_wps) / len(norm_wps)
+            mid_lon = sum(w.lon for w in norm_wps) / len(norm_wps)
+            c_lat_cur = norm_wps[active_leg].lat + (norm_wps[active_leg + 1].lat - norm_wps[active_leg].lat) * _ease_in_out_cubic(leg_u)
+            c_lon_cur = norm_wps[active_leg].lon + (norm_wps[active_leg + 1].lon - norm_wps[active_leg].lon) * _ease_in_out_cubic(leg_u)
+            center_lat = 0.55 * c_lat_cur + 0.45 * mid_lat
+            center_lon = 0.55 * c_lon_cur + 0.45 * mid_lon
+            zoom_float = base_z + 0.45 * _ease_in_out_cubic(global_t)
+            pitch_deg = 4.0 if cur_mode == "walk" else 9.0
+        globe_strength = 0.0
+
+    ww = int(round(width * 1.35))
+    wh = int(round(height * 1.35))
+    z_tile = max(3, min(16, int(math.floor(zoom_float)) + 1))
+    world_px_scale = 2.0 ** (z_tile - zoom_float)
+    span_x = ww * world_px_scale * 0.72
+    span_y = wh * world_px_scale * 0.72
+    cx_w, cy_w = _latlon_to_world_px(center_lat, center_lon, z_tile)
+    wx0, wx1 = cx_w - span_x * 0.5, cx_w + span_x * 0.5
+    wy0, wy1 = cy_w - span_y * 0.5, cy_w + span_y * 0.5
+
+    def _ll_to_world(lat: float, lon: float) -> tuple[float, float]:
+        px, py = _latlon_to_world_px(lat, lon, z_tile)
+        world_full = 256.0 * (2.0 ** z_tile)
+        if px - cx_w > world_full * 0.5:
+            px -= world_full
+        elif cx_w - px > world_full * 0.5:
+            px += world_full
+        return ((px - wx0) / span_x * ww, (py - wy0) / span_y * wh)
+
+    base_rgb = _sample_pyramid_mosaic(
+        use_style, spec["tile_url"], z_tile, wx0, wy0, wx1, wy1, ww, wh,
+        mode="RGB", fill_val=tuple(spec["water_deep"]), cache_dir=c_dir_p,
+    ).astype(np.float32)
+
+    hs_url = spec.get("hillshade_url")
+    hs_str = float(spec.get("hillshade_strength", 0.0) or 0.0)
+    if hs_url and hs_str > 0.01:
+        z_hs = min(14, z_tile)
+        hs_sc = 2.0 ** (z_hs - z_tile)
+        hs_arr = _sample_pyramid_mosaic(
+            "world_hillshade", hs_url, z_hs, wx0 * hs_sc, wy0 * hs_sc, wx1 * hs_sc, wy1 * hs_sc,
+            ww, wh, mode="RGB", fill_val=(180, 180, 180), cache_dir=c_dir_p,
+        )
+        eff_hs = hs_str * (0.45 if z_tile >= 11 else 0.90)
+        hs_luma = (0.299 * hs_arr[:, :, 0] + 0.587 * hs_arr[:, :, 1] + 0.114 * hs_arr[:, :, 2]) / 255.0
+        relief = np.clip(1.0 + eff_hs * ((hs_luma - 0.706) * 2.2), 0.74, 1.16)[..., None]
+        base_rgb = np.clip(base_rgb * relief, 0, 255)
+
+    if use_style in ("satellite_hybrid_4k", "aerial_relief_hybrid"):
+        rgb_u8 = np.clip(base_rgb, 0, 255).astype(np.uint8)
+        lab = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        l_mix = cv2.addWeighted(l_ch, 0.80, cv2.createCLAHE(clipLimit=1.3, tileGridSize=(12, 12)).apply(l_ch), 0.20, 0)
+        hsv = cv2.cvtColor(cv2.cvtColor(cv2.merge((l_mix, a_ch, b_ch)), cv2.COLOR_LAB2RGB), cv2.COLOR_RGB2HSV).astype(np.float32)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.16, 0, 255)
+        base_rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32)
+
+    world_rgba = Image.fromarray(np.clip(base_rgb, 0, 255).astype(np.uint8)).convert("RGBA")
+    if spec.get("roads_overlay_url") and z_tile >= 8:
+        z_rd = min(15, z_tile)
+        rd_sc = 2.0 ** (z_rd - z_tile)
+        rd_arr = _sample_pyramid_mosaic(
+            "world_transportation", spec["roads_overlay_url"], z_rd,
+            wx0 * rd_sc, wy0 * rd_sc, wx1 * rd_sc, wy1 * rd_sc, ww, wh,
+            mode="RGBA", fill_val=(0, 0, 0, 0), cache_dir=c_dir_p,
+        )
+        rd_im = Image.fromarray(rd_arr, mode="RGBA")
+        rd_im.putalpha(rd_im.getchannel("A").point(lambda v: int(round(v * 0.78))))
+        world_rgba.alpha_composite(rd_im)
+
+    route_arr = np.zeros((wh, ww, 4), dtype=np.uint8)
+    s_w = ww / 1920.0
+    stroke_w = max(2, int(round(5.0 * s_w)))
+    px_splines = [[_ll_to_world(lat, lon) for lat, lon in seg] for seg in leg_splines_ll]
+    px_stops = [_ll_to_world(w.lat, w.lon) for w in norm_wps]
+
+    for k, seg_pts in enumerate(px_splines):
+        if k > active_leg or k == active_leg:
+            _draw_dashed_aa_polyline(route_arr, seg_pts, (*spec["route_future"], 135), max(1, stroke_w // 2 + 1), 10.0 * s_w, 8.0 * s_w)
+        else:
+            _draw_cased_route(route_arr, seg_pts, spec, stroke_w, s_w, is_flight=False)
+
+    active_pts = px_splines[active_leg]
+    ground_arc_path = _ArcLengthPath(active_pts)
+    prog_ground = ground_arc_path.sample_prefix(leg_u)
+    ground_head_pt = ground_arc_path.point_at_s(leg_u * ground_arc_path.total_len)
+    if cur_mode == "flight":
+        _draw_aa_polyline(route_arr, prog_ground, (12, 18, 28, 128), max(2, stroke_w))
+        _draw_aa_polyline(route_arr, prog_ground, (*spec["route_glow"], 115), max(1, stroke_w // 2))
+    else:
+        _draw_cased_route(route_arr, prog_ground, spec, stroke_w, s_w, is_flight=False)
+        head_pt = ground_head_pt
+        heading, _ = ground_arc_path.tangent_and_curvature(leg_u, window_px=26.0 * s_w)
+    world_rgba = Image.alpha_composite(world_rgba, Image.fromarray(route_arr))
+
+    if spec.get("labels_overlay_url"):
+        z_lb = min(14, z_tile)
+        lb_sc = 2.0 ** (z_lb - z_tile)
+        lb_arr = _sample_pyramid_mosaic(
+            "world_places", spec["labels_overlay_url"], z_lb,
+            wx0 * lb_sc, wy0 * lb_sc, wx1 * lb_sc, wy1 * lb_sc, ww, wh,
+            mode="RGBA", fill_val=(0, 0, 0, 0), cache_dir=c_dir_p,
+        )
+        l_rgb = lb_arr[:, :, :3].astype(np.float32)
+        l_a = lb_arr[:, :, 3].astype(np.float32) / 255.0
+        if float(l_a.max()) > 0.01:
+            shadow_a = np.clip(cv2.dilate((l_a * 255.0).astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1).astype(np.float32) / 255.0 * 0.70, 0.0, 0.70)
+            base_w_arr = np.asarray(world_rgba.convert("RGB"), dtype=np.float32) * (1.0 - shadow_a[..., None])
+            lbl_mix = np.clip(l_a * 0.96, 0.0, 1.0)[..., None]
+            world_rgba = Image.fromarray(np.clip(base_w_arr * (1.0 - lbl_mix) + l_rgb * lbl_mix, 0, 255).astype(np.uint8)).convert("RGBA")
+
+    wd = ImageDraw.Draw(world_rgba, "RGBA")
+    i0, i1 = active_leg, active_leg + 1
+    for k in [idx for idx in range(len(px_stops)) if idx not in (i0, i1)] + [i0, i1]:
+        wx, wy = px_stops[k]
+        if wx < -80 or wx > ww + 80 or wy < -80 or wy > wh + 80:
+            continue
+        is_orig, is_dest = k == i0, k == i1
+        pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_w)))
+        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 220)
+        wd.ellipse([wx - pin_r - 3, wy - pin_r - 3, wx + pin_r + 3, wy + pin_r + 3], fill=ring_col)
+        wd.ellipse([wx - pin_r, wy - pin_r, wx + pin_r, wy + pin_r], fill=(*spec["pin_fill"], 248))
+
+    veh_scale_w = s_w * 1.05
+    stroke_col = spec["pin_fill"] if not spec["light_paper"] else (248, 244, 238)
+    if cur_mode == "flight":
+        alt_sin = math.sin(math.pi * leg_u)
+        g_heading, _ = ground_arc_path.tangent_and_curvature(leg_u, window_px=24.0 * s_w)
+        _draw_aircraft_ground_shadow(world_rgba, ground_head_pt[0] + 10.0 * s_w * alt_sin, ground_head_pt[1] + 12.0 * s_w * alt_sin, g_heading, veh_scale_w * (0.92 - 0.28 * alt_sin), int(round(125 - 65 * alt_sin)))
+    elif cur_mode == "train":
+        _draw_articulated_train(world_rgba, arc_path=ground_arc_path, u=leg_u, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w)
+    elif cur_mode == "boat":
+        _draw_boat_kelvin_wake(world_rgba, arc_path=ground_arc_path, u=leg_u, scale=veh_scale_w)
+        _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode="boat", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=0.0)
+    else:
+        _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode=cur_mode, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=0.0)
+
+    warped_rgb, proj_fn, _ = _apply_camera_homography(
+        world_rgba.convert("RGB"), out_w=width, out_h=height,
+        center_xy=(ww * 0.5, wh * 0.5), zoom=1.02, pitch_deg=pitch_deg, bank_deg=0.0, globe_strength=globe_strength,
+    )
+    out_rgba = Image.fromarray(warped_rgb).convert("RGBA")
+    s_out = width / 1920.0
+    screen_stops = [proj_fn(wx, wy) for wx, wy in px_stops]
+
+    if cur_mode == "flight":
+        alt_sin = math.sin(math.pi * leg_u)
+        scr_ground = [proj_fn(gx, gy) for gx, gy in prog_ground]
+        if len(scr_ground) >= 2:
+            gx0, gy0 = screen_stops[i0]
+            gx1, gy1 = screen_stops[i1]
+            scr_span = math.hypot(gx1 - gx0, gy1 - gy0)
+            lift_px = min(height * 0.24, max(42.0 * s_out, scr_span * 0.24)) * (0.35 + 0.65 * alt_sin)
+            cum_s = [0.0]
+            for j in range(1, len(scr_ground)):
+                cum_s.append(cum_s[-1] + math.hypot(scr_ground[j][0] - scr_ground[j - 1][0], scr_ground[j][1] - scr_ground[j - 1][1]))
+            tot_s = max(1e-6, cum_s[-1] / max(1e-4, leg_u))
+            scr_arc_pts = [(sx_g, sy_g - lift_px * math.sin(math.pi * min(1.0, cum_s[j] / tot_s))) for j, (sx_g, sy_g) in enumerate(scr_ground)]
+            sky_arr = np.zeros((height, width, 4), dtype=np.uint8)
+            _draw_cased_route(sky_arr, scr_arc_pts, spec, max(2, int(round(5.5 * s_out))), s_out, is_flight=False)
+            out_rgba = Image.alpha_composite(out_rgba, Image.fromarray(sky_arr))
+            elev_scr_path = _ArcLengthPath(scr_arc_pts)
+            scr_head = elev_scr_path.point_at_s(elev_scr_path.total_len)
+            scr_heading, _ = elev_scr_path.tangent_and_curvature(1.0, window_px=26.0 * s_out)
+            veh_scr_scale = s_out * 1.15 * (0.88 + 0.40 * alt_sin)
+            _draw_flight_contrails(out_rgba, scr_arc_pts, scale=veh_scr_scale, alt_sin=alt_sin)
+            _draw_transport_icon(out_rgba, cx=scr_head[0], cy=scr_head[1], angle_rad=scr_heading, mode="flight", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scr_scale, bank_factor=0.0)
+
+    active_card_wp = norm_wps[i0] if leg_u < 0.45 else norm_wps[i1]
+    if active_card_wp.hero_thumbnail_path and Path(active_card_wp.hero_thumbnail_path).exists():
+        try:
+            with Image.open(active_card_wp.hero_thumbnail_path) as raw_im:
+                pim = ImageOps.exif_transpose(raw_im).convert("RGB")
+            cw, ch_img, cap_h, pad_c = int(round(360 * s_out)), int(round(215 * s_out)), int(round(34 * s_out)), int(round(10 * s_out))
+            pim = ImageOps.fit(pim, (cw - 2 * pad_c, ch_img), method=Image.Resampling.LANCZOS)
+            card_im = Image.new("RGBA", (cw, ch_img + cap_h + 2 * pad_c), (0, 0, 0, 0))
+            dc = ImageDraw.Draw(card_im, "RGBA")
+            dc.rounded_rectangle([0, 0, cw - 1, card_im.height - 1], radius=int(round(12 * s_out)), fill=(*spec["hud_fill"][:3], 238), outline=(*spec["accent"], 220), width=max(2, int(round(2.5 * s_out))))
+            card_im.alpha_composite(pim.convert("RGBA"), (pad_c, pad_c))
+            f_card = _load_font_tier(max(11, int(round(15 * s_out))), tier=spec["title_tier"], bold=True)
+            dc.text((pad_c + 4, pad_c + ch_img + int(round(7 * s_out))), active_card_wp.label[:30], font=f_card, fill=(*spec["hud_title"], 250))
+            out_rgba.alpha_composite(card_im, (int(round(width * 0.045)), height - int(round(height * 0.065)) - card_im.height))
+        except Exception:
+            pass
+
+    _render_screen_hud(frame_rgba=out_rgba, style=use_style, waypoints=norm_wps, leg_index=active_leg, t_norm=0.06 + leg_u * 0.76, transport_mode=cur_mode, compact_hud=False, hdr_safe=hdr_safe)
+    out_arr = np.asarray(out_rgba.convert("RGB"), dtype=np.uint8)
+    if hdr_safe:
+        max_ch = np.max(out_arr, axis=2, keepdims=True).astype(np.float32)
+        scale = np.where(max_ch > float(HDR_DIFFUSE_WHITE_PEAK_RGB), float(HDR_DIFFUSE_WHITE_PEAK_RGB) / np.maximum(1.0, max_ch), 1.0)
+        out_arr = np.clip(np.round(out_arr.astype(np.float32) * scale), 0, HDR_DIFFUSE_WHITE_PEAK_RGB).astype(np.uint8)
+    return Image.fromarray(out_arr)
+
+
 def render_travel_map_clip(
     waypoints: list[MapWaypointSpec | dict[str, Any]],
     output_mp4: str | Path,
@@ -3215,6 +3628,8 @@ def render_travel_map_clip(
     with_audio: bool = False,
     cache_dir: Optional[str | Path] = None,
     annotations: Optional[list[dict[str, Any]]] = None,
+    leg_modes: Optional[list[str]] = None,
+    dynamic_zoom: bool = False,
 ) -> Path:
     """
     Encode a multi-frame Cinema 2.5D Travel Map sequence to an H.264 MP4 clip.
@@ -3295,6 +3710,22 @@ def render_travel_map_clip(
 
     def _render_frame_bytes(f_idx: int) -> bytes:
         global_p = f_idx / float(max(1, total_frames - 1))
+        if dynamic_zoom and allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
+            im = render_google_earth_flyover_frame(
+                waypoints=waypoints,
+                style=style,
+                width=w_even,
+                height=h_even,
+                global_t=global_p,
+                leg_modes=leg_modes,
+                transport_mode=transport_mode,
+                hdr_safe=hdr_safe,
+                cache_dir=cache_dir,
+            )
+            if im.size != (w_even, h_even):
+                im = im.resize((w_even, h_even), Image.Resampling.BILINEAR)
+            return im.tobytes()
+
         if leg_index is None and n_legs > 1:
             scaled = global_p * n_legs
             cur_leg = min(n_legs - 1, int(math.floor(scaled)))
@@ -3303,6 +3734,7 @@ def render_travel_map_clip(
             cur_leg = max(0, min(n_legs - 1, int(leg_index or 0)))
             leg_p = global_p
 
+        leg_mode = leg_modes[cur_leg] if (leg_modes and cur_leg < len(leg_modes)) else transport_mode
         im = render_travel_map_frame(
             waypoints=waypoints,
             style=style,
@@ -3310,7 +3742,7 @@ def render_travel_map_clip(
             height=h_even,
             leg_index=cur_leg,
             t_norm=leg_p,
-            transport_mode=transport_mode,
+            transport_mode=leg_mode,
             hdr_safe=hdr_safe,
             compact_hud=False,
             allow_tile_fetch=allow_tile_fetch,

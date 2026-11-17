@@ -1234,6 +1234,7 @@ def cmd_preview_travel_maps(args: argparse.Namespace) -> int:
 
 def cmd_render_travel_map(args: argparse.Namespace) -> int:
     """Mechanically render a standalone animated Cinema 2.5D Travel Map flyover MP4 clip."""
+    import os
     import re
     from video_editing_ai.renderer.travel_map import (
         lookup_gazetteer_place,
@@ -1250,6 +1251,9 @@ def cmd_render_travel_map(args: argparse.Namespace) -> int:
         raw_wp = args.waypoints_json
         wp_p = Path(raw_wp)
         wps = json.loads(wp_p.read_text(encoding="utf-8")) if wp_p.exists() else json.loads(raw_wp)
+        for idx_w, w in enumerate(wps):
+            if isinstance(w, dict) and not w.get("label"):
+                w["label"] = w.get("name") or f"Stop {idx_w + 1}"
     else:
         for idx_s, raw_place, def_lat, def_lon, def_lbl in [
             (0, args.origin or "Tokyo", 35.6762, 139.6503, "Departure"),
@@ -1265,16 +1269,29 @@ def cmd_render_travel_map(args: argparse.Namespace) -> int:
                 else:
                     wps.append({"label": str(raw_place) or def_lbl, "lat": def_lat, "lon": def_lon, "alt_m": 40.0, "source": "synthetic"})
 
-    tm_style = resolve_travel_map_style(args.style or "auto", prompt_text=f"{args.origin or ''} {args.destination or ''}")
+    leg_modes = [
+        str(wps[k + 1].get("transport_mode") or args.transport_mode or "auto")
+        for k in range(max(0, len(wps) - 1))
+    ] if len(wps) >= 2 and all(isinstance(w, dict) for w in wps) and any(w.get("transport_mode") for w in wps[1:] if isinstance(w, dict)) else None
+
+    allow_tiles = os.environ.get("AI_EDITOR_OFFLINE_MAPS", "0") != "1"
+    tm_style = resolve_travel_map_style(
+        args.style or "auto",
+        prompt_text=f"{args.origin or ''} {args.destination or ''}",
+        transport_mode=args.transport_mode or "auto",
+    )
     res_mp4 = render_travel_map_clip(
         waypoints=wps,
         output_mp4=out_mp4,
         style=tm_style,
-        duration=float(args.duration or 3.2),
+        duration=float(args.duration or 5.2),
         leg_index=None if len(wps) > 2 else 0,
         transport_mode=args.transport_mode or "auto",
+        allow_tile_fetch=allow_tiles,
         with_audio=bool(args.with_audio),
         cache_dir=proj / "cache" / "maps" / "tiles",
+        leg_modes=leg_modes,
+        dynamic_zoom=allow_tiles,
     )
     print(f"Success! Rendered Cinema 2.5D Travel Map flyover ({tm_style}) to: {res_mp4}")
     return 0
