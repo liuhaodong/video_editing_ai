@@ -285,6 +285,91 @@ def _score_film_stocks(
     return ranked, chapter_looks
 
 
+def classify_clip_grading_suitability(
+    telemetry: dict[str, Any],
+    clip_note: str = "",
+    source_path: str = "",
+) -> str:
+    """Classify a clip into one of 5 Color-Scientist suitability regimes based on measurable optics."""
+    kelvin = float(telemetry.get("est_kelvin", 5500.0))
+    tint = float(telemetry.get("est_tint", 0.0))
+    p05 = float(telemetry.get("p05_luma", 0.05))
+    p50 = float(telemetry.get("p50_luma", 0.45))
+    p95 = float(telemetry.get("p95_luma", 0.90))
+    skin_ratio = float(telemetry.get("skin_pixel_ratio", 0.0))
+    span = p95 - p05
+
+    # 1. Compressed dynamic range / flat camera Log / marine haze -> restore black pedestal & S-curve
+    if (span < 0.45 and p95 < 0.85) or (p05 >= 0.17 and p95 <= 0.66):
+        return "log_dehaze_restore"
+
+    # 2. Underexposed evening / dark shaded interior -> noise-safe midtone lift without harsh clipping
+    if p50 <= 0.33 and p05 < 0.12:
+        return "shadow_recovery"
+
+    # 3. Already optimal ISP camera exposure & clean WB (or high-key bright sky) -> leave native pixels untouched
+    if p50 >= 0.58 and p95 >= 0.84 and skin_ratio < 0.05 and abs(tint) < 0.020:
+        return "preserve_natural"
+    if span >= 0.58 and 0.42 <= p50 <= 0.60 and 5000.0 <= kelvin <= 6350.0 and abs(tint) < 0.015:
+        return "preserve_natural"
+
+    # 4. Fluorescent green/magenta cast or strong Kelvin mismatch -> targeted color-temperature cleanup
+    if abs(tint) >= 0.016 or kelvin < 4650.0 or kelvin > 7150.0:
+        return "wb_tint_balance"
+
+    # 5. Scenic / portrait footage that benefits from a tasteful film-print finish
+    return "creative_film_print"
+
+
+def pick_representative_scope_entries(entries: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
+    """Select diverse timeline samples highlighting optical restoration, WB cleanup, film print, and bypass."""
+    valid = [e for e in entries if Path(str(e.get("source") or "")).exists()]
+    if not valid:
+        return []
+
+    by_id: dict[str, dict[str, Any]] = {}
+    picked: list[dict[str, Any]] = []
+
+    def _grade_val(e: dict[str, Any], key: str, default: Any = None) -> Any:
+        g = e.get("grade")
+        if g is None:
+            return default
+        return getattr(g, key, g.get(key, default) if isinstance(g, dict) else default)
+
+    # 1st pass: one standout clip per Color-Scientist regime (alternating video & photo when possible)
+    regime_priority = (
+        "log_dehaze_restore",
+        "shadow_recovery",
+        "wb_tint_balance",
+        "creative_film_print",
+        "preserve_natural",
+    )
+    for idx_r, target_reg in enumerate(regime_priority):
+        prefer_photo = idx_r % 2 == 1
+        cands = [e for e in valid if _grade_val(e, "grading_regime") == target_reg and str(e.get("clip_id")) not in by_id]
+        if not cands:
+            continue
+        typed = [e for e in cands if (e.get("media_type") == "photo") == prefer_photo]
+        chosen = (typed or cands)[0]
+        by_id[str(chosen.get("clip_id"))] = chosen
+        picked.append(chosen)
+        if len(picked) >= limit:
+            return picked
+
+    # 2nd pass: fill remaining slots balancing videos and photos
+    rem = [e for e in valid if str(e.get("clip_id")) not in by_id]
+    vids = [e for e in rem if e.get("media_type") != "photo"]
+    phos = [e for e in rem if e.get("media_type") == "photo"]
+    for i in range(max(len(vids), len(phos))):
+        if i < len(vids) and len(picked) < limit:
+            picked.append(vids[i])
+        if i < len(phos) and len(picked) < limit:
+            picked.append(phos[i])
+        if len(picked) >= limit:
+            break
+    return picked
+
+
 def _solve_clip_color_grade(
     clip_id: str,
     media_type: str,
@@ -297,7 +382,7 @@ def _solve_clip_color_grade(
     cst_meta: Optional[dict[str, Any]] = None,
     override: Optional[dict[str, Any]] = None,
 ) -> tuple[ClipColorGrade, dict[str, Any]]:
-    """Compute 3-way Lift/Gamma/Gain primary balance + LUT binding for a single clip."""
+    """Compute regime-aware 3-way Lift/Gamma/Gain primary balance + LUT binding (or clean bypass)."""
     ov = dict(override or {})
     chosen_look = str(ov.get("chapter_look") or ov.get("look") or look_name)
     if chosen_look not in CINEMA_FILM_STOCK_SPECS:
@@ -310,43 +395,137 @@ def _solve_clip_color_grade(
     p50 = float(telemetry.get("p50_luma", 0.45))
     p95 = float(telemetry.get("p95_luma", 0.90))
     skin_ratio = float(telemetry.get("skin_pixel_ratio", 0.0))
+    span = p95 - p05
 
-    # Proportional primary WB matching toward neutral daylight/scene median (mild filmic nudge)
+    auto_regime = classify_clip_grading_suitability(telemetry, source_path=source)
+    explicit_bypass = ov.get("bypass")
+    has_manual_grade = any(
+        k in ov
+        for k in ("grading_regime", "exposure_ev", "wb_red_shift", "wb_blue_shift", "black_lift", "gamma", "contrast", "saturation")
+    ) or (float(ov.get("lut_intensity", 0.0) or 0.0) > 0.02 and explicit_bypass is False)
+
+    if explicit_bypass is True or str(ov.get("grading_regime", "")) == "preserve_natural" or chosen_look == "neutral_reference":
+        regime = "preserve_natural"
+    elif ov.get("grading_regime"):
+        regime = str(ov["grading_regime"])
+    elif auto_regime == "preserve_natural" and not has_manual_grade and explicit_bypass is None:
+        regime = "preserve_natural"
+    elif auto_regime == "preserve_natural" and (has_manual_grade or explicit_bypass is False):
+        regime = "creative_film_print"
+    else:
+        regime = auto_regime
+
+    if regime == "preserve_natural":
+        grade_obj = ClipColorGrade(
+            clip_id=clip_id,
+            media_type=media_type,
+            grading_regime="preserve_natural",
+            bypass=True,
+            chapter_look="neutral_reference",
+            measured_kelvin=round(kelvin, 1),
+            measured_tint=round(tint, 4),
+            p05_luma=round(p05, 4),
+            p50_luma=round(p50, 4),
+            p95_luma=round(p95, 4),
+            skin_pixel_ratio=round(skin_ratio, 4),
+            wb_red_shift=0.0,
+            wb_green_shift=0.0,
+            wb_blue_shift=0.0,
+            lift_rgb=(0.0, 0.0, 0.0),
+            gamma_rgb=(0.0, 0.0, 0.0),
+            gain_rgb=(0.0, 0.0, 0.0),
+            exposure_ev=0.0,
+            black_lift=0.0,
+            contrast=1.0,
+            saturation=1.0,
+            vibrance=0.0,
+            gamma=1.0,
+            skin_protection=0.0,
+            lut_intensity=0.0,
+            lut_cube_path="",
+            rationale=(
+                f"Bypass ({kelvin:.0f}K, p50={p50:.2f}, tint={tint:+.3f}): camera exposure & white balance already balanced; "
+                "preserved native rendering."
+            ),
+        )
+        return grade_obj, {"bypass": True, "chapter_look": "neutral_reference", "grading_regime": "preserve_natural"}
+
+    # Solve base WB / green-magenta neutralization appropriate to regime
     kelvin_diff = ref_kelvin - kelvin
-    if abs(kelvin_diff) <= 220.0:
+    deadband = 180.0 if regime == "wb_tint_balance" else 260.0
+    if abs(kelvin_diff) <= deadband:
         norm_shift = 0.0
     else:
-        adj_diff = kelvin_diff - (220.0 if kelvin_diff > 0 else -220.0)
-        norm_shift = _clamp(adj_diff / 30000.0, -0.075, 0.075)
-    wb_red = float(ov.get("wb_red_shift", round(-norm_shift * 0.72, 4)))
-    wb_blue = float(ov.get("wb_blue_shift", round(norm_shift * 0.78, 4)))
-    wb_green = float(ov.get("wb_green_shift", round(_clamp(-tint * 0.35, -0.04, 0.04), 4)))
+        adj_diff = kelvin_diff - (deadband if kelvin_diff > 0 else -deadband)
+        max_shift = 0.075 if regime == "wb_tint_balance" else 0.055
+        norm_shift = _clamp(adj_diff / 30000.0, -max_shift, max_shift)
+    default_wb_r = round(-norm_shift * 0.72, 4)
+    default_wb_b = round(norm_shift * 0.78, 4)
+    tint_scale = 0.65 if regime == "wb_tint_balance" else 0.35
+    default_wb_g = round(_clamp(-tint * tint_scale, -0.048, 0.048), 4)
 
-    # Gentle exposure & black-point normalization targeting ~0.44 mid-gray without crushing night/sky mood
-    luma_err = 0.44 - p50
-    raw_ev = 0.0 if abs(luma_err) < 0.08 else (luma_err - (0.08 if luma_err > 0 else -0.08)) * 0.65
-    exposure_ev = float(ov.get("exposure_ev", round(_clamp(raw_ev, -0.25, 0.25), 3)))
+    # Regime-specific luminance & film-print defaults
+    if regime == "log_dehaze_restore":
+        default_ped = round(_clamp(-(p05 - 0.05) * 0.45, -0.13, -0.025), 4)
+        default_contrast = round(_clamp(1.10 + max(0.0, 0.45 - span) * 0.38, 1.12, 1.24), 3)
+        default_ev = round(_clamp((0.46 - p50) * 0.80, 0.04, 0.20) if p50 < 0.44 else _clamp((0.46 - p50) * 0.55, -0.12, 0.0), 3)
+        default_gamma = 1.02
+        default_sat = round(max(float(spec["saturation"]), 1.07), 3)
+        default_vib = round(max(float(spec["vibrance"]), 0.10), 3)
+        default_lut_int = round(min(float(spec["lut_intensity"]), 0.48), 3)
+    elif regime == "shadow_recovery":
+        default_ped = 0.0
+        default_contrast = round(min(float(spec["contrast"]), 1.02), 3)
+        default_ev = round(_clamp((0.38 - p50) * 0.65, 0.05, 0.18), 3)
+        default_gamma = round(_clamp(1.0 + (0.36 - p50) * 0.52, 1.05, 1.14), 3)
+        default_sat = round(float(spec["saturation"]), 3)
+        default_vib = round(max(float(spec["vibrance"]), 0.06), 3)
+        default_lut_int = round(min(float(spec["lut_intensity"]), 0.38), 3)
+    elif regime == "wb_tint_balance":
+        default_ped = round(-0.02, 4) if p05 > 0.12 else 0.0
+        default_contrast = round(min(float(spec["contrast"]), 1.04), 3)
+        luma_err = 0.44 - p50
+        default_ev = 0.0 if (p50 >= 0.54 or abs(luma_err) < 0.09) else round(_clamp(luma_err * 0.55, -0.15, 0.18), 3)
+        default_gamma = 1.02 if p50 < 0.36 else 1.00
+        default_sat = round(min(float(spec["saturation"]), 1.03), 3)
+        default_vib = round(float(spec["vibrance"]), 3)
+        default_lut_int = round(min(float(spec["lut_intensity"]), 0.38), 3)
+    else:  # creative_film_print
+        default_ped = 0.0
+        default_contrast = round(float(spec["contrast"]), 3)
+        luma_err = 0.44 - p50
+        # Never darken already open daylight scenes; gently lift slightly dim midtones
+        default_ev = 0.0 if (p50 >= 0.50 or abs(luma_err) < 0.09) else round(_clamp(luma_err * 0.55, -0.10, 0.16), 3)
+        default_gamma = 1.00
+        default_sat = round(float(spec["saturation"]), 3)
+        default_vib = round(float(spec["vibrance"]), 3)
+        default_lut_int = round(float(spec["lut_intensity"]), 3)
 
-    raw_toe = -(p05 - 0.06) * 0.35 if p05 > 0.09 else (0.012 if p05 < 0.025 else 0.0)
-    black_lift = float(ov.get("black_lift", round(_clamp(raw_toe, -0.03, 0.02), 4)))
+    wb_red = float(ov.get("wb_red_shift", default_wb_r))
+    wb_blue = float(ov.get("wb_blue_shift", default_wb_b))
+    wb_green = float(ov.get("wb_green_shift", default_wb_g))
+    exposure_ev = float(ov.get("exposure_ev", default_ev))
+    black_lift = float(ov.get("black_lift", default_ped))
+    contrast = float(ov.get("contrast", default_contrast))
+    saturation = float(ov.get("saturation", default_sat))
+    vibrance = float(ov.get("vibrance", default_vib))
+    gamma_scalar = float(ov.get("gamma", default_gamma))
 
     lift_rgb = tuple(float(x) for x in ov.get("lift_rgb", spec["lift"]))
     gamma_rgb = tuple(float(x) for x in ov.get("gamma_rgb", spec["gamma"]))
     gain_rgb = tuple(float(x) for x in ov.get("gain_rgb", spec["gain"]))
-    contrast = float(ov.get("contrast", spec["contrast"]))
-    saturation = float(ov.get("saturation", spec["saturation"]))
-    vibrance = float(ov.get("vibrance", spec["vibrance"]))
-    gamma_scalar = float(ov.get("gamma", 1.00))
 
     skin_prot = float(ov.get("skin_protection", spec["skin_protection"]))
     if skin_ratio >= 0.04:
         skin_prot = max(skin_prot, 0.78)
-    lut_int = float(ov.get("lut_intensity", spec["lut_intensity"]))
+    lut_int = float(ov.get("lut_intensity", default_lut_int))
     lut_cube = lut_paths.get(chosen_look, "")
 
     grade_obj = ClipColorGrade(
         clip_id=clip_id,
         media_type=media_type,
+        grading_regime=regime,
+        bypass=False,
         chapter_look=chosen_look,  # type: ignore[arg-type]
         measured_kelvin=round(kelvin, 1),
         measured_tint=round(tint, 4),
@@ -370,13 +549,15 @@ def _solve_clip_color_grade(
         lut_intensity=round(lut_int, 3),
         lut_cube_path=str(lut_cube),
         rationale=(
-            f"Matched {kelvin:.0f}K ({media_type}) toward {ref_kelvin:.0f}K baseline; "
+            f"[{regime}] {kelvin:.0f}K ({media_type}), span={span:.2f}, black_lift={black_lift:+.3f}, "
             f"look={chosen_look} ({int(round(lut_int*100))}% LUT)"
             + (f", skin_prot={int(round(skin_prot*100))}%" if skin_ratio >= 0.03 else "")
         ),
     )
 
     fx_params: dict[str, Any] = {
+        "grading_regime": regime,
+        "bypass": False,
         "chapter_look": chosen_look,
         "look": chosen_look,
         "measured_kelvin": grade_obj.measured_kelvin,
@@ -477,7 +658,7 @@ def apply_color_grade_overrides(
             )
         )
 
-        ov: dict[str, Any] = {}
+        ov: dict[str, Any] = {"bypass": False}
         eff_look = chosen_look if (look_name or prev is None) else prev.chapter_look
         ov["chapter_look"] = eff_look
         if intensity is not None:
@@ -522,22 +703,24 @@ def apply_color_grade_overrides(
             override=ov,
         )
         updated_grades.append(grade_obj)
-        preserved_fx.append(
-            EffectTrackItem(
-                id=f"fx_color_{idx}_{item.id}",
-                effect_type="color_grade",
-                target_clip_id=item.id,
-                timeline_start=item.timeline_start,
-                duration=item.duration,
-                intensity=grade_obj.lut_intensity,
-                parameters=fx_params,
-                created_by_agent="color_grader",
+        if not grade_obj.bypass:
+            preserved_fx.append(
+                EffectTrackItem(
+                    id=f"fx_color_{idx}_{item.id}",
+                    effect_type="color_grade",
+                    target_clip_id=item.id,
+                    timeline_start=item.timeline_start,
+                    duration=item.duration,
+                    intensity=grade_obj.lut_intensity,
+                    parameters=fx_params,
+                    created_by_agent="color_grader",
+                )
             )
-        )
 
     timeline.effects_track = preserved_fx
     report.clip_grades = updated_grades
     report.shots_matched_count = len(updated_grades)
+    report.bypassed_natural_count = sum(1 for g in updated_grades if g.bypass)
     report.to_json_file(plan_path)
     return report
 
@@ -824,21 +1007,23 @@ class CinemaColorGradingAgent(BaseEditingAgent):
                 override=clip_ov,
             )
             clip_grades.append(grade_obj)
-            residual_k = grade_obj.measured_kelvin + (ref_kelvin - grade_obj.measured_kelvin) * 0.72
-            post_wb_kelvins.append(residual_k)
-
-            timeline.effects_track.append(
-                EffectTrackItem(
-                    id=f"fx_color_{idx}_{item.id}",
-                    effect_type="color_grade",
-                    target_clip_id=item.id,
-                    timeline_start=item.timeline_start,
-                    duration=item.duration,
-                    intensity=grade_obj.lut_intensity,
-                    parameters=fx_params,
-                    created_by_agent=self.role_id,
+            if not grade_obj.bypass:
+                residual_k = grade_obj.measured_kelvin + (ref_kelvin - grade_obj.measured_kelvin) * 0.72
+                post_wb_kelvins.append(residual_k)
+                timeline.effects_track.append(
+                    EffectTrackItem(
+                        id=f"fx_color_{idx}_{item.id}",
+                        effect_type="color_grade",
+                        target_clip_id=item.id,
+                        timeline_start=item.timeline_start,
+                        duration=item.duration,
+                        intensity=grade_obj.lut_intensity,
+                        parameters=fx_params,
+                        created_by_agent=self.role_id,
+                    )
                 )
-            )
+            else:
+                post_wb_kelvins.append(grade_obj.measured_kelvin)
             scope_samples.append(
                 {
                     "clip_id": item.id,
@@ -852,20 +1037,13 @@ class CinemaColorGradingAgent(BaseEditingAgent):
 
         spread_before = round((max(kelvins) - min(kelvins)) if len(kelvins) >= 2 else 0.0, 1)
         spread_after = round((max(post_wb_kelvins) - min(post_wb_kelvins)) if len(post_wb_kelvins) >= 2 else 0.0, 1)
+        bypassed_cnt = sum(1 for g in clip_grades if g.bypass)
+        graded_cnt = len(clip_grades) - bypassed_cnt
 
         scopes_path = ""
         if existing_sources:
             try:
-                photo_samples = [s for s in scope_samples if s["media_type"] == "photo" and Path(s["source"]).exists()]
-                video_samples = [s for s in scope_samples if s["media_type"] != "photo" and Path(s["source"]).exists()]
-                picked: list[dict[str, Any]] = []
-                for p_i in range(max(len(photo_samples), len(video_samples))):
-                    if p_i < len(video_samples) and len(picked) < 6:
-                        picked.append(video_samples[p_i])
-                    if p_i < len(photo_samples) and len(picked) < 6:
-                        picked.append(photo_samples[p_i])
-                    if len(picked) >= 6:
-                        break
+                picked = pick_representative_scope_entries(scope_samples, limit=6)
                 if picked:
                     report_preview = ColorGradeReport(
                         project_title=timeline.project_name,
@@ -890,6 +1068,7 @@ class CinemaColorGradingAgent(BaseEditingAgent):
             primary_film_stock_look=primary_look,
             grading_strategy=strategy,
             shots_matched_count=len(clip_grades),
+            bypassed_natural_count=bypassed_cnt,
             chapter_looks=resolved_chapter_looks,
             generated_luts=lut_paths,
             scopes_sheet_path=scopes_path,
@@ -899,8 +1078,8 @@ class CinemaColorGradingAgent(BaseEditingAgent):
             recommendation_source=rec.recommendation_source,
             ai_rationale=rec.ai_rationale,
             colorist_notes=(
-                f"Balanced {len(clip_grades)} real camera clips toward {ref_kelvin:.0f}K ({strategy}, "
-                f"spine='{primary_look}', source={rec.recommendation_source}); bypassed {skipped_synthetic} synthetic graphics."
+                f"Graded {graded_cnt} clips & preserved {bypassed_cnt} optimal natural shots toward {ref_kelvin:.0f}K "
+                f"({strategy}, spine='{primary_look}', source={rec.recommendation_source}); bypassed {skipped_synthetic} synthetic graphics."
             ),
             clip_grades=clip_grades,
         )
@@ -910,8 +1089,8 @@ class CinemaColorGradingAgent(BaseEditingAgent):
 
         blackboard.emit_activity(
             self.role_id,
-            f"Graded {len(clip_grades)} V1/V2 clips with '{primary_look}' (Kelvin spread {spread_before:.0f}K -> {spread_after:.0f}K)",
-            detail=f"Source={rec.recommendation_source}; synthesized {len(lut_paths)} .cube LUTs; bypassed {skipped_synthetic} graphics",
+            f"Graded {graded_cnt} V1/V2 clips & preserved {bypassed_cnt} natural clips ('{primary_look}', {spread_before:.0f}K -> {spread_after:.0f}K)",
+            detail=f"Source={rec.recommendation_source}; synthesized {len(lut_paths)} .cube LUTs; skipped {skipped_synthetic} synthetic graphics",
         )
         blackboard.send_message(
             sender_role=self.role_id,
@@ -922,6 +1101,7 @@ class CinemaColorGradingAgent(BaseEditingAgent):
                 "grading_strategy": strategy,
                 "recommendation_source": rec.recommendation_source,
                 "shots_matched_count": len(clip_grades),
+                "bypassed_natural_count": bypassed_cnt,
                 "kelvin_spread_before": spread_before,
                 "kelvin_spread_after": spread_after,
             },
@@ -929,6 +1109,8 @@ class CinemaColorGradingAgent(BaseEditingAgent):
 
         return {
             "shots_matched_count": len(clip_grades),
+            "graded_active_count": graded_cnt,
+            "bypassed_natural_count": bypassed_cnt,
             "primary_film_stock_look": primary_look,
             "grading_strategy": strategy,
             "recommendation_source": rec.recommendation_source,

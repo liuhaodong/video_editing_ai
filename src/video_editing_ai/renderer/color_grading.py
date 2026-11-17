@@ -34,8 +34,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.09,
         "subtractive_density": 0.09,
         "saturation_curves": (1.02, 1.06, 0.94),
-        "skin_protection": 0.72,
-        "lut_intensity": 0.82,
+        "skin_protection": 0.75,
+        "lut_intensity": 0.48,
     },
     "fuji_eterna_soft": {
         "display_name": "Fuji Eterna 250D",
@@ -50,8 +50,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.11,
         "subtractive_density": 0.06,
         "saturation_curves": (0.98, 1.00, 0.92),
-        "skin_protection": 0.78,
-        "lut_intensity": 0.78,
+        "skin_protection": 0.80,
+        "lut_intensity": 0.45,
     },
     "arri_natural_cinema": {
         "display_name": "ARRI Natural Reveal",
@@ -66,8 +66,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.09,
         "subtractive_density": 0.05,
         "saturation_curves": (1.00, 1.04, 0.96),
-        "skin_protection": 0.75,
-        "lut_intensity": 0.76,
+        "skin_protection": 0.78,
+        "lut_intensity": 0.42,
     },
     "pacific_coastal_chrome": {
         "display_name": "Ektachrome 100D",
@@ -82,8 +82,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.07,
         "subtractive_density": 0.07,
         "saturation_curves": (1.04, 1.08, 0.98),
-        "skin_protection": 0.70,
-        "lut_intensity": 0.80,
+        "skin_protection": 0.74,
+        "lut_intensity": 0.46,
     },
     "golden_hour_warmth": {
         "display_name": "Vision3 Golden Hour",
@@ -98,8 +98,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.09,
         "subtractive_density": 0.08,
         "saturation_curves": (1.02, 1.08, 0.92),
-        "skin_protection": 0.74,
-        "lut_intensity": 0.82,
+        "skin_protection": 0.76,
+        "lut_intensity": 0.48,
     },
     "museum_chiaroscuro": {
         "display_name": "Gallery Chiaroscuro",
@@ -114,8 +114,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.10,
         "subtractive_density": 0.07,
         "saturation_curves": (0.94, 0.98, 0.90),
-        "skin_protection": 0.76,
-        "lut_intensity": 0.78,
+        "skin_protection": 0.78,
+        "lut_intensity": 0.46,
     },
     "twilight_teal_amber": {
         "display_name": "Dusk Teal & Amber",
@@ -130,8 +130,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.09,
         "subtractive_density": 0.09,
         "saturation_curves": (1.04, 1.06, 0.92),
-        "skin_protection": 0.74,
-        "lut_intensity": 0.82,
+        "skin_protection": 0.78,
+        "lut_intensity": 0.48,
     },
     "a24_indie_matte": {
         "display_name": "Indie A24 Matte",
@@ -146,8 +146,8 @@ CINEMA_FILM_STOCK_SPECS: dict[str, dict[str, Any]] = {
         "shoulder_rolloff": 0.12,
         "subtractive_density": 0.05,
         "saturation_curves": (0.94, 0.96, 0.90),
-        "skin_protection": 0.78,
-        "lut_intensity": 0.78,
+        "skin_protection": 0.80,
+        "lut_intensity": 0.45,
     },
     "neutral_reference": {
         "display_name": "Neutral Reference",
@@ -666,7 +666,12 @@ def apply_color_grade_to_rgb(
     img = img + wb_shift * (0.35 + 0.65 * w_m + 0.45 * w_h) * np.clip(luma * 3.0 + 0.12, 0.0, 1.0)
     # Creative Lift/Gamma/Gain gently attenuates extreme channel pushes on skin
     lgg_delta = (w_s * lift_v + w_m * gamma_v + w_h * gain_v) * (1.0 - 0.35 * skin_mask)
-    img = img + lgg_delta + black_lift * w_s
+    if black_lift < -0.002:
+        # True black-pedestal dehaze for flat S-Log / marine haze without shifting midtone neutrality
+        abs_ped = min(0.22, abs(black_lift))
+        img = (img + lgg_delta - abs_ped) / max(0.25, 1.0 - abs_ped)
+    else:
+        img = img + lgg_delta + max(0.0, black_lift) * w_s
     img = np.clip(img, 0.0, 1.0)
 
     # 3. Contrast, scalar Gamma, Saturation & Vibrance
@@ -1009,17 +1014,21 @@ def render_color_grading_scopes_sheet(
         tx = x0 + 24 + parade_w
         cid = str(entry.get("clip_id") or gparams.get("clip_id") or f"clip_{idx+1}")
         look_nm = str(gparams.get("chapter_look") or primary_look)
+        regime = str(gparams.get("grading_regime") or "creative_film_print")
+        is_bypass = bool(gparams.get("bypass", False))
         kelvin = float(gparams.get("measured_kelvin", 5500.0))
         ev = float(gparams.get("exposure_ev", 0.0))
         skin_r = float(gparams.get("skin_pixel_ratio", 0.0)) * 100.0
         wb_r = float(gparams.get("wb_red_shift", 0.0))
         wb_b = float(gparams.get("wb_blue_shift", 0.0))
 
+        badge_line = "BYPASS (Camera Native)" if is_bypass else f"Stock: {look_nm}"
+        regime_col = (145, 212, 168) if is_bypass else (228, 198, 138)
         draw.text((tx, scope_top + 2), f"{cid[:22]} ({mtype})", fill=(242, 238, 230), font=font_card)
-        draw.text((tx, scope_top + 32), f"Stock: {look_nm}", fill=(145, 182, 220), font=font_mono)
-        draw.text((tx, scope_top + 56), f"Kelvin: {kelvin:.0f}K  EV: {ev:+.2f}", fill=(205, 210, 218), font=font_mono)
-        draw.text((tx, scope_top + 80), f"WB R/B: {wb_r:+.3f} / {wb_b:+.3f}", fill=(195, 200, 210), font=font_mono)
-        draw.text((tx, scope_top + 104), f"Skin Locus: {skin_r:.1f}%", fill=(224, 194, 146), font=font_mono)
+        draw.text((tx, scope_top + 30), f"Regime: {regime}", fill=regime_col, font=font_mono)
+        draw.text((tx, scope_top + 52), badge_line, fill=(145, 182, 220), font=font_mono)
+        draw.text((tx, scope_top + 74), f"Kelvin: {kelvin:.0f}K  EV: {ev:+.2f}", fill=(205, 210, 218), font=font_mono)
+        draw.text((tx, scope_top + 96), f"WB R/B: {wb_r:+.3f}/{wb_b:+.3f}  Skin:{skin_r:.0f}%", fill=(195, 200, 210), font=font_mono)
 
     canvas.save(out, quality=92)
     return out

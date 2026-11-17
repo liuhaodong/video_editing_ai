@@ -1383,6 +1383,8 @@ class ClipColorGrade(BaseModel):
 
     clip_id: str
     media_type: str = "video"
+    grading_regime: str = "creative_film_print"
+    bypass: bool = False
     chapter_look: FilmStockLookType = "archival_kodak_2383"
     measured_kelvin: float = 5500.0
     measured_tint: float = 0.0
@@ -1441,6 +1443,7 @@ class ColorGradeReport(BaseModel):
     primary_film_stock_look: str = "archival_kodak_2383"
     grading_strategy: str = "chapter_adaptive"
     shots_matched_count: int = 0
+    bypassed_natural_count: int = 0
     chapter_looks: dict[str, str] = Field(default_factory=dict)
     generated_luts: dict[str, str] = Field(default_factory=dict)
     scopes_sheet_path: str = ""

@@ -89,10 +89,10 @@ class MPSPhotoCompositor:
             with _MPS_LOCK:
                 if dev_idx not in _CUDA_MEM_FRACTION_SET:
                     try:
-                        # Bound PyTorch caching allocator while giving >=12GB cards higher throughput headroom
+                        # Allow generous GPU headroom on >=12GB cards while still bounding multi-worker allocations
                         props = torch.cuda.get_device_properties(dev_idx)
                         vram_gb = float(props.total_memory) / float(1024 ** 3)
-                        frac = 0.42 if vram_gb >= 12.0 else 0.35
+                        frac = 0.82 if vram_gb >= 12.0 else 0.70
                         torch.cuda.set_per_process_memory_fraction(frac, dev_idx)
                     except Exception:
                         pass

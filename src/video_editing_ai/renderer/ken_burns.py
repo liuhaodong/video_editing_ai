@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -2814,7 +2815,48 @@ def build_segment_overlay_filtergraph(
 
 
 _PHOTO_PREBUFFER_SEM = threading.BoundedSemaphore(2)
-_CUDA_PHOTO_SEM = threading.BoundedSemaphore(3)
+_CUDA_PHOTO_SEM = threading.BoundedSemaphore(2)
+
+
+def _resolve_ffmpeg_bin() -> str:
+    """Resolve the direct ffmpeg executable, unwrapping Windows Scoop .shim files to avoid orphan child processes."""
+    exe = shutil.which("ffmpeg") or "ffmpeg"
+    if sys.platform == "win32" and exe.lower().endswith(".exe"):
+        shim = Path(exe).with_suffix(".shim")
+        if shim.is_file():
+            try:
+                for line in shim.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if line.lower().startswith("path"):
+                        _, rhs = line.split("=", 1)
+                        target = Path(rhs.strip().strip('"').strip("'"))
+                        if target.is_file():
+                            return str(target)
+            except Exception:
+                pass
+    return exe
+
+
+def _kill_proc_tree(proc: Optional[subprocess.Popen[Any]]) -> None:
+    """Terminate a spawned subprocess and any child workers cleanly."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            else:
+                proc.kill()
+            proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 _MAX_PHOTO_PREBUFFER_BYTES = 4_800_000_000  # ~192 4K RGB24 frames (~6.4s @ 30fps) per worker
 
 
@@ -2882,11 +2924,12 @@ def render_photo_clip(
 
     has_seg_overlays = bool(segment_broll or segment_titles)
 
-    def _build_photo_cmd(force_sw: bool) -> list[str]:
+    def _build_photo_cmd(force_sw: bool, out_target: Optional[Path] = None) -> list[str]:
         v_enc_local = get_video_encoder_args(hdr=hdr, force_software=force_sw)
         mux_local = build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=v_enc_local)
+        target_p = out_target or tmp_out
         c = [
-            "ffmpeg",
+            _resolve_ffmpeg_bin(),
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -2946,7 +2989,7 @@ def render_photo_clip(
                 "-b:a",
                 "256k",
                 "-shortest",
-                str(tmp_out),
+                str(target_p),
             ]
         )
         return c
@@ -2959,20 +3002,23 @@ def render_photo_clip(
     try:
         hw = get_hardware_profile()
         if hw.has_cuda and total_frames > 0:
-            cuda_batch = (4 if hw.cuda_vram_gb >= 12.0 else 2) if width >= 3840 else 12
+            cuda_batch = (3 if hw.cuda_vram_gb >= 12.0 else 2) if width >= 3840 else 12
             cuda_ok = False
             stderr_bytes = b""
             ret = 1
             proc: Optional[subprocess.Popen[bytes]] = None
+            attempt_out: Optional[Path] = None
             with nvenc_encode_guard(v_enc):
-                for attempt_batch in (cuda_batch, max(1, cuda_batch // 2)):
+                for attempt_idx, attempt_batch in enumerate((cuda_batch, max(1, cuda_batch // 2))):
                     cuda_ok = False
                     cuda_sem_held = False
                     proc = None
+                    attempt_out = out_path.with_name(f".{out_path.stem}.tmp_{os.getpid()}_{threading.get_ident()}_a{attempt_idx}.mp4")
+                    cmd_attempt = _build_photo_cmd(force_sw=False, out_target=attempt_out)
                     try:
                         _CUDA_PHOTO_SEM.acquire()
                         cuda_sem_held = True
-                        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                        proc = subprocess.Popen(cmd_attempt, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
                         assert proc.stdin is not None
                         from .mps_photo_compositor import stream_photo_frames_to_pipe
 
@@ -2995,17 +3041,14 @@ def render_photo_clip(
                                         pipe.close()
                                     except (BrokenPipeError, OSError, ValueError):
                                         pass
-                            try:
-                                proc.kill()
-                                proc.wait(timeout=5)
-                            except Exception:
-                                pass
-                        for _attempt in range(3):
-                            try:
-                                tmp_out.unlink(missing_ok=True)
-                                break
-                            except OSError:
-                                time.sleep(0.05)
+                            _kill_proc_tree(proc)
+                        if attempt_out is not None:
+                            for _attempt in range(3):
+                                try:
+                                    attempt_out.unlink(missing_ok=True)
+                                    break
+                                except OSError:
+                                    time.sleep(0.05)
                         try:
                             import torch
 
@@ -3027,15 +3070,16 @@ def render_photo_clip(
                         if cuda_sem_held:
                             _CUDA_PHOTO_SEM.release()
 
-                if cuda_ok and proc is not None:
+                if cuda_ok and proc is not None and attempt_out is not None:
                     stderr_bytes = proc.stderr.read() if proc.stderr else b""
                     ret = proc.wait()
                     if ret == 0:
-                        os.replace(tmp_out, out_path)
+                        os.replace(attempt_out, out_path)
                         return out_path
-                    tmp_out.unlink(missing_ok=True)
+                    attempt_out.unlink(missing_ok=True)
             if cuda_ok and ret != 0:
-                sw_cmd = _build_photo_cmd(force_sw=True)
+                sw_out = out_path.with_name(f".{out_path.stem}.tmp_{os.getpid()}_{threading.get_ident()}_sw.mp4")
+                sw_cmd = _build_photo_cmd(force_sw=True, out_target=sw_out)
                 sw_proc: Optional[subprocess.Popen[bytes]] = None
                 sw_sem_held = False
                 try:
@@ -3066,9 +3110,10 @@ def render_photo_clip(
                 sw_err = sw_proc.stderr.read() if sw_proc.stderr else b""
                 sw_ret = sw_proc.wait()
                 if sw_ret != 0:
+                    sw_out.unlink(missing_ok=True)
                     err_msg = (sw_err or stderr_bytes).decode("utf-8", errors="replace")
                     raise RuntimeError(f"FFmpeg photo clip render failed (code {sw_ret}): {err_msg}")
-                os.replace(tmp_out, out_path)
+                os.replace(sw_out, out_path)
                 return out_path
 
         used_mps = False
@@ -3168,19 +3213,36 @@ def render_photo_clip(
                                     mv.release()
                                     del batch_t
                     else:
-                        for f_idx in range(total_frames):
-                            t_norm = f_idx / max(1, total_frames - 1)
-                            frame = _render_photo_frame_from_context(
+                        cpu_torch_ok = False
+                        try:
+                            from .mps_photo_compositor import stream_photo_frames_to_pipe
+
+                            stream_photo_frames_to_pipe(
                                 ctx=ctx,
-                                t_norm=t_norm,
-                                f_idx=f_idx,
+                                total_frames=total_frames,
                                 duration=duration,
                                 fps=fps,
+                                pipe_stdin=proc.stdin,
+                                batch_size=4,
+                                device_override="cpu",
                             )
-                            try:
-                                proc.stdin.write(frame.tobytes())
-                            except (BrokenPipeError, OSError):
-                                break
+                            cpu_torch_ok = True
+                        except Exception:
+                            cpu_torch_ok = False
+                        if not cpu_torch_ok:
+                            for f_idx in range(total_frames):
+                                t_norm = f_idx / max(1, total_frames - 1)
+                                frame = _render_photo_frame_from_context(
+                                    ctx=ctx,
+                                    t_norm=t_norm,
+                                    f_idx=f_idx,
+                                    duration=duration,
+                                    fps=fps,
+                                )
+                                try:
+                                    proc.stdin.write(frame.tobytes())
+                                except (BrokenPipeError, OSError):
+                                    break
                 finally:
                     if rem_comp is not None:
                         try:

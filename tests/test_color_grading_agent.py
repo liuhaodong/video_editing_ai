@@ -17,6 +17,7 @@ import video_editing_ai.agents.orchestrator  # noqa: F401
 from video_editing_ai.agents.plugins.color_grading_agent import (
     CinemaColorGradingAgent,
     apply_color_grade_overrides,
+    classify_clip_grading_suitability,
     recommend_color_grading,
 )
 from video_editing_ai.models.schema import (
@@ -273,6 +274,82 @@ def test_photo_color_grading_preserves_pure_white_gallery_matte_and_renders_hdr_
     )
     assert hdr_out.exists() and hdr_out.stat().st_size > 2000
 
+    # Regression check: 10-bit HLG/BT.2020 video with negative black_lift (colorlevels dehaze)
+    # must prepend format=rgb48le so FFmpeg 7.1+ does not clamp 10-bit inputs to solid black.
+    hlg_src_mp4 = tmp_path / "vid_hlg_10bit_in.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#7892B8:s=320x180:d=0.60:r=24",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-color_primaries",
+            "bt2020",
+            "-color_trc",
+            "arib-std-b67",
+            "-colorspace",
+            "bt2020nc",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "log-level=error",
+            str(hlg_src_mp4),
+        ],
+        check=True,
+    )
+    hlg_item = VisualTrackItem(
+        id="clip_hlg_10bit",
+        type="video",
+        source=str(hlg_src_mp4),
+        timeline_start=0.0,
+        duration=0.5,
+        source_in=0.0,
+        source_out=0.5,
+    )
+    pedestal_fx = EffectTrackItem(
+        id="fx_hlg_pedestal",
+        effect_type="color_grade",
+        target_clip_id="clip_hlg_10bit",
+        timeline_start=0.0,
+        duration=0.5,
+        intensity=0.55,
+        parameters={
+            "chapter_look": "cinematic_warm_film",
+            "black_lift": -0.11,
+            "lut_intensity": 0.45,
+            "lut_cube_path": str(cube_path),
+            "hlg_rolloff": True,
+            "hdr": True,
+            "src_trc": "arib-std-b67",
+            "src_space": "bt2020nc",
+        },
+    )
+    pedestal_flt = _build_color_grade_filter(pedestal_fx, hdr=True)
+    assert "format=rgb48le,colorlevels=" in pedestal_flt
+    hlg_graded_mp4 = _render_video_segment(
+        item=hlg_item,
+        output_mp4=tmp_path / "vid_hlg_10bit_graded.mp4",
+        width=640,
+        height=360,
+        fps=15,
+        hdr=True,
+        attached_effects=[pedestal_fx],
+    )
+    assert hlg_graded_mp4.exists() and hlg_graded_mp4.stat().st_size > 2000
+    hlg_png = tmp_path / "frame_hlg_pedestal.png"
+    subprocess.run(
+        [ffmpeg, "-y", "-v", "error", "-ss", "0.2", "-i", str(hlg_graded_mp4), "-frames:v", "1", str(hlg_png)],
+        check=True,
+    )
+    hlg_arr = np.asarray(Image.open(hlg_png).convert("RGB"), dtype=np.float32)
+    assert float(hlg_arr.mean()) > 30.0, f"10-bit colorlevels clamped to black: mean={hlg_arr.mean():.2f}"
+
 
 def test_surgical_set_color_grade_and_skill_cli_lookbook_and_scopes(tmp_path: Path) -> None:
     p1 = _make_test_photo(tmp_path / "p1.jpg", (215, 175, 130), with_skin=True)
@@ -408,3 +485,68 @@ def test_ai_color_grading_recommendation_multimodal_and_cli(
     cli_rec = ColorGradeRecommendation.from_json_file(tmp_path / "color_grade_recommendation.json")
     assert cli_rec.recommendation_source == "photometric_ranker"
     assert (tmp_path / "color_grade_plan.json").exists()
+
+
+def test_color_scientist_suitability_regimes_and_natural_bypass(tmp_path: Path) -> None:
+    # 1. Pure optical regime classifier checks
+    assert classify_clip_grading_suitability({"est_kelvin": 6800.0, "est_tint": 0.004, "p05_luma": 0.25, "p50_luma": 0.72, "p95_luma": 0.90, "skin_pixel_ratio": 0.0}) == "preserve_natural"
+    assert classify_clip_grading_suitability({"est_kelvin": 5600.0, "est_tint": 0.002, "p05_luma": 0.07, "p50_luma": 0.49, "p95_luma": 0.81, "skin_pixel_ratio": 0.12}) == "preserve_natural"
+    assert classify_clip_grading_suitability({"est_kelvin": 7100.0, "est_tint": -0.004, "p05_luma": 0.22, "p50_luma": 0.38, "p95_luma": 0.52, "skin_pixel_ratio": 0.0}) == "log_dehaze_restore"
+    assert classify_clip_grading_suitability({"est_kelvin": 5200.0, "est_tint": 0.003, "p05_luma": 0.03, "p50_luma": 0.24, "p95_luma": 0.68, "skin_pixel_ratio": 0.20}) == "shadow_recovery"
+    assert classify_clip_grading_suitability({"est_kelvin": 4900.0, "est_tint": 0.042, "p05_luma": 0.08, "p50_luma": 0.48, "p95_luma": 0.85, "skin_pixel_ratio": 0.05}) == "wb_tint_balance"
+    assert classify_clip_grading_suitability({"est_kelvin": 5200.0, "est_tint": 0.004, "p05_luma": 0.08, "p50_luma": 0.44, "p95_luma": 0.60, "skin_pixel_ratio": 0.18}) == "creative_film_print"
+
+    # 2. Timeline integration: optimal high-key sky bypassed vs hazy fog & dark room & green cast graded
+    # High-key sky with natural clouds gradient [155..238]
+    hk_arr = np.linspace(155, 238, 128, dtype=np.uint8)[None, :, None].repeat(96, axis=0).repeat(3, axis=2)
+    hk_path = tmp_path / "highkey.jpg"
+    Image.fromarray(hk_arr, mode="RGB").save(hk_path, quality=95)
+
+    # Hazy flat marine image [65..128] (high black pedestal p05~0.25, narrow span~0.25)
+    hz_arr = np.linspace(65, 128, 128, dtype=np.uint8)[None, :, None].repeat(96, axis=0).repeat(3, axis=2)
+    hz_path = tmp_path / "haze.jpg"
+    Image.fromarray(hz_arr, mode="RGB").save(hz_path, quality=95)
+
+    # Dark underexposed interior [8..175] with mostly dark area (80% @ 30, 20% @ 175)
+    dk_arr = np.full((96, 128, 3), 30, dtype=np.uint8)
+    dk_arr[:20, :32, :] = 175
+    dk_path = tmp_path / "dark.jpg"
+    Image.fromarray(dk_arr, mode="RGB").save(dk_path, quality=95)
+
+    # Fluorescent green-tinted indoor shot [R=105, G=155, B=110] with highlight stripe
+    gr_arr = np.full((96, 128, 3), [105, 155, 110], dtype=np.uint8)
+    gr_arr[:24, :, :] = [210, 238, 212]
+    gr_arr[72:, :, :] = [28, 52, 30]
+    gr_path = tmp_path / "green.jpg"
+    Image.fromarray(gr_arr, mode="RGB").save(gr_path, quality=95)
+
+    tl = EditTimeline(
+        project_name="Suitability Test",
+        visual_track=[
+            VisualTrackItem(id="clip_hk", type="photo", source=str(hk_path), duration=1.0, timeline_start=0.0, act="Day Sky"),
+            VisualTrackItem(id="clip_hz", type="photo", source=str(hz_path), duration=1.0, timeline_start=1.0, act="Ocean Mist"),
+            VisualTrackItem(id="clip_dk", type="photo", source=str(dk_path), duration=1.0, timeline_start=2.0, act="Night Room"),
+            VisualTrackItem(id="clip_gr", type="photo", source=str(gr_path), duration=1.0, timeline_start=3.0, act="Hallway"),
+        ],
+    )
+    tl.to_yaml(tmp_path / "timeline.yaml")
+
+    bb = PipelineBlackboard(media_dir=tmp_path, project_dir=tmp_path, use_antigravity=False)
+    bb.timeline = tl
+    res = CinemaColorGradingAgent().run(bb)
+
+    assert res["bypassed_natural_count"] >= 1
+    report = ColorGradeReport.from_json_file(tmp_path / "color_grade_plan.json")
+    by_id = {g.clip_id: g for g in report.clip_grades}
+
+    assert by_id["clip_hk"].grading_regime == "preserve_natural" and by_id["clip_hk"].bypass is True
+    assert by_id["clip_hz"].grading_regime == "log_dehaze_restore" and by_id["clip_hz"].black_lift < 0.0
+    assert by_id["clip_dk"].grading_regime == "shadow_recovery" and by_id["clip_dk"].gamma >= 1.05
+    assert by_id["clip_gr"].grading_regime == "wb_tint_balance" and by_id["clip_gr"].wb_green_shift < 0.0
+
+    fx_by_id = {fx.target_clip_id: fx for fx in tl.effects_track if fx.effect_type == "color_grade"}
+    assert "clip_hk" not in fx_by_id
+    assert {"clip_hz", "clip_dk", "clip_gr"}.issubset(set(fx_by_id.keys()))
+
+    flt_haze = _build_color_grade_filter(fx_by_id["clip_hz"], hdr=True)
+    assert "colorlevels=" in flt_haze and "scale=out_color_matrix=" in flt_haze

@@ -1318,7 +1318,10 @@ def cmd_preview_color_grades(args: argparse.Namespace) -> int:
 def cmd_render_color_scopes(args: argparse.Namespace) -> int:
     """Render a 2560x1440 Split-Wipe & RGB Parade waveform scopes sheet for Stage 42 telemetry audit."""
     from video_editing_ai.agents.base import PipelineBlackboard
-    from video_editing_ai.agents.plugins.color_grading_agent import CinemaColorGradingAgent
+    from video_editing_ai.agents.plugins.color_grading_agent import (
+        CinemaColorGradingAgent,
+        pick_representative_scope_entries,
+    )
     from video_editing_ai.models.schema import ColorGradeReport, EditTimeline
     from video_editing_ai.renderer.color_grading import (
         is_synthetic_graphic_clip,
@@ -1343,32 +1346,24 @@ def cmd_render_color_scopes(args: argparse.Namespace) -> int:
     report = ColorGradeReport.from_json_file(plan_path)
     by_id = {g.clip_id: g for g in report.clip_grades}
     all_items = list(tl.visual_track) + list(tl.broll_track)
-    photos: list[dict[str, Any]] = []
-    videos: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     for it in all_items:
         if is_synthetic_graphic_clip(it.source, it.id, getattr(it, "narrative_note", "")):
             continue
         if not Path(it.source).exists():
             continue
-        entry = {
-            "clip_id": it.id,
-            "media_type": it.type,
-            "source": it.source,
-            "start": it.source_in,
-            "duration": it.duration,
-            "grade": by_id.get(it.id),
-        }
-        (photos if it.type == "photo" else videos).append(entry)
+        candidates.append(
+            {
+                "clip_id": it.id,
+                "media_type": it.type,
+                "source": it.source,
+                "start": it.source_in,
+                "duration": it.duration,
+                "grade": by_id.get(it.id),
+            }
+        )
 
-    picked: list[dict[str, Any]] = []
-    for i in range(max(len(videos), len(photos))):
-        if i < len(videos) and len(picked) < 6:
-            picked.append(videos[i])
-        if i < len(photos) and len(picked) < 6:
-            picked.append(photos[i])
-        if len(picked) >= 6:
-            break
-
+    picked = pick_representative_scope_entries(candidates, limit=6)
     if not picked:
         print("Error: No existing camera video/photo files resolved on timeline.", file=sys.stderr)
         return 1

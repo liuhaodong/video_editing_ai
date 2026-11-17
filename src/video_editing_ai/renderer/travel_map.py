@@ -3013,7 +3013,8 @@ def render_travel_map_frame(
     # 5. Crisp Screen-Space Collision-Free Waypoint Labels & FROM / TO Polaroids (never clip HUD!)
     od = ImageDraw.Draw(out_rgba, "RGBA")
     f_pin = _load_font_tier(max(10, int(round(13 * s_out))), tier="mono", bold=True)
-    f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_out))), tier=spec["title_tier"], bold=True)
+    all_lbl_txt = " ".join(w.label for w in norm_wps)
+    f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_out))), tier=spec["title_tier"], bold=True, text=all_lbl_txt)
 
     for k in [idx for idx in range(len(screen_stops)) if idx not in (i0, i1)] + [i0, i1]:
         sx_w, sy_w = screen_stops[k]
@@ -3730,7 +3731,8 @@ def render_google_earth_flyover_frame(
     # Pin index numerals & collision-free stop labels
     od = ImageDraw.Draw(out_rgba, "RGBA")
     f_pin = _load_font_tier(max(10, int(round(13 * s_out))), tier="mono", bold=True)
-    f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_out))), tier=spec["title_tier"], bold=True)
+    all_lbl_txt = " ".join(w.label for w in norm_wps)
+    f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_out))), tier=spec["title_tier"], bold=True, text=all_lbl_txt)
     for k, (sx_w, sy_w) in enumerate(screen_stops):
         if -40 <= sx_w <= width + 40 and -40 <= sy_w <= height + 40:
             num_str = f"{k + 1:02d}"
@@ -3794,7 +3796,7 @@ def render_google_earth_flyover_frame(
             dc = ImageDraw.Draw(card_im, "RGBA")
             dc.rounded_rectangle([0, 0, cw - 1, card_im.height - 1], radius=int(round(12 * s_out)), fill=(*spec["hud_fill"][:3], 238), outline=(*spec["accent"], 220), width=max(2, int(round(2.5 * s_out))))
             card_im.alpha_composite(pim.convert("RGBA"), (pad_c, pad_c))
-            f_card = _load_font_tier(max(11, int(round(15 * s_out))), tier=spec["title_tier"], bold=True)
+            f_card = _load_font_tier(max(11, int(round(15 * s_out))), tier=spec["title_tier"], bold=True, text=active_card_wp.label)
             dc.text((pad_c + 4, pad_c + ch_img + int(round(7 * s_out))), active_card_wp.label[:30], font=f_card, fill=(*spec["hud_title"], 250))
             out_rgba.alpha_composite(card_im, (card_x, height - int(round(height * 0.065)) - card_im.height))
         except Exception:
@@ -3970,9 +3972,13 @@ def render_travel_map_clip(
 
     # Pre-warm tile/font caches on frame 0, then render remaining frames in parallel chunks
     frame0_bytes = _render_frame_bytes(0)
-    map_workers = max(1, min(get_io_worker_count(12), total_frames - 1))
+    map_workers = max(1, min(get_io_worker_count(6), total_frames - 1))
 
     def _encode_all(force_sw: bool) -> tuple[int, bytes]:
+        # Avoid OpenCV internal threadpool oversubscription when ThreadPoolExecutor fans out frames
+        prev_cv_threads = cv2.getNumThreads()
+        if map_workers > 1 and prev_cv_threads != 1:
+            cv2.setNumThreads(1)
         proc = subprocess.Popen(_build_map_cmd(force_sw=force_sw), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.stdin is not None and proc.stderr is not None
         try:
@@ -3982,7 +3988,7 @@ def render_travel_map_clip(
                     for f_i in range(1, total_frames):
                         proc.stdin.write(_render_frame_bytes(f_i))
                 else:
-                    chunk_sz = max(map_workers * 2, 16)
+                    chunk_sz = max(map_workers * 2, 12)
                     with ThreadPoolExecutor(max_workers=map_workers) as pool:
                         for c_start in range(1, total_frames, chunk_sz):
                             c_end = min(total_frames, c_start + chunk_sz)
@@ -3995,6 +4001,9 @@ def render_travel_map_clip(
             except Exception:
                 pass
             raise
+        finally:
+            if map_workers > 1 and prev_cv_threads != 1:
+                cv2.setNumThreads(prev_cv_threads)
         err_b = proc.stderr.read()
         rc_val = proc.wait()
         return rc_val, err_b

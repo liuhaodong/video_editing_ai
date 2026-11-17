@@ -41,6 +41,7 @@ from .plugins.camera_operator_agent import CameraOperatorAgent
 from .plugins.color_grading_agent import (
     CinemaColorGradingAgent,
     apply_color_grade_overrides,
+    classify_clip_grading_suitability,
     recommend_color_grading,
 )
 from .plugins.colorist_agent import ColoristAgent, HDRColoristAgent, classify_clip_color_pipeline
@@ -70,6 +71,8 @@ __all__ = [
     "DITIngestAgent",
     "DialogueEditorAgent",
     "HDRColoristAgent",
+    "apply_color_grade_overrides",
+    "classify_clip_grading_suitability",
     "recommend_color_grading",
     "LeadAssemblyEditorAgent",
     "MontageEditorAgent",

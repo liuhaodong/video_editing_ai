@@ -110,14 +110,21 @@ def _build_color_grade_filter(fx: EffectTrackItem, hdr: Optional[bool] = None) -
     gh = _c(wb_g * 0.55 + float(gain[1]) * lgg_scale)
     bh = _c(wb_b * 0.55 + float(gain[2]) * lgg_scale)
 
+    black_lift = float(params.get("black_lift", 0.0))
+    use_colorlevels = bool(black_lift < -0.005 and has_ffmpeg_filter("colorlevels"))
+    if use_colorlevels:
+        abs_ped = min(0.22, abs(black_lift))
+        # Explicit rgb48le prevents FFmpeg 7.x gbrp10le colorlevels 10-bit clamping bug while keeping >10-bit precision
+        parts.append(f"format=rgb48le,colorlevels=rimin={abs_ped:.3f}:gimin={abs_ped:.3f}:bimin={abs_ped:.3f}")
+
     parts.append(
         f"colorbalance=rs={rs:.3f}:gs={gs:.3f}:bs={bs:.3f}:"
         f"rm={rm:.3f}:gm={gm:.3f}:bm={bm:.3f}:"
         f"rh={rh:.3f}:gh={gh:.3f}:bh={bh:.3f}"
     )
 
-    black_lift = float(params.get("black_lift", 0.0))
-    b_adj = max(-0.15, min(0.15, exp_ev * 0.14 + black_lift * 0.45))
+    toe_bright = max(0.0, black_lift) * 0.35 if use_colorlevels else black_lift * 0.45
+    b_adj = max(-0.15, min(0.15, exp_ev * 0.14 + toe_bright))
     contrast = max(0.75, min(1.40, float(params.get("contrast", 1.04))))
     sat = max(0.50, min(1.60, float(params.get("saturation", 1.04))))
     base_gamma = max(0.70, min(1.40, float(params.get("gamma", 1.00))))
@@ -133,7 +140,9 @@ def _build_color_grade_filter(fx: EffectTrackItem, hdr: Optional[bool] = None) -
                 intensity=lut_int,
             )
         parts.append(f"lut3d=file='{_escape_ffmpeg_filter_path(cube_p)}':interp=tetrahedral")
-        # lut3d emits planar RGB (gbrp); restore explicit YUV matrix before downstream zscale/encoder
+
+    if use_lut or use_colorlevels:
+        # lut3d/colorlevels may emit planar RGB (gbrp); restore explicit YUV matrix before zscale/encoder
         src_trc = str(params.get("src_trc") or "").lower()
         src_space = str(params.get("src_space") or "").lower()
         hdr_mode = bool(params.get("hdr", True)) if hdr is None else bool(hdr)
