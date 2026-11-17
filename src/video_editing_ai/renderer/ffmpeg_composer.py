@@ -727,9 +727,15 @@ def _render_video_segment(
         os.replace(tmp_out, output_mp4)
         return output_mp4
     finally:
-        tmp_out.unlink(missing_ok=True)
+        try:
+            tmp_out.unlink(missing_ok=True)
+        except OSError:
+            pass
         if card_png is not None:
-            card_png.unlink(missing_ok=True)
+            try:
+                card_png.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _build_ducking_volume_expr(
