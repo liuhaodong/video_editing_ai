@@ -32,7 +32,8 @@ from ..hardware import (
     probe_hw_encoder as _hw_probe_hw_encoder,
     supports_videotoolbox_qscale as _hw_supports_videotoolbox_qscale,
 )
-from ..models.schema import KenBurnsConfig, TransitionConfig
+from ..models.schema import EffectTrackItem, KenBurnsConfig, TransitionConfig
+from .color_grading import apply_color_grade_to_pil_image
 from .depth_parallax import (
     build_mpi_depth_layers,
     build_rack_focus_assets,
@@ -446,15 +447,26 @@ def _composite_frosted_card_on_rgb(
         frame_rgb.paste(frosted_rgb, (dst_x, dst_y), scaled_mask)
 
 
+def _load_graded_photo_rgb(
+    photo_path: str | Path,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+) -> Image.Image:
+    """Open an EXIF-oriented RGB photograph and apply Stage 42 DI color grade before borders/mattes."""
+    img = ImageOps.exif_transpose(Image.open(photo_path)).convert("RGB")
+    if color_grade_fx is not None:
+        return apply_color_grade_to_pil_image(img, color_grade_fx)
+    return img
+
+
 def build_gallery_frame_image(
     src_path: str | Path,
     width: int = 1920,
     height: int = 1080,
     border_px: Optional[int] = None,
+    raw_img: Optional[Image.Image] = None,
 ) -> Image.Image:
     """Create an uncropped double-matte gallery frame over a Gaussian-blurred ambient background."""
-    img = Image.open(src_path)
-    img = ImageOps.exif_transpose(img).convert("RGB")
+    img = raw_img.convert("RGB") if raw_img is not None else _load_graded_photo_rgb(src_path)
 
     scale_factor = width / 1920.0
     blur_radius = max(18, int(round(28 * scale_factor)))
@@ -858,6 +870,7 @@ def _build_triptych_panels(
     height: int,
     has_card: bool,
     scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
 ) -> list[Image.Image]:
     """Build 3 coordinated vertical gallery panels for 'triptych_cinematic'."""
     panel_w = int(width * 0.265)
@@ -867,9 +880,9 @@ def _build_triptych_panels(
     sec_img: Optional[Image.Image] = None
     tert_img: Optional[Image.Image] = None
     if kb.secondary_source and Path(kb.secondary_source).exists():
-        sec_img = ImageOps.exif_transpose(Image.open(kb.secondary_source)).convert("RGB")
+        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
     if kb.tertiary_source and Path(kb.tertiary_source).exists():
-        tert_img = ImageOps.exif_transpose(Image.open(kb.tertiary_source)).convert("RGB")
+        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
 
     if sec_img is not None and tert_img is not None:
         imgs = [
@@ -1080,6 +1093,7 @@ def _build_contact_sheet_zoom_assets(
     height: int,
     has_card: bool,
     scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
 ) -> tuple[Image.Image, float, float]:
     """
     Build a high-resolution Magnum Photos-inspired 3x2 Darkroom Contact Sheet canvas
@@ -1109,9 +1123,9 @@ def _build_contact_sheet_zoom_assets(
     sec_img: Optional[Image.Image] = None
     tert_img: Optional[Image.Image] = None
     if kb.secondary_source and Path(kb.secondary_source).exists():
-        sec_img = ImageOps.exif_transpose(Image.open(kb.secondary_source)).convert("RGB")
+        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
     if kb.tertiary_source and Path(kb.tertiary_source).exists():
-        tert_img = ImageOps.exif_transpose(Image.open(kb.tertiary_source)).convert("RGB")
+        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
 
     # Populate the 6 cells; Hero frame sits at row=0, col=1 (idx=1 -> '02A SELECT') so zoom clearance fits above captions
     focal = kb.start_center
@@ -1434,6 +1448,7 @@ def _build_criterion_atelier_assets(
     width: int,
     height: int,
     scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Build Criterion / Kinfolk 3-Viewport Asymmetric Exhibition Bento Grid:
@@ -1458,9 +1473,9 @@ def _build_criterion_atelier_assets(
     sec_img: Optional[Image.Image] = None
     tert_img: Optional[Image.Image] = None
     if kb.secondary_source and Path(kb.secondary_source).exists():
-        sec_img = ImageOps.exif_transpose(Image.open(kb.secondary_source)).convert("RGB")
+        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
     if kb.tertiary_source and Path(kb.tertiary_source).exists():
-        tert_img = ImageOps.exif_transpose(Image.open(kb.tertiary_source)).convert("RGB")
+        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
 
     rt_src = sec_img if sec_img is not None else raw_primary
     rt_center = (0.50, 0.50) if sec_img is not None else (0.52, 0.28)
@@ -1811,10 +1826,10 @@ def _prepare_photo_scene_context(
     width: int,
     height: int,
     kb: KenBurnsConfig,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Pre-build all multi-plane assets for any of the 10 photo presentation modes + 4 atmospheric finishers."""
-    raw_primary = Image.open(photo_path)
-    raw_primary = ImageOps.exif_transpose(raw_primary).convert("RGB")
+    raw_primary = _load_graded_photo_rgb(photo_path, color_grade_fx)
     scale_factor = width / 1920.0
     s_zoom, e_zoom, (sx, sy), (ex, ey) = _resolve_kb_endpoints(kb)
     resample_mode = Image.Resampling.BILINEAR if width >= 3840 else Image.Resampling.BICUBIC
@@ -1880,7 +1895,7 @@ def _prepare_photo_scene_context(
     if mode == "diptych_frame":
         sec_path = kb.secondary_source
         if sec_path and Path(sec_path).exists():
-            raw_sec = ImageOps.exif_transpose(Image.open(sec_path)).convert("RGB")
+            raw_sec = _load_graded_photo_rgb(sec_path, color_grade_fx)
         else:
             raw_sec = ImageOps.fit(
                 raw_primary,
@@ -1901,6 +1916,7 @@ def _prepare_photo_scene_context(
             height=height,
             has_card=has_card,
             scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
         )
 
     elif mode == "polaroid_scrapbook":
@@ -1911,7 +1927,7 @@ def _prepare_photo_scene_context(
             raw_primary, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=-3.2, stamp_text=stamp_1
         )
         if kb.secondary_source and Path(kb.secondary_source).exists():
-            raw_sec = ImageOps.exif_transpose(Image.open(kb.secondary_source)).convert("RGB")
+            raw_sec = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
             ctx["polaroid_2"] = _build_polaroid_card(
                 raw_sec, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=3.6, stamp_text=""
             )
@@ -2018,6 +2034,7 @@ def _prepare_photo_scene_context(
             height=height,
             has_card=has_card,
             scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
         )
         ctx["contact_sheet"] = sheet_rgb
         ctx["contact_hero_xy"] = (hero_cx, hero_cy)
@@ -2071,6 +2088,7 @@ def _prepare_photo_scene_context(
             width=width,
             height=height,
             scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
         )
 
     else:
@@ -2079,7 +2097,7 @@ def _prepare_photo_scene_context(
         work_h = int(round(height * oversample))
         if mode == "gallery_frame":
             ctx["base_static_img"] = build_gallery_frame_image(
-                photo_path, width=work_w, height=work_h, border_px=kb.border_px
+                photo_path, width=work_w, height=work_h, border_px=kb.border_px, raw_img=raw_primary
             )
         else:
             ctx["base_static_img"] = ImageOps.fit(raw_primary, (work_w, work_h), method=Image.Resampling.LANCZOS)
@@ -2813,6 +2831,7 @@ def render_photo_clip(
     transition_out: Optional[TransitionConfig] = None,
     segment_broll: Optional[list[tuple[Path, float, float]]] = None,
     segment_titles: Optional[list[tuple[Path, float, float, float, float] | dict[str, Any]]] = None,
+    attached_effects: Optional[list[EffectTrackItem]] = None,
 ) -> Path:
     """Render a photo into a 4K HDR MP4 video clip using any of the 16 Premium Photo Modes + 8 Atmospheric Finishers."""
     kb = ken_burns or KenBurnsConfig()
@@ -2820,8 +2839,15 @@ def render_photo_clip(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = out_path.with_name(f".{out_path.stem}.tmp_{os.getpid()}_{threading.get_ident()}.mp4")
 
+    color_grade_fx = next((fx for fx in (attached_effects or []) if fx.effect_type == "color_grade"), None)
     total_frames = max(1, int(round(duration * fps)))
-    ctx = _prepare_photo_scene_context(photo_path=photo_path, width=width, height=height, kb=kb)
+    ctx = _prepare_photo_scene_context(
+        photo_path=photo_path,
+        width=width,
+        height=height,
+        kb=kb,
+        color_grade_fx=color_grade_fx,
+    )
 
     # Prepare FFmpeg encoder & HDR color space pipeline
     vf_filters: list[str] = ["setsar=1:1"]

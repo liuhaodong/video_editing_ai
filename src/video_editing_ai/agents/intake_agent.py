@@ -14,6 +14,7 @@ from ..analyzer.media_probe import (
     iter_media_files_recursive,
 )
 from ..models.schema import (
+    VALID_FILM_STOCK_LOOKS,
     VALID_PHOTO_MODES,
     VALID_PHOTO_OVERLAY_FX,
     VALID_SUBTITLE_STYLES,
@@ -661,6 +662,40 @@ def _recommend_title_theme(
     )
 
 
+def _recommend_color_look(
+    info: dict[str, Any],
+    narrative_style: str = "family_keepsake_4act",
+    story_arc_mode: str = "chronological_cinema",
+    user_prompt: str = "",
+) -> tuple[str, str]:
+    """Recommend one of the curated Stage 42 DI film-stock looks from subject mood, camera mix, and arc."""
+    prompt_low = (user_prompt or "").lower()
+    if any(k in prompt_low for k in ("fuji", "eterna", "pastel")):
+        return "fuji_eterna_soft", "Selected Fuji Eterna 250D for velvety shadows and flattering pastel skin tones."
+    if any(k in prompt_low for k in ("coastal", "ocean", "beach", "ektachrome", "marine", "whale")):
+        return "pacific_coastal_chrome", "Selected Ektachrome 100D for vibrant ocean blues and crisp coastal daylight."
+    if any(k in prompt_low for k in ("museum", "gallery", "exhibition", "fine art", "chiaroscuro")):
+        return "museum_chiaroscuro", "Selected Gallery Chiaroscuro for sculpted exhibition lighting and neutral indoor highlights."
+    if any(k in prompt_low for k in ("sunset", "golden hour", "desert", "warm glow")):
+        return "golden_hour_warmth", "Selected Vision3 Golden Hour for warm amber highlight bloom across late-day scenery."
+    if any(k in prompt_low for k in ("twilight", "dusk", "night", "neon", "teal")):
+        return "twilight_teal_amber", "Selected Dusk Teal & Amber for atmospheric night shadows with protected skin hues."
+    if any(k in prompt_low for k in ("a24", "matte", "indie")):
+        return "a24_indie_matte", "Selected Indie A24 Matte for lifted shadow toes and restrained editorial palettes."
+    if any(k in prompt_low for k in ("neutral documentary", "arri", "ungraded", "clinical")):
+        return "arri_natural_cinema", "Selected ARRI Natural Reveal for true-to-life 10-bit editorial dynamic range."
+
+    p_count = int(info.get("photo_count", 0) or 0)
+    if story_arc_mode == "thematic_essay":
+        return "museum_chiaroscuro", "Thematic essay pacing pairs naturally with Gallery Chiaroscuro depth and neutral whites."
+    if narrative_style == "family_keepsake_4act" or p_count >= 15:
+        return (
+            "archival_kodak_2383",
+            "Family travel documentary mixes varied indoor/outdoor lighting; Kodak 2383 Print gives cohesive warmth and rich shadows while preserving natural skin.",
+        )
+    return "arri_natural_cinema", "Clean documentary footage benefits from ARRI Natural Reveal balanced roll-off."
+
+
 def _resolve_title_typography_answers(
     info: dict[str, Any],
     narrative_style: str,
@@ -949,6 +984,9 @@ def refine_intake_interactively(
     title_theme, burn_in_subtitles, subtitle_style, rec_theme, theme_rationale, typo_notes = (
         _resolve_title_typography_answers(info, narrative_style_code, story_arc_mode, answers, raw_msg)
     )
+    rec_color_look, color_look_rationale = _recommend_color_look(info, narrative_style_code, story_arc_mode, raw_msg)
+    raw_color_choice = _extract_option_code(str(answers.get("color_grade_look", "")))
+    chosen_color_look = raw_color_choice if raw_color_choice in VALID_FILM_STOCK_LOOKS else rec_color_look
     refinements_applied.extend(typo_notes)
     answers["title_theme"] = title_theme
     answers["burn_in_subtitles"] = "true" if burn_in_subtitles else "false"
@@ -963,6 +1001,8 @@ def refine_intake_interactively(
         "recommended_title_theme": rec_theme,
         "title_theme_rationale": theme_rationale,
         "recommended_subtitle_style": subtitle_style,
+        "recommended_color_look": rec_color_look,
+        "color_look_rationale": color_look_rationale,
         "question_recommendations": {
             q.id: {
                 "is_multi_select": q.is_multi_select,
@@ -992,6 +1032,7 @@ def refine_intake_interactively(
         title_theme=title_theme,  # type: ignore[arg-type]
         travel_map_mode=tm_mode,  # type: ignore[arg-type]
         travel_map_style=tm_style,  # type: ignore[arg-type]
+        color_grade_look=chosen_color_look,  # type: ignore[arg-type]
         burn_in_subtitles=burn_in_subtitles,
         subtitle_style=subtitle_style,  # type: ignore[arg-type]
         max_broll_duration_sec=3.5 if chosen_dur <= 75 else 4.5,

@@ -17,6 +17,7 @@ from ...models.schema import (
     EffectTrackItem,
     VisualTrackItem,
 )
+from ...renderer.color_grading import is_synthetic_graphic_clip, measure_media_colorimetry
 from ...renderer.ken_burns import build_hdr_color_filters, has_ffmpeg_filter
 from ..base import BaseEditingAgent, PipelineBlackboard, register_agent
 
@@ -169,6 +170,8 @@ class HDRColoristAgent(BaseEditingAgent):
         source_path: str,
         blackboard: PipelineBlackboard,
         video_stats_cache: Optional[dict[str, dict[str, float]]] = None,
+        duration: float = 0.0,
+        start_offset: float = 0.0,
     ) -> dict[str, float]:
         if blackboard.catalog is not None:
             for p in blackboard.catalog.photos:
@@ -187,50 +190,25 @@ class HDRColoristAgent(BaseEditingAgent):
             except Exception:
                 pass
         elif sp.exists() and sp.suffix.lower() in {".mp4", ".mov", ".m4v", ".mkv"}:
-            try:
-                import subprocess
-                import numpy as np
-
-                proc = subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-v",
-                        "error",
-                        "-ss",
-                        "0.5",
-                        "-i",
-                        str(sp),
-                        "-vf",
-                        "scale=160:-2",
-                        "-frames:v",
-                        "1",
-                        "-f",
-                        "rawvideo",
-                        "-pix_fmt",
-                        "rgb24",
-                        "pipe:1",
-                    ],
-                    capture_output=True,
-                    check=False,
-                )
-                if proc.returncode == 0 and proc.stdout:
-                    arr = np.frombuffer(proc.stdout, dtype=np.uint8).reshape(-1, 3).astype(np.float32)
-                    luma = 0.299 * arr[:, 0] + 0.587 * arr[:, 1] + 0.114 * arr[:, 2]
-                    p05, p50, p95 = np.percentile(luma, [5, 50, 95])
-                    stats = {
-                        "mean_r": round(float(arr[:, 0].mean()), 2),
-                        "mean_g": round(float(arr[:, 1].mean()), 2),
-                        "mean_b": round(float(arr[:, 2].mean()), 2),
-                        "p05_luma": round(float(p05), 2),
-                        "p50_luma": round(float(p50), 2),
-                        "p95_luma": round(float(p95), 2),
-                        "est_kelvin": 5500.0,
-                    }
-                    if video_stats_cache is not None:
-                        video_stats_cache[source_path] = stats
-                    return stats
-            except Exception:
-                pass
+            tel = measure_media_colorimetry(
+                sp,
+                media_type="video",
+                duration=duration,
+                start_offset=start_offset,
+            )
+            mean_rgb = tel.get("mean_rgb", (0.5, 0.5, 0.5))
+            stats = {
+                "mean_r": round(float(mean_rgb[0]) * 255.0, 2),
+                "mean_g": round(float(mean_rgb[1]) * 255.0, 2),
+                "mean_b": round(float(mean_rgb[2]) * 255.0, 2),
+                "p05_luma": round(float(tel.get("p05_luma", 0.08)) * 255.0, 2),
+                "p50_luma": round(float(tel.get("p50_luma", 0.45)) * 255.0, 2),
+                "p95_luma": round(float(tel.get("p95_luma", 0.90)) * 255.0, 2),
+                "est_kelvin": float(tel.get("est_kelvin", 5500.0)),
+            }
+            if video_stats_cache is not None:
+                video_stats_cache[source_path] = stats
+            return stats
         return {
             "mean_r": 128.0,
             "mean_g": 128.0,
@@ -307,10 +285,18 @@ class HDRColoristAgent(BaseEditingAgent):
             )
             color_transforms.append(ct)
 
-            if item.track_lane != 1:
+            if item.track_lane != 1 or is_synthetic_graphic_clip(
+                item.source, item.id, getattr(item, "narrative_note", "")
+            ):
                 continue
 
-            stats = self._measure_clip_stats(item.source, blackboard, video_stats_cache=video_stats_cache)
+            stats = self._measure_clip_stats(
+                item.source,
+                blackboard,
+                video_stats_cache=video_stats_cache,
+                duration=item.duration,
+                start_offset=item.source_in,
+            )
             kelvin = float(stats.get("est_kelvin", 5500.0))
             p50 = float(stats.get("p50_luma", 128.0))
             p95 = float(stats.get("p95_luma", 200.0))

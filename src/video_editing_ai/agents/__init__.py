@@ -38,6 +38,11 @@ from .picture_editors import (
     apply_timeline_intelligence_overrides,
 )
 from .plugins.camera_operator_agent import CameraOperatorAgent
+from .plugins.color_grading_agent import (
+    CinemaColorGradingAgent,
+    apply_color_grade_overrides,
+    recommend_color_grading,
+)
 from .plugins.colorist_agent import ColoristAgent, HDRColoristAgent, classify_clip_color_pipeline
 from .plugins.motion_graphics_agent import MotionGraphicsAgent, MotionGraphicsTitleAgent
 from .plugins.narrator_agent import NarratorVoiceoverAgent
@@ -58,12 +63,14 @@ __all__ = [
     "BaseEditingAgent",
     "CameraOperatorAgent",
     "CastContinuityAgent",
+    "CinemaColorGradingAgent",
     "ClientIntakeAgent",
     "ColoristAgent",
     "CullerAgent",
     "DITIngestAgent",
     "DialogueEditorAgent",
     "HDRColoristAgent",
+    "recommend_color_grading",
     "LeadAssemblyEditorAgent",
     "MontageEditorAgent",
     "MotionGraphicsAgent",

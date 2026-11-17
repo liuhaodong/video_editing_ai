@@ -30,6 +30,7 @@ from .base import AgentRegistry, BaseEditingAgent, PipelineBlackboard
 from .director_agent import ProductionDirectorAgent
 from .plugins import (
     camera_operator_agent as _camera_op,  # noqa: F401
+    color_grading_agent as _color_grader,  # noqa: F401
     colorist_agent as _colorist,  # noqa: F401
     motion_graphics_agent as _motion_gfx,  # noqa: F401
     narrator_agent as _narrator,  # noqa: F401

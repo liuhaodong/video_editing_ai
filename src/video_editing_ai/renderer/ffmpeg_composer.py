@@ -26,6 +26,7 @@ from ..hardware import (
     nvenc_encode_guard,
 )
 from ..models.schema import EditTimeline, EffectTrackItem, TitleOverlayItem, VisualTrackItem
+from .color_grading import CINEMA_FILM_STOCK_SPECS, apply_color_grade_to_pil_image, write_film_stock_cube_lut
 from .ken_burns import (
     build_hdr_color_filters,
     build_segment_overlay_filtergraph,
@@ -60,26 +61,87 @@ def _unlink_on_exit(paths: list[Path]) -> Iterator[None]:
                 pass
 
 
-def _build_color_grade_filter(fx: EffectTrackItem) -> str:
-    """Build DI color_grade filter chain, adding 10-bit HLG highlight roll-off when source highlights run hot."""
+def _build_color_grade_filter(fx: EffectTrackItem, hdr: Optional[bool] = None) -> str:
+    """Build Stage 42 DI color_grade filter chain (3-way LGG balance, eq, 3D LUT + safe YUV matrix, HLG knee)."""
+    params = fx.parameters or {}
+    look_name = str(params.get("chapter_look") or params.get("look") or "")
+    exp_ev = float(params.get("exposure_ev", 0.0))
+    if params.get("bypass") or (look_name == "neutral_reference" and abs(exp_ev) < 1e-4):
+        return "null"
+
     parts: list[str] = []
-    if fx.parameters.get("hlg_rolloff"):
+    if params.get("hlg_rolloff"):
         # Smooth 10-bit limited-range YUV shoulder knee (compresses blown Pixel HLG highlights to ~203 nits)
         parts.append(
             "format=p010le,"
             "lutyuv=y='clip(64+(val-64)*0.78-if(gt(val,520),0.26*(val-520),0),64,760)':"
             "u='512+(val-512)*0.94':v='512+(val-512)*0.94'"
         )
-    parts.append(
-        f"colorbalance=rs={float(fx.parameters.get('rs', 0.0)):.3f}:"
-        f"gs={float(fx.parameters.get('gs', 0.0)):.3f}:"
-        f"bs={float(fx.parameters.get('bs', 0.0)):.3f}"
+
+    lut_cube_raw = str(params.get("lut_cube_path") or "").strip()
+    lut_int = float(params.get("lut_intensity", 1.0))
+    use_lut = bool(
+        lut_cube_raw
+        and Path(lut_cube_raw).exists()
+        and lut_int > 0.02
+        and look_name != "neutral_reference"
+        and has_ffmpeg_filter("lut3d")
     )
+
+    wb_r = float(params.get("wb_red_shift", params.get("rs", 0.0)))
+    wb_g = float(params.get("wb_green_shift", params.get("gs", 0.0)))
+    wb_b = float(params.get("wb_blue_shift", params.get("bs", 0.0)))
+    lift = params.get("lift_rgb") or (0.0, 0.0, 0.0)
+    mid = params.get("gamma_rgb") or (0.0, 0.0, 0.0)
+    gain = params.get("gain_rgb") or (0.0, 0.0, 0.0)
+    # Attenuate creative LGG when the 3D .cube LUT already embodies the stock split-tone curve
+    lgg_scale = 0.20 if use_lut else 0.70
+
+    def _c(v: float) -> float:
+        return max(-0.35, min(0.35, float(v)))
+
+    rs = _c(wb_r * 0.45 + float(lift[0]) * lgg_scale)
+    gs = _c(wb_g * 0.45 + float(lift[1]) * lgg_scale)
+    bs = _c(wb_b * 0.45 + float(lift[2]) * lgg_scale)
+    rm = _c(wb_r * 0.72 + float(mid[0]) * lgg_scale)
+    gm = _c(wb_g * 0.72 + float(mid[1]) * lgg_scale)
+    bm = _c(wb_b * 0.72 + float(mid[2]) * lgg_scale)
+    rh = _c(wb_r * 0.55 + float(gain[0]) * lgg_scale)
+    gh = _c(wb_g * 0.55 + float(gain[1]) * lgg_scale)
+    bh = _c(wb_b * 0.55 + float(gain[2]) * lgg_scale)
+
     parts.append(
-        f"eq=contrast={float(fx.parameters.get('contrast', 1.04)):.2f}:"
-        f"saturation={float(fx.parameters.get('saturation', 1.04)):.2f}:"
-        f"gamma={float(fx.parameters.get('gamma', 1.00)):.2f}"
+        f"colorbalance=rs={rs:.3f}:gs={gs:.3f}:bs={bs:.3f}:"
+        f"rm={rm:.3f}:gm={gm:.3f}:bm={bm:.3f}:"
+        f"rh={rh:.3f}:gh={gh:.3f}:bh={bh:.3f}"
     )
+
+    black_lift = float(params.get("black_lift", 0.0))
+    b_adj = max(-0.15, min(0.15, exp_ev * 0.14 + black_lift * 0.45))
+    contrast = max(0.75, min(1.40, float(params.get("contrast", 1.04))))
+    sat = max(0.50, min(1.60, float(params.get("saturation", 1.04))))
+    base_gamma = max(0.70, min(1.40, float(params.get("gamma", 1.00))))
+    eff_gamma = max(0.70, min(1.45, base_gamma * (2.0 ** max(-0.4, min(0.4, exp_ev * 0.32)))))
+    parts.append(f"eq=brightness={b_adj:.3f}:contrast={contrast:.2f}:saturation={sat:.2f}:gamma={eff_gamma:.2f}")
+
+    if use_lut:
+        cube_p = Path(lut_cube_raw)
+        if lut_int < 0.98 and look_name in CINEMA_FILM_STOCK_SPECS:
+            cube_p = write_film_stock_cube_lut(
+                look_name,
+                cube_p.with_name(f"{look_name}_i{int(round(lut_int * 100))}.cube"),
+                intensity=lut_int,
+            )
+        parts.append(f"lut3d=file='{_escape_ffmpeg_filter_path(cube_p)}':interp=tetrahedral")
+        # lut3d emits planar RGB (gbrp); restore explicit YUV matrix before downstream zscale/encoder
+        src_trc = str(params.get("src_trc") or "").lower()
+        src_space = str(params.get("src_space") or "").lower()
+        hdr_mode = bool(params.get("hdr", True)) if hdr is None else bool(hdr)
+        if src_trc == "arib-std-b67" or src_space.startswith("bt2020"):
+            parts.append("scale=out_color_matrix=bt2020:out_range=tv,format=p010le")
+        else:
+            parts.append(f"scale=out_color_matrix=bt709:out_range=tv,format={'yuv444p10le' if hdr_mode else 'yuv420p'}")
+
     return ",".join(parts)
 
 
@@ -420,6 +482,9 @@ def _render_video_segment(
 
                 base_ov = Image.open(card_png).convert("RGBA")
                 p_img = ImageOps.exif_transpose(Image.open(item.paired_visual_source)).convert("RGB")
+                color_fx = next((fx for fx in (attached_effects or []) if fx.effect_type == "color_grade"), None)
+                if color_fx is not None:
+                    p_img = apply_color_grade_to_pil_image(p_img, color_fx)
                 p_max_h = int(height * (0.68 if has_bottom_seg_title else (0.74 if has_doc_card else 0.80)))
                 p_card = _build_double_matte_card(
                     p_img,
@@ -460,9 +525,22 @@ def _render_video_segment(
     if has_ffmpeg_filter("sidedata"):
         post_filters.append("sidedata=mode=delete")
     for fx in attached_effects or []:
-        builder = EFFECT_FILTER_BUILDERS.get(fx.effect_type)
-        if builder is not None:
-            post_filters.append(builder(fx))
+        if fx.effect_type == "color_grade":
+            fx_merged = fx.model_copy(
+                update={
+                    "parameters": {
+                        **dict(fx.parameters or {}),
+                        "src_trc": (fx.parameters or {}).get("src_trc") or src_trc,
+                        "src_space": (fx.parameters or {}).get("src_space") or src_space,
+                        "hdr": hdr,
+                    }
+                }
+            )
+            post_filters.append(_build_color_grade_filter(fx_merged, hdr=hdr))
+        else:
+            builder = EFFECT_FILTER_BUILDERS.get(fx.effect_type)
+            if builder is not None:
+                post_filters.append(builder(fx))
 
     if item.transition_in.type not in ("none", "cut") and item.transition_in.duration > 0:
         if item.transition_in.type == "dip_to_white":
@@ -912,13 +990,15 @@ def render_timeline(
         #     overlays bake directly into V1 segments and Step 4 final mux uses -c:v copy.
         active_broll = [b for b in timeline.broll_track if b.timeline_start < total_dur]
         broll_files_all: list[Path] = [Path()] * len(active_broll)
-        broll_tasks: list[tuple[int, VisualTrackItem, Path]] = []
+        broll_tasks: list[tuple[int, VisualTrackItem, Path, list[EffectTrackItem]]] = []
         for b_idx, b_item in enumerate(active_broll):
+            b_fxs = effects_by_clip.get(b_item.id, [])
             sig_payload = json.dumps(
                 {
-                    "v": 5,
+                    "v": 6,
                     "mux_norm": "tv_norot_v2",
                     "b_item": b_item.model_dump(mode="json"),
+                    "fx": [f.model_dump(mode="json") for f in b_fxs],
                     "w": width,
                     "h": height,
                     "fps": fps,
@@ -930,11 +1010,11 @@ def render_timeline(
             b_mp4 = seg_dir / f"broll_{b_idx + 1:03d}_{b_item.id}_{sig_hash}.mp4"
             broll_files_all[b_idx] = b_mp4
             if not b_mp4.exists() or b_mp4.stat().st_size < 1024:
-                broll_tasks.append((b_idx, b_item, b_mp4))
+                broll_tasks.append((b_idx, b_item, b_mp4, b_fxs))
 
         if broll_tasks:
-            def _render_broll_one(bt: tuple[int, VisualTrackItem, Path]) -> Path:
-                _, b_item, b_mp4 = bt
+            def _render_broll_one(bt: tuple[int, VisualTrackItem, Path, list[EffectTrackItem]]) -> Path:
+                _, b_item, b_mp4, b_fxs = bt
                 if b_item.type == "photo":
                     return render_photo_clip(
                         photo_path=b_item.source,
@@ -947,6 +1027,7 @@ def render_timeline(
                         ken_burns=b_item.ken_burns,
                         transition_in=b_item.transition_in,
                         transition_out=b_item.transition_out,
+                        attached_effects=b_fxs,
                     )
                 return _render_video_segment(
                     item=b_item,
@@ -955,6 +1036,7 @@ def render_timeline(
                     height=height,
                     fps=fps,
                     hdr=hdr,
+                    attached_effects=b_fxs,
                 )
 
             b_workers = max(1, min(render_workers_cap, len(broll_tasks)))
@@ -1187,6 +1269,7 @@ def render_timeline(
                     transition_out=t_item.transition_out,
                     segment_broll=t_broll or None,
                     segment_titles=t_titles or None,
+                    attached_effects=t_fxs,
                 )
             else:
                 _render_video_segment(

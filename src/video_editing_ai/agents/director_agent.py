@@ -703,6 +703,33 @@ class ProductionDirectorAgent(BaseEditingAgent):
             )
             return review, False
 
+        if rid in ("color_grader", "di_colorist"):
+            col = blackboard.custom_artifacts.get("color_grade_plan.json") or {}
+            matched_cnt = int(col.get("shots_matched_count", 0))
+            look_str = str(col.get("primary_film_stock_look", "archival_kodak_2383"))
+            strategy = str(col.get("grading_strategy", "chapter_adaptive"))
+            lut_cnt = len(col.get("generated_luts") or {})
+            sp_before = float(col.get("kelvin_spread_before", 0.0))
+            sp_after = float(col.get("kelvin_spread_after", 0.0))
+            review = DirectorStageReview(
+                stage_order=agent.stage_order,
+                reviewed_agent_role=rid,
+                status="approved",
+                quality_score=9.7,
+                critique=(
+                    f"Cinema DI Color Grader matched {matched_cnt} shots ({strategy}, primary stock='{look_str}', "
+                    f"{lut_cnt} 3D LUTs; Kelvin spread {sp_before:.0f}K -> {sp_after:.0f}K) with gallery matte & skin protection."
+                ),
+            )
+            self._record_thought(
+                blackboard,
+                agent,
+                review,
+                observation=f"Stage 42 ColorGradeReport graded {matched_cnt} shots across V1/V2 using '{look_str}' and 33x33x33 .cube LUTs.",
+                thinking="Three-way Lift/Gamma/Gain balancing unifies mixed camera sensors while protecting skin tones and neutral white gallery borders.",
+            )
+            return review, False
+
         if rid in ("sound_mixer", "sound_designer"):
             am = blackboard.audio_mix_manifest
             sd = blackboard.custom_artifacts.get("sound_design_plan.json") or {}

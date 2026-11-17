@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Antigravity Skill Helper CLI for the 21-Agent AI Photo & Video Editing Studio.
+"""Antigravity Skill Helper CLI for the 22-Agent AI Photo & Video Editing Studio.
 
 Provides token-efficient, file-backed subcommands for every stage of the editing
 workflow:
@@ -10,7 +10,11 @@ workflow:
   - render-contact-sheets : Mechanically render numbered photo & video contact sheet JPEGs for AI Agent inspection
   - apply-vision-curation : Persist AI Agent's creative select/reject, diptych & plaque decisions into contracts
   - apply-story-plan      : Persist AI Agent's Cold-Open Teaser Hook & chapter plan overrides into paper_edit.json
-  - edit-cut              : Execute ripple-aware surgical timeline revisions (swap, trim, drop, move, update-plaque, set-cold-open, audio-mix)
+  - edit-cut              : Execute ripple-aware surgical timeline revisions (swap, trim, drop, move, update-plaque, set-cold-open, audio-mix, set-color-grade)
+  - preview-color-grades  : Render 2560x1440 4x2 lookbook sheet across all 8 curated film stocks
+  - recommend-color-grade : Analyze project photometry & lookbook sheets via AI VLM/ranker and recommend film stock + chapter looks
+  - render-color-scopes   : Render 2560x1440 Split-Wipe & RGB Parade waveform scopes sheet
+  - apply-color-grade     : Apply Stage 42 DI film stock look or per-clip balance overrides to timeline.yaml
   - render-segment        : Render a fast 720p or 4K HLG HDR preview of any [start_sec, end_sec] timeline window
   - director-audit        : Run or inspect the Stage 60 Executive Movie Production Director screening
   - render-video          : Render timeline.yaml to 4K 10-bit HLG HDR MP4 and extract verification keyframes
@@ -83,12 +87,14 @@ from video_editing_ai.agents import (  # noqa: E402
     compute_director_duration_recommendation,
     generate_intake_questions,
     inspect_media_library,
+    recommend_color_grading,
     refine_intake_interactively,
     render_curation_contact_sheets,
     render_director_screening_sheet,
     render_video_culling_contact_sheets,
     run_multi_agent_pipeline,
 )
+from video_editing_ai.agents.intake_agent import _recommend_color_look  # noqa: E402
 from video_editing_ai.cloud import (  # noqa: E402
     GooglePhotosAuthManager,
     YouTubeAuthManager,
@@ -415,6 +421,7 @@ def cmd_inspect_library(args: argparse.Namespace) -> int:
     questions = [q.model_dump(mode="json") for q in q_objs]
     ask_q_payload = build_ask_question_tool_payload(q_objs)
     dur_rec = compute_director_duration_recommendation(lib_info)
+    col_look, col_rat = _recommend_color_look(lib_info, user_prompt=args.prompt or "")
 
     out_path = (
         Path(args.output).resolve()
@@ -424,6 +431,10 @@ def cmd_inspect_library(args: argparse.Namespace) -> int:
     doc = {
         "library": lib_info,
         "director_duration_recommendation": dur_rec,
+        "director_color_recommendation": {
+            "recommended_color_look": col_look,
+            "rationale": col_rat,
+        },
         "intake_questions": questions,
         "ask_question_tool_payload": ask_q_payload,
     }
@@ -944,6 +955,24 @@ def cmd_edit_cut(args: argparse.Namespace) -> int:
             raw_wp = args.waypoints_json
             wp_p = Path(raw_wp)
             op["waypoints"] = json.loads(wp_p.read_text(encoding="utf-8")) if wp_p.exists() else json.loads(raw_wp)
+        if getattr(args, "look", None):
+            op["look"] = args.look
+        if getattr(args, "lut_intensity", None) is not None:
+            op["intensity"] = float(args.lut_intensity)
+        if getattr(args, "exposure_ev", None) is not None:
+            op["exposure_ev"] = float(args.exposure_ev)
+        if getattr(args, "wb_red", None) is not None:
+            op["wb_red"] = float(args.wb_red)
+        if getattr(args, "wb_blue", None) is not None:
+            op["wb_blue"] = float(args.wb_blue)
+        if getattr(args, "saturation", None) is not None:
+            op["saturation"] = float(args.saturation)
+        if getattr(args, "contrast", None) is not None:
+            op["contrast"] = float(args.contrast)
+        if getattr(args, "skin_protection", None) is not None:
+            op["skin_protection"] = float(args.skin_protection)
+        if getattr(args, "grading_strategy", None):
+            op["strategy"] = args.grading_strategy
         ops.append(op)
 
     result = apply_surgical_edit(project_dir=project_dir, operations=ops)
@@ -1219,6 +1248,245 @@ def cmd_preview_photo_effects(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_project_sample_media(project_dir: Path, limit: int = 4) -> list[str]:
+    """Select diverse existing visual assets (photos/videos) from timeline, photo_curation, or media_index."""
+    picked: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p_str: str) -> None:
+        if p_str and p_str not in seen and Path(p_str).exists():
+            seen.add(p_str)
+            picked.append(p_str)
+
+    tl_path = project_dir / "timeline.yaml"
+    if tl_path.exists():
+        from video_editing_ai.models.schema import EditTimeline
+        from video_editing_ai.renderer.color_grading import is_synthetic_graphic_clip
+
+        tl = EditTimeline.from_yaml(tl_path)
+        for it in list(tl.visual_track) + list(tl.broll_track):
+            if not is_synthetic_graphic_clip(it.source, it.id, getattr(it, "narrative_note", "")):
+                _add(it.source)
+            if len(picked) >= limit:
+                return picked
+
+    pc_path = project_dir / "photo_curation.json"
+    if pc_path.exists():
+        doc = json.loads(pc_path.read_text(encoding="utf-8"))
+        for it in doc.get("items", []):
+            if it.get("is_selected"):
+                _add(str(it.get("source_path", "")))
+            if len(picked) >= limit:
+                return picked
+
+    mi_path = project_dir / "media_index.json"
+    if mi_path.exists():
+        doc = json.loads(mi_path.read_text(encoding="utf-8"))
+        for sc in doc.get("subclips", []):
+            _add(str(sc.get("source_path", "")))
+            if len(picked) >= limit:
+                return picked
+    return picked
+
+
+def cmd_preview_color_grades(args: argparse.Namespace) -> int:
+    """Mechanically render a 2560x1440 4x2 visual lookbook across all 8 curated film stocks."""
+    from video_editing_ai.renderer.color_grading import render_color_lookbook_sheet
+
+    proj = Path(args.project_dir).resolve()
+    proj.mkdir(parents=True, exist_ok=True)
+    out_jpg = Path(args.output).resolve() if args.output else (proj / "contact_sheets" / "color_lookbook_8stocks.jpg")
+
+    samples: list[str] = []
+    if getattr(args, "samples", None):
+        samples = [s.strip() for s in str(args.samples).split(",") if s.strip() and Path(s.strip()).exists()]
+    if not samples:
+        samples = _collect_project_sample_media(proj, limit=4)
+    if not samples:
+        print("Error: No valid media samples found; pass --samples or populate project_dir.", file=sys.stderr)
+        return 1
+
+    res = render_color_lookbook_sheet(
+        sample_paths=samples,
+        output_path=out_jpg,
+        project_title=proj.name.replace("_", " ").title(),
+    )
+    print(f"Success! Rendered 8-Stock DI Color Lookbook Sheet to: {res}")
+    return 0
+
+
+def cmd_render_color_scopes(args: argparse.Namespace) -> int:
+    """Render a 2560x1440 Split-Wipe & RGB Parade waveform scopes sheet for Stage 42 telemetry audit."""
+    from video_editing_ai.agents.base import PipelineBlackboard
+    from video_editing_ai.agents.plugins.color_grading_agent import CinemaColorGradingAgent
+    from video_editing_ai.models.schema import ColorGradeReport, EditTimeline
+    from video_editing_ai.renderer.color_grading import (
+        is_synthetic_graphic_clip,
+        render_color_grading_scopes_sheet,
+    )
+
+    proj = Path(args.project_dir).resolve()
+    tl_path = proj / "timeline.yaml"
+    if not tl_path.exists():
+        print(f"Error: timeline.yaml not found in {proj}", file=sys.stderr)
+        return 1
+
+    tl = EditTimeline.from_yaml(tl_path)
+    plan_path = proj / "color_grade_plan.json"
+    if not plan_path.exists():
+        bb = PipelineBlackboard(media_dir=proj, project_dir=proj, use_antigravity=False)
+        bb.timeline = tl
+        bb.hdr = bool(tl.settings.hdr)
+        CinemaColorGradingAgent().run(bb)
+        tl = EditTimeline.from_yaml(tl_path)
+
+    report = ColorGradeReport.from_json_file(plan_path)
+    by_id = {g.clip_id: g for g in report.clip_grades}
+    all_items = list(tl.visual_track) + list(tl.broll_track)
+    photos: list[dict[str, Any]] = []
+    videos: list[dict[str, Any]] = []
+    for it in all_items:
+        if is_synthetic_graphic_clip(it.source, it.id, getattr(it, "narrative_note", "")):
+            continue
+        if not Path(it.source).exists():
+            continue
+        entry = {
+            "clip_id": it.id,
+            "media_type": it.type,
+            "source": it.source,
+            "start": it.source_in,
+            "duration": it.duration,
+            "grade": by_id.get(it.id),
+        }
+        (photos if it.type == "photo" else videos).append(entry)
+
+    picked: list[dict[str, Any]] = []
+    for i in range(max(len(videos), len(photos))):
+        if i < len(videos) and len(picked) < 6:
+            picked.append(videos[i])
+        if i < len(photos) and len(picked) < 6:
+            picked.append(photos[i])
+        if len(picked) >= 6:
+            break
+
+    if not picked:
+        print("Error: No existing camera video/photo files resolved on timeline.", file=sys.stderr)
+        return 1
+
+    out_jpg = Path(args.output).resolve() if args.output else (proj / "contact_sheets" / "color_grading_scopes.jpg")
+    res = render_color_grading_scopes_sheet(picked, out_jpg, report=report)
+    print(f"Success! Rendered RGB Parade Scopes Sheet to: {res}")
+    return 0
+
+
+def cmd_apply_color_grade(args: argparse.Namespace) -> int:
+    """Apply Stage 42 DI color grade overrides or AI decision packet to timeline.yaml and color_grade_plan.json."""
+    from video_editing_ai.agents.base import PipelineBlackboard
+    from video_editing_ai.agents.plugins.color_grading_agent import (
+        CinemaColorGradingAgent,
+        apply_color_grade_overrides,
+    )
+    from video_editing_ai.exporters.nle_export import export_all_nle_formats
+    from video_editing_ai.models.schema import EditTimeline
+
+    proj = Path(args.project_dir).resolve()
+    tl_path = proj / "timeline.yaml"
+    if not tl_path.exists():
+        print(f"Error: timeline.yaml not found in {proj}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "decision_json", None):
+        raw_dec = args.decision_json
+        dec_p = Path(raw_dec)
+        packet = json.loads(dec_p.read_text(encoding="utf-8")) if dec_p.exists() else json.loads(raw_dec)
+        ai_dir = proj / "ai_decisions"
+        ai_dir.mkdir(parents=True, exist_ok=True)
+        (ai_dir / "color_grader.json").write_text(json.dumps(packet, indent=2), encoding="utf-8")
+
+        tl = EditTimeline.from_yaml(tl_path)
+        bb = PipelineBlackboard(media_dir=proj, project_dir=proj, use_antigravity=False)
+        bb.load_existing_contracts()
+        bb.timeline = tl
+        bb.hdr = bool(tl.settings.hdr)
+        res = CinemaColorGradingAgent().run(bb)
+        export_all_nle_formats(EditTimeline.from_yaml(tl_path), proj)
+        print(
+            f"Success! Executed Stage 42 color_grader with ai_decisions/color_grader.json: "
+            f"look={res.get('primary_film_stock_look')}, shots={res.get('shots_matched_count')}"
+        )
+        return 0
+
+    tl = EditTimeline.from_yaml(tl_path)
+    report = apply_color_grade_overrides(
+        timeline=tl,
+        project_dir=proj,
+        look_name=getattr(args, "look", None),
+        clip_id=getattr(args, "clip_id", None),
+        intensity=getattr(args, "intensity", None),
+        exposure_ev=getattr(args, "exposure_ev", None),
+        wb_red=getattr(args, "wb_red", None),
+        wb_blue=getattr(args, "wb_blue", None),
+        saturation=getattr(args, "saturation", None),
+        contrast=getattr(args, "contrast", None),
+        skin_protection=getattr(args, "skin_protection", None),
+        strategy=getattr(args, "strategy", None),
+    )
+    tl.to_yaml(tl_path)
+    export_all_nle_formats(tl, proj)
+    print(
+        f"Success! Applied DI Color Grade (look='{report.primary_film_stock_look}', "
+        f"strategy='{report.grading_strategy}', shots={report.shots_matched_count}) -> {proj / 'color_grade_plan.json'}"
+    )
+    return 0
+
+
+def cmd_recommend_color_grade(args: argparse.Namespace) -> int:
+    """Analyze photometry + 8-stock lookbook via AI VLM/ranker and recommend optimal film stock & chapter looks."""
+    from video_editing_ai.agents.plugins.color_grading_agent import CinemaColorGradingAgent
+
+    proj = Path(args.project_dir).resolve()
+    tl_path = proj / "timeline.yaml"
+    if not tl_path.exists():
+        print(f"Error: timeline.yaml not found in {proj}", file=sys.stderr)
+        return 1
+
+    meta_path = proj / "project_meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    media_dir_str = meta.get("media_dir") or str(proj)
+    media_dir = Path(media_dir_str).resolve() if Path(media_dir_str).exists() else proj
+
+    bb = PipelineBlackboard(
+        media_dir=media_dir,
+        project_dir=proj,
+        user_prompt=meta.get("user_prompt") or "",
+        interview_answers=meta.get("interview_answers") or {},
+        use_antigravity=not bool(getattr(args, "no_ai", False)),
+    )
+    bb.load_existing_contracts()
+    if bb.timeline is None:
+        bb.timeline = EditTimeline.from_yaml(tl_path)
+    bb.hdr = bool(bb.timeline.settings.hdr)
+
+    rec = recommend_color_grading(bb)
+    out_path = Path(args.output).resolve() if getattr(args, "output", None) else (proj / "color_grade_recommendation.json")
+    if out_path != (proj / "color_grade_recommendation.json"):
+        rec.to_json_file(out_path)
+
+    if getattr(args, "apply", False):
+        CinemaColorGradingAgent().run(bb)
+        export_all_nle_formats(EditTimeline.from_yaml(tl_path), proj)
+
+    print(
+        f"Success! Recommended DI Color Grade: '{rec.recommended_primary_look}' "
+        f"(runner-up='{rec.runner_up_look}', strategy='{rec.recommended_strategy}', "
+        f"intensity={rec.recommended_lut_intensity:.2f}, source='{rec.recommendation_source}').\n"
+        f"Rationale: {rec.ai_rationale}\n"
+        f"Chapters mapped: {len(rec.recommended_chapter_looks)} | Lookbook: {rec.lookbook_sheet_path or 'n/a'}\n"
+        f"Recommendation written to: {out_path}"
+    )
+    return 0
+
+
 def cmd_preview_travel_maps(args: argparse.Namespace) -> int:
     """Mechanically render a 2x2 high-resolution cartography comparison sheet across all 4 Travel Map styles."""
     from video_editing_ai.renderer.travel_map import render_travel_map_showcase_sheet
@@ -1433,7 +1701,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_stg.set_defaults(func=cmd_run_stage)
 
     # 4. run-pipeline
-    p_pipe = sub.add_parser("run-pipeline", help="Run the full 21-agent pipeline (Stage 00 -> Stage 65) and optional 4K HDR render")
+    p_pipe = sub.add_parser("run-pipeline", help="Run the full 22-agent pipeline (Stage 00 -> Stage 65) and optional 4K HDR render")
     p_pipe.add_argument("--media-dir", default=None, help="Raw media folder path (optional when using --google-photos, --google-takeout, or previously synced --project-dir)")
     p_pipe.add_argument("--project-dir", required=True, help="Target project workspace directory")
     p_pipe.add_argument("--google-photos", action="store_true", default=False, help="Sync media from Google Photos before running pipeline")
@@ -1548,7 +1816,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("--project-dir", required=True, help="Project workspace directory")
     p_ec.add_argument(
         "--action",
-        choices=["update-plaque", "set-photo-effect", "trim", "drop", "swap", "move", "set-cold-open", "audio-mix", "insert-travel-map"],
+        choices=[
+            "update-plaque",
+            "set-photo-effect",
+            "trim",
+            "drop",
+            "swap",
+            "move",
+            "set-cold-open",
+            "audio-mix",
+            "insert-travel-map",
+            "set-color-grade",
+        ],
         default=None,
         help="Surgical operation type (or pass a batch via --ops-json)",
     )
@@ -1601,6 +1880,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("--transport-mode", default=None, help="Transport mode: auto | flight | train | drive | walk | boat")
     p_ec.add_argument("--leg-index", type=int, default=None, help="Optional 0-based focused leg index when passing multi-stop waypoints")
     p_ec.add_argument("--waypoints-json", default=None, help="Optional multi-stop waypoints JSON string or file path for --action insert-travel-map")
+    p_ec.add_argument("--look", default=None, help="Film stock look name for --action set-color-grade")
+    p_ec.add_argument("--lut-intensity", type=float, default=None, help="3D LUT strength (0.0-1.0) for --action set-color-grade")
+    p_ec.add_argument("--exposure-ev", type=float, default=None, help="Exposure compensation in EV (-1.5..1.5) for --action set-color-grade")
+    p_ec.add_argument("--wb-red", type=float, default=None, help="Red WB shift (-0.35..0.35) for --action set-color-grade")
+    p_ec.add_argument("--wb-blue", type=float, default=None, help="Blue WB shift (-0.35..0.35) for --action set-color-grade")
+    p_ec.add_argument("--saturation", type=float, default=None, help="Saturation multiplier for --action set-color-grade")
+    p_ec.add_argument("--contrast", type=float, default=None, help="Contrast multiplier for --action set-color-grade")
+    p_ec.add_argument("--skin-protection", type=float, default=None, help="Skin tone vector protection (0.0-1.0)")
+    p_ec.add_argument("--grading-strategy", default=None, help="chapter_adaptive | uniform_stock | natural_neutral")
     p_ec.add_argument("--ops-json", default=None, help="JSON string or file path containing a list of surgical operations")
     p_ec.add_argument("--output", default=None, help="Optional output report JSON path")
     p_ec.set_defaults(func=cmd_edit_cut)
@@ -1808,6 +2096,55 @@ def build_parser() -> argparse.ArgumentParser:
     p_ytp.add_argument("--token-path", default=None, help="Optional path to YouTube OAuth token.json")
     p_ytp.add_argument("--output", default=None, help="Optional output JSON report path")
     p_ytp.set_defaults(func=cmd_publish_youtube)
+
+    # 25. preview-color-grades
+    p_pcg = sub.add_parser(
+        "preview-color-grades",
+        help="Render a 2560x1440 4x2 visual lookbook sheet across all 8 curated film stocks",
+    )
+    p_pcg.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_pcg.add_argument("--samples", default=None, help="Optional comma-separated photo/video paths")
+    p_pcg.add_argument("--output", default=None, help="Optional output JPEG path")
+    p_pcg.set_defaults(func=cmd_preview_color_grades)
+
+    # 26. render-color-scopes
+    p_rcs = sub.add_parser(
+        "render-color-scopes",
+        help="Render a 2560x1440 Before/Graded split-wipe & RGB Parade waveform scopes sheet",
+    )
+    p_rcs.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_rcs.add_argument("--output", default=None, help="Optional output JPEG path")
+    p_rcs.set_defaults(func=cmd_render_color_scopes)
+
+    # 27. apply-color-grade
+    p_acg = sub.add_parser(
+        "apply-color-grade",
+        help="Apply Stage 42 DI film stock look or per-clip primary balance overrides to timeline.yaml",
+    )
+    p_acg.add_argument("--project-dir", required=True, help="Project workspace directory")
+    p_acg.add_argument("--decision-json", default=None, help="Path or JSON string for ai_decisions/color_grader.json")
+    p_acg.add_argument("--look", default=None, help="Target film stock name (e.g. archival_kodak_2383)")
+    p_acg.add_argument("--clip-id", default=None, help="Optional single clip_id to target")
+    p_acg.add_argument("--intensity", type=float, default=None, help="3D LUT strength (0.0-1.0)")
+    p_acg.add_argument("--exposure-ev", type=float, default=None, help="Exposure compensation in EV")
+    p_acg.add_argument("--wb-red", type=float, default=None, help="Red WB shift (-0.35..0.35)")
+    p_acg.add_argument("--wb-blue", type=float, default=None, help="Blue WB shift (-0.35..0.35)")
+    p_acg.add_argument("--saturation", type=float, default=None, help="Saturation multiplier")
+    p_acg.add_argument("--contrast", type=float, default=None, help="Contrast multiplier")
+    p_acg.add_argument("--skin-protection", type=float, default=None, help="Skin tone protection (0.0-1.0)")
+    p_acg.add_argument("--strategy", default=None, help="chapter_adaptive | uniform_stock | natural_neutral")
+    p_acg.set_defaults(func=cmd_apply_color_grade)
+
+    # 28. recommend-color-grade
+    p_rcg = sub.add_parser(
+        "recommend-color-grade",
+        help="Analyze project photometry & lookbook via AI VLM/ranker and recommend optimal film stock + chapter looks",
+    )
+    p_rcg.add_argument("--project-dir", required=True, help="Project workspace directory containing timeline.yaml")
+    p_rcg.add_argument("--no-ai", action="store_true", default=False, help="Skip external VLM calls and use offline photometric ranking only")
+    p_rcg.add_argument("--apply", action="store_true", default=False, help="Also execute Stage 42 color_grader immediately with the recommendation")
+    p_rcg.add_argument("--output", default=None, help="Optional output recommendation JSON path")
+    p_rcg.set_defaults(func=cmd_recommend_color_grade)
 
     return parser
 

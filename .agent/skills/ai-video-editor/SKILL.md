@@ -1,14 +1,14 @@
 ---
 name: ai-video-editor
 description: >-
-  End-to-end 21-agent AI photo and video editing skill for Antigravity covering family travel, museum trips, vlogs, and unscripted highlights. Use whenever the user asks in Antigravity to inspect, curate, edit, revise, or render a folder of clips/photos, run interactive client intake and get the Director's length recommendation (30s-600s), scout/download royalty-free BGM, curate and annotate photos with aesthetic taste and smoked-glass museum plaques, apply 2.5D parallax and diptych photo effects, write editorial on-screen chapter titles (or voiceover narration when explicitly requested), pair vertical 9:16 videos into Live Video+Photo Diptychs, render GPS route progression maps, apply 10-bit DI camera color matching, synthesize spatial soundscapes, supervise editing quality with the Executive Movie Production Director, manage editing projects (create/load/reset), or render 4K 10-bit HLG HDR MP4 videos and NLE timelines (.fcpxml, .edl, .otio).
+  End-to-end 22-agent AI photo and video editing skill for Antigravity covering family travel, museum trips, vlogs, and unscripted highlights. Use whenever the user asks in Antigravity to inspect, curate, edit, revise, or render a folder of clips/photos, run interactive client intake and get the Director's length recommendation (30s-600s), scout/download royalty-free BGM, curate and annotate photos with aesthetic taste and smoked-glass museum plaques, apply 2.5D parallax and diptych photo effects, write editorial on-screen chapter titles (or voiceover narration when explicitly requested), pair vertical 9:16 videos into Live Video+Photo Diptychs, render GPS route progression maps, apply 10-bit DI camera color matching, synthesize spatial soundscapes, supervise editing quality with the Executive Movie Production Director, manage editing projects (create/load/reset), or render 4K 10-bit HLG HDR MP4 videos and NLE timelines (.fcpxml, .edl, .otio).
 ---
 
 # AI Photo & Video Story Studio Skill (`ai-video-editor`)
 
 ## Overview
 
-This skill makes **Google Antigravity** the primary creative director for a **21-Agent AI Film & Vlog Post-Production Studio** that transforms raw folders of multi-camera videos (`.MP4`, `.MOV`) and photos (`.JPG`, `.HEIC`, `.PNG`) into a **4K 10-bit HLG HDR Master Video (`final_story.mp4`)** plus professional NLE timelines (`timeline.fcpxml`, `timeline.edl`, `timeline.otio`).
+This skill makes **Google Antigravity** the primary creative director for a **22-Agent AI Film & Vlog Post-Production Studio** that transforms raw folders of multi-camera videos (`.MP4`, `.MOV`) and photos (`.JPG`, `.HEIC`, `.PNG`) into a **4K 10-bit HLG HDR Master Video (`final_story.mp4`)** plus professional NLE timelines (`timeline.fcpxml`, `timeline.edl`, `timeline.otio`).
 
 > **Core Architectural Rule**:
 > - **Anything mechanical** (contact-sheet grid rendering, FFmpeg segment slicing, ripple timecode shifting, LUFS audio ducking, RGB histogram & Kelvin white-balance measurement, EXIF GPS extraction, JSON/YAML contract serialization, MPS/OpenCL/VideoToolbox 4K encoding) is executed **programmatically** via [`scripts/ai_video_studio_skill.py`](scripts/ai_video_studio_skill.py).
@@ -22,7 +22,7 @@ All programmatic steps write structured JSON/YAML contracts to disk in `<project
 
 ---
 
-## 1. Progressive Disclosure: 21 Sub-Agent Role Playbooks (`references/`)
+## 1. Progressive Disclosure: 22 Sub-Agent Role Playbooks (`references/`)
 
 Read only the specific reference file(s) needed for your current step or when spawning native Antigravity subagents via `define_subagent` / `invoke_subagent` (auto-synchronized from `AgentRegistry` via `python -m video_editing_ai.cli docs-sync`):
 
@@ -46,6 +46,7 @@ Read only the specific reference file(s) needed for your current step or when sp
 | **Stage 40** | `vfx_designer` | `VFXAgent` | `True` | `paper_edit.json`, `beat_grid.json`, `timeline.yaml` -> `vfx_manifest.json` | [references/06_vfx_agent.md](references/06_vfx_agent.md) — AI-guided Stage-40 specialist that adds warm golden glow, subtle portrait vignettes, and beat-drop contrast pops to timeline.effects_track and writes vfx_manifest.json. |
 | **Stage 40** | `hdr_colorist` *(alias: `colorist`)* | `HDRColoristAgent` | `True` | `media_index.json`, `paper_edit.json`, `timeline.yaml` -> `color_transform_manifest.json`, `color_grade_plan.json` | [references/13_colorist_agent.md](references/13_colorist_agent.md) — Inspects per-clip color tags (10-bit BT.2020 HLG vs. Camera Log vs. 8-bit BT.709/sRGB stills) from media_index.json, maps SDR clips & stills to ~203-nit HLG diffuse white (~75% HLG signal), and writes color_transform_manifest.json. |
 | **Stage 40** | `sound_mixer` *(alias: `sound_designer`)* | `SoundDesignerMixerAgent` | `True` | `media_index.json`, `paper_edit.json`, `beat_grid.json`, `timeline.yaml` -> `audio_mix_manifest.json`, `sound_design_plan.json` | [references/14_sound_designer_agent.md](references/14_sound_designer_agent.md) — Post-assembly re-recording mixer that normalizes dialogue clips toward -14 LUFS, generates frame-accurate BGM ducking (-14 dB under speech, -20 dB Nat-Sound under pure B-roll, and <=-28 dB deep muting during has_diegetic_music clips), applies 0.33s audio crossfades, and synthesizes spatial foley/ambience stems. |
+| **Stage 42** | `color_grader` *(alias: `di_colorist`)* | `CinemaColorGradingAgent` | `True` | `timeline.yaml` -> `color_grade_plan.json` | [references/19_color_grading_agent.md](references/19_color_grading_agent.md) — Measures multi-frame Planckian colorimetry across videos and still photos, solves 3-way Lift/Gamma/Gain camera matching, synthesizes 33x33x33 .cube 3D LUTs, and emits lookbook and RGB Parade scopes sheets while keeping synthetic graphics color-bypassed. |
 | **Stage 50** | `showrunner` | `ShowrunnerAgent` | `True` | `creative_brief.json`, `paper_edit.json`, `timeline.yaml` -> `pacing_audit.json`, `timeline.yaml`, `storyboard.md` | [references/05_showrunner_agent.md](references/05_showrunner_agent.md) — Deterministic compliance and pacing validator that verifies creative_brief.json must-haves, flags >3 consecutive static stills, flags pure B-roll >4.5s, checks timeline gaps/overlaps, and emits chapter-scoped RevisionDirectives without mutating montage cuts off the beat grid. |
 | **Stage 55** | `visual_qc` | `ProxyWatchdownQCAgent` | `True` | `pacing_audit.json`, `timeline.yaml` -> `visual_qc_report.json` | [references/17_visual_qc_agent.md](references/17_visual_qc_agent.md) — Runs between Stage 50 (showrunner) and Stage 60 (production_director), sampling low-resolution boundary frames around cuts and Track V3 overlays to detect black flashes, frozen tail frames, subtitle/lower-third bounding-box overlaps, clipped luminance blocks, and uncrossfaded audio cut spikes. |
 | **Stage 60** | `production_director` | `ProductionDirectorAgent` | `True` | `creative_brief.json`, `paper_edit.json`, `pacing_audit.json`, `visual_qc_report.json`, `timeline.yaml` -> `director_review.json`, `timeline.yaml`, `storyboard.md` | [references/07_production_director_agent.md](references/07_production_director_agent.md) — Sole creative sign-off gatekeeper evaluating pacing_audit.json and visual_qc_report.json against the 6-dimension cinematic rubric, issuing beat-preserving chapter-scoped RevisionDirectives when needed, and writing director_review.json. |
@@ -92,9 +93,9 @@ Read `ask_question_tool_payload` from `<project_dir>/library_inspection.json` an
 .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py intake-refine --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode cinematic_depth_3d --photo-modes "cinematic_depth_3d,split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,medium_format_slide,floating_tilt_plate,criterion_atelier_split,parallax_gallery,curator_loupe,editorial_magazine,polaroid_scrapbook,diptych_frame" --overlay-fxs "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain,anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture" --bgm-mood auto_match
 ```
 
-### Phase 3: Run the 21-Agent Pipeline & Delegate Creative Curation in Antigravity
+### Phase 3: Run the 22-Agent Pipeline & Delegate Creative Curation in Antigravity
 - **Parallel Antigravity Subagent Delegation (`invoke_subagent`)**: For large multi-chapter shoots, Antigravity can launch specialist `research` / `self` subagents in parallel seeded with the matching `.agent/skills/ai-video-editor/references/*.md` playbooks (`PhotoCurator`, `StoryProducer`, `ProductionDirector`), while running deterministic scripts via `.venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py`.
-- **Option A — Full 21-Agent Pipeline + Contact Sheet Generation (`run-pipeline`)**:
+- **Option A — Full 22-Agent Pipeline + Contact Sheet Generation (`run-pipeline`)**:
   ```bash
   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py run-pipeline --media-dir "<media_dir>" --project-dir "<project_dir>" --prompt "<user_prompt>" --duration 155 --photo-mode parallax_gallery --render
   ```
@@ -138,7 +139,7 @@ Read `ask_question_tool_payload` from `<project_dir>/library_inspection.json` an
     - **Finishers (`overlay_fx`)**: `golden_light_leak`, `champagne_bokeh`, `museum_spotlight`, `nostalgic_film_grain`, `anamorphic_streak`, `prism_chromatic_edge`, `velvet_vignette_rembrandt`, `fine_art_rag_texture`, `none`.
 
 ### Phase 4: Surgical Timeline Revisions (`edit-cut`) & Fast 2-Second Segment Previews (`render-segment`)
-When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *"drop clip_005"*, *"change the plaque on clip_003"*, *"lower BGM volume under speech"*), **never re-run the entire 21-agent pipeline**:
+When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *"drop clip_005"*, *"change the plaque on clip_003"*, *"lower BGM volume under speech"*), **never re-run the entire 22-agent pipeline**:
 1. **AI Agent Creative Step**: Read `<project_dir>/timeline.yaml` and translate the user's natural-language feedback into surgical operation(s) (`update-plaque`, `trim`, `drop`, `swap`, `move`, `set-cold-open`, `audio-mix`).
 2. **Mechanical Ripple Edit (`edit-cut`)**: Execute the surgical edit with automatic downstream ripple-shifting across V1, V2, V3 titles, VFX, markers, and subtitles:
    ```bash
@@ -149,10 +150,12 @@ When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *
    .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-segment --project-dir "<project_dir>" --start 0 --end 10 --fast-preview --extract-frames "1,5,8"
    ```
 
-### Phase 5: Executive Movie Production Director Visual Screening (`render-screening-sheet` & `director-audit`) & Full 4K HDR Render (`render-video`)
-1. Render the **4x3 Multimodal Director Screening Sheet** (`<project_dir>/cache/curation/director_screening_sheet.jpg`) and inspect it via `read_file` to verify that every chapter's photo modes, burned-in museum plaques, Track V3 lower-third video captions, and transitions look cohesive (auto-cached by `timeline.yaml` SHA-1 unless `--force` is passed):
+### Phase 5: Executive Movie Production Director Visual Screening (`render-screening-sheet` & `director-audit`), DI Color Grading & Full 4K HDR Render (`render-video`)
+1. Render the **4x3 Multimodal Director Screening Sheet** (`<project_dir>/cache/curation/director_screening_sheet.jpg`) plus **AI Film-Stock Recommendation, 8-Stock Lookbook & RGB Parade Scopes** (`recommend-color-grade`, `preview-color-grades`, `render-color-scopes`, `apply-color-grade`) and inspect via `read_file` to verify shot-to-shot film consistency across V1/V2, neutral white gallery mattes, museum plaques, lower-thirds, and transitions:
    ```bash
    .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-screening-sheet --project-dir "<project_dir>"
+   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py recommend-color-grade --project-dir "<project_dir>"
+   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py render-color-scopes --project-dir "<project_dir>"
    ```
 2. Apply any final transition, duration, or Track V3 lower-third refinements via `apply-timeline-intelligence`, verify `director_review.json` (`overall_quality_score >= 9.0`), and render the full 4K 10-bit HLG HDR master:
 ```bash

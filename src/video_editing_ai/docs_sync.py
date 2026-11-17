@@ -205,8 +205,8 @@ def sync_agent_documentation(
             updated_skill = _replace_marker_section(
                 updated_skill, TABLE_START_MARKER, TABLE_END_MARKER, new_skill_table
             )
-        updated_skill = re.sub(r"\b(?:11|16|21)-agent\b", f"{count}-agent", updated_skill)
-        updated_skill = re.sub(r"\b(?:11|16|21)-Agent\b", f"{count}-Agent", updated_skill)
+        updated_skill = re.sub(r"\b(?:11|16|21|22)-agent\b", f"{count}-agent", updated_skill)
+        updated_skill = re.sub(r"\b(?:11|16|21|22)-Agent\b", f"{count}-Agent", updated_skill)
         updated_skill = re.sub(
             r"## 1\. Progressive Disclosure: \d+ Sub-Agent Role Playbooks",
             f"## 1. Progressive Disclosure: {count} Sub-Agent Role Playbooks",

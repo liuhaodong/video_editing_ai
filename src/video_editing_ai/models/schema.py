@@ -66,6 +66,30 @@ VALID_PHOTO_MODES: tuple[str, ...] = (
     "criterion_atelier_split",
 )
 
+FilmStockLookType = Literal[
+    "archival_kodak_2383",
+    "fuji_eterna_soft",
+    "arri_natural_cinema",
+    "pacific_coastal_chrome",
+    "golden_hour_warmth",
+    "museum_chiaroscuro",
+    "twilight_teal_amber",
+    "a24_indie_matte",
+    "neutral_reference",
+]
+
+VALID_FILM_STOCK_LOOKS: tuple[str, ...] = (
+    "archival_kodak_2383",
+    "fuji_eterna_soft",
+    "arri_natural_cinema",
+    "pacific_coastal_chrome",
+    "golden_hour_warmth",
+    "museum_chiaroscuro",
+    "twilight_teal_amber",
+    "a24_indie_matte",
+    "neutral_reference",
+)
+
 VALID_PHOTO_OVERLAY_FX: tuple[str, ...] = (
     "none",
     "golden_light_leak",
@@ -506,6 +530,10 @@ class CreativeBrief(BaseModel):
             "Cinema cartography style: 'auto', 'midnight_vox_atlas', "
             "'archival_expedition_parchment', 'aerial_relief_hybrid', or 'kinfolk_minimal_monograph'"
         ),
+    )
+    color_grade_look: FilmStockLookType = Field(
+        default="archival_kodak_2383",
+        description="AI/Director-recommended DI film-stock look spine (Stage 42)",
     )
     interview_qa: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -1351,24 +1379,59 @@ class MotionGraphicsReport(BaseModel):
 
 
 class ClipColorGrade(BaseModel):
-    """Per-clip shot-to-shot white-balance normalization and film-stock look parameters (Stage 42)."""
+    """Per-clip 3-way Lift/Gamma/Gain primary balance and 3D LUT film-stock look parameters (Stage 42)."""
 
     clip_id: str
-    chapter_look: Literal[
-        "archival_kodak_2383",
-        "museum_chiaroscuro",
-        "golden_hour_warmth",
-        "twilight_teal_amber",
-        "neutral_reference",
-    ] = "archival_kodak_2383"
+    media_type: str = "video"
+    chapter_look: FilmStockLookType = "archival_kodak_2383"
     measured_kelvin: float = 5500.0
+    measured_tint: float = 0.0
+    p05_luma: float = 0.05
+    p50_luma: float = 0.45
+    p95_luma: float = 0.90
+    skin_pixel_ratio: float = 0.0
     wb_red_shift: float = 0.0
     wb_green_shift: float = 0.0
     wb_blue_shift: float = 0.0
+    lift_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gamma_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gain_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    exposure_ev: float = 0.0
+    black_lift: float = 0.0
     contrast: float = 1.04
     saturation: float = 1.04
+    vibrance: float = 0.0
     gamma: float = 1.00
+    skin_protection: float = 0.65
+    lut_intensity: float = 0.80
+    lut_cube_path: str = ""
     rationale: str = ""
+
+
+class ColorGradeRecommendation(BaseModel):
+    """AI/Photometric DI Color Grading recommendation packet produced for interactive selection or Stage 42."""
+
+    project_title: str
+    recommended_primary_look: FilmStockLookType = "archival_kodak_2383"
+    runner_up_look: FilmStockLookType = "fuji_eterna_soft"
+    recommended_strategy: Literal["chapter_adaptive", "uniform_stock", "natural_neutral"] = "chapter_adaptive"
+    recommended_lut_intensity: float = 0.80
+    recommended_chapter_looks: dict[str, str] = Field(default_factory=dict)
+    stock_rankings: list[dict[str, Any]] = Field(default_factory=list)
+    photometry_digest: dict[str, Any] = Field(default_factory=dict)
+    recommendation_source: Literal["ai_vision", "ai_override_packet", "photometric_ranker"] = "photometric_ranker"
+    ai_rationale: str = ""
+    lookbook_sheet_path: str = ""
+    ask_question_tool_payload: list[dict[str, Any]] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "ColorGradeRecommendation":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 class ColorGradeReport(BaseModel):
@@ -1376,8 +1439,17 @@ class ColorGradeReport(BaseModel):
 
     project_title: str
     primary_film_stock_look: str = "archival_kodak_2383"
+    grading_strategy: str = "chapter_adaptive"
     shots_matched_count: int = 0
     chapter_looks: dict[str, str] = Field(default_factory=dict)
+    generated_luts: dict[str, str] = Field(default_factory=dict)
+    scopes_sheet_path: str = ""
+    lookbook_sheet_path: str = ""
+    kelvin_spread_before: float = 0.0
+    kelvin_spread_after: float = 0.0
+    recommendation_source: str = "photometric_ranker"
+    ai_rationale: str = ""
+    colorist_notes: str = ""
     clip_grades: list[ClipColorGrade] = Field(default_factory=list)
 
     def to_json_file(self, path: str | Path) -> None:

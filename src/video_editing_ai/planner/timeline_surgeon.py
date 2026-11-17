@@ -7,6 +7,7 @@ import os
 import re
 from typing import Any, Optional
 
+from ..agents.plugins.color_grading_agent import apply_color_grade_overrides
 from ..analyzer.media_probe import PHOTO_EXTENSIONS
 from ..exporters.nle_export import export_all_nle_formats
 from ..models.schema import (
@@ -539,6 +540,27 @@ def apply_surgical_edit(
                 )
                 timeline.broll_track.sort(key=lambda c: float(c.timeline_start))
                 applied_logs.append(f"Inserted 2.5D V2 travel map '{broll_id}' ({wp_orig.label} -> {wp_dest.label}) at {st:.2f}s ({dur:.2f}s)")
+
+        elif action == "set-color-grade":
+            c_rep = apply_color_grade_overrides(
+                timeline=timeline,
+                project_dir=proj,
+                look_name=op.get("look") or op.get("chapter_look"),
+                clip_id=op.get("clip_id"),
+                intensity=float(op["intensity"]) if op.get("intensity") is not None else None,
+                exposure_ev=float(op["exposure_ev"]) if op.get("exposure_ev") is not None else None,
+                wb_red=float(op["wb_red"]) if op.get("wb_red") is not None else None,
+                wb_blue=float(op["wb_blue"]) if op.get("wb_blue") is not None else None,
+                saturation=float(op["saturation"]) if op.get("saturation") is not None else None,
+                contrast=float(op["contrast"]) if op.get("contrast") is not None else None,
+                skin_protection=float(op["skin_protection"]) if op.get("skin_protection") is not None else None,
+                strategy=op.get("strategy") or op.get("grading_strategy"),
+            )
+            tgt_desc = op.get("clip_id") or "all V1/V2 clips"
+            applied_logs.append(
+                f"Updated DI color grade on {tgt_desc}: look='{c_rep.primary_film_stock_look}', "
+                f"strategy='{c_rep.grading_strategy}', shots={c_rep.shots_matched_count}"
+            )
 
     # Sync BGM duration and closing cards with updated total timeline duration
     total_dur = round(timeline.total_duration, 3)
