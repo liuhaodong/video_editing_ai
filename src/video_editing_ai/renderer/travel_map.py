@@ -1250,22 +1250,30 @@ def _cached_world_baseplate(
                     retina_boost=False,
                 )
                 if hs_arr is not None and hs_arr.shape == rgb.shape:
+                    # Esri World_Hillshade flat sea-level neutral luminance is ~0.706 (RGB 180)
+                    eff_hs = hs_strength * (0.42 if vp.zoom >= 10 else 1.0)
                     hs_luma = (0.299 * hs_arr[:, :, 0] + 0.587 * hs_arr[:, :, 1] + 0.114 * hs_arr[:, :, 2]) / 255.0
-                    relief = np.clip(1.0 + hs_strength * ((hs_luma - 0.62) * 2.2), 0.72, 1.24)[..., None]
+                    relief = np.clip(1.0 + eff_hs * ((hs_luma - 0.706) * 2.2), 0.74, 1.16)[..., None]
                     rgb = np.clip(rgb * relief, 0, 255)
 
             if style in ("satellite_hybrid_4k", "aerial_relief_hybrid"):
-                # Google Earth clarity grade: micro-contrast CLAHE + clean ocean/land vibrancy
+                # Google Earth clarity grade with protective highlight rolloff on sunny sand & reef whites
                 rgb_u8 = np.clip(rgb, 0, 255).astype(np.uint8)
                 lab = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2LAB)
                 l_ch, a_ch, b_ch = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(12, 12))
+                mean_l = float(l_ch.mean())
+                clahe = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(12, 12))
                 l_eq = clahe.apply(l_ch)
-                l_mix = cv2.addWeighted(l_ch, 0.72, l_eq, 0.28, 0)
-                lab_clean = cv2.merge((l_mix, a_ch, b_ch))
+                l_mix = cv2.addWeighted(l_ch, 0.78, l_eq, 0.22, 0).astype(np.float32)
+                if mean_l > 130.0:
+                    # Tame blown-out sunny aerial whites (beaches, rooftops, surf) while preserving deep blues
+                    l_norm = np.clip(l_mix / 255.0, 0.0, 1.0)
+                    l_mix = np.power(l_norm, 1.12) * 246.0
+                l_u8 = np.clip(l_mix, 0, 240).astype(np.uint8)
+                lab_clean = cv2.merge((l_u8, a_ch, b_ch))
                 hsv = cv2.cvtColor(cv2.cvtColor(lab_clean, cv2.COLOR_LAB2RGB), cv2.COLOR_RGB2HSV).astype(np.float32)
-                hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.15, 0, 255)
-                hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.03, 0, 238)
+                hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.18, 0, 255)
+                hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (0.94 if mean_l > 130.0 else 1.0), 0, 232)
                 rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32)
 
     # Quantized marching iso-elevation contour hairlines on land (only when using offline synthetic terrain)
@@ -2212,7 +2220,7 @@ def _paste_hero_photo_callout(
     card.alpha_composite(im_rgba, (4 + pad, 4 + pad))
 
     f_cap = _load_font_tier(max(9, int(round(12 * s))), tier="mono", bold=True)
-    cap_txt = f"{caption_prefix} · {label}"[:24].upper()
+    cap_txt = f"{caption_prefix} · {label}"[:28].upper()
     cap_col = (*spec["hud_title"], int(round(245 * bloom_p)))
     dc.text((4 + pad + 2, 4 + pad + inner_h + max(3, int(round(5 * s)))), cap_txt, font=f_cap, fill=cap_col)
 
@@ -2224,9 +2232,10 @@ def _paste_hero_photo_callout(
         (dx + margin, dy + int(round(36 * s))),
         (dx + int(round(14 * s)), dy + int(round(68 * s))),
         (dx - card.width - margin, dy - card.height - int(round(28 * s))),
+        (dx - card.width - int(round(54 * s)), dy - card.height - int(round(92 * s))),
         (dx + margin, dy - card.height - int(round(28 * s))),
         (dx - card.width * 0.35, dy + int(round(72 * s))),
-        (dx - card.width * 0.5, dy - card.height - int(round(68 * s))),
+        (dx - card.width * 0.5, dy - card.height - int(round(96 * s))),
     ]
     others = list(avoid_pts or [])
     rects = list(avoid_rects or [])
@@ -3009,7 +3018,7 @@ def render_travel_map_frame(
 
     occupied_rects: list[tuple[float, float, float, float]] = [
         (0.0, 0.0, width * 0.45, height * 0.22),                          # Top-left HUD bar
-        (width * 0.71, height * 0.76, float(width), float(height)),       # Bottom-right Elevation box
+        (width * 0.69, height * 0.74, float(width), float(height)),       # Bottom-right Elevation box
         (0.0, 0.0, float(width), max(height * 0.14, horizon_y_fn(width * 0.5) + 12.0)),  # Earth horizon sky band
     ]
     for k, (sx_w, sy_w) in enumerate(screen_stops):
