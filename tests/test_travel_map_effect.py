@@ -475,15 +475,71 @@ def test_google_earth_dynamic_zoom_and_multimodal_leg_modes(tmp_path: Path, monk
     ]
     f_boat = render_google_earth_flyover_frame(
         waypoints=wps, style="satellite_hybrid_4k", width=640, height=360,
-        global_t=0.25, leg_modes=["boat", "train"], hdr_safe=True, cache_dir=tmp_path / "tiles",
+        global_t=0.25, leg_modes=["boat", "train"], hdr_safe=True, allow_tile_fetch=False, cache_dir=tmp_path / "tiles",
     )
     f_train = render_google_earth_flyover_frame(
         waypoints=wps, style="satellite_hybrid_4k", width=640, height=360,
-        global_t=0.80, leg_modes=["boat", "train"], hdr_safe=True, cache_dir=tmp_path / "tiles",
+        global_t=0.80, leg_index=1, leg_modes=["boat", "train"], hdr_safe=True, allow_tile_fetch=False, cache_dir=tmp_path / "tiles",
     )
     assert np.asarray(f_boat).shape == (360, 640, 3)
     assert np.asarray(f_train).shape == (360, 640, 3)
     assert int(np.asarray(f_boat).max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
     assert int(np.asarray(f_train).max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+
+    # Focused per-stop street walk leg over multi-stop itinerary
+    zurich_walk = [
+        {"label": "Ruby Mimi HB", "lat": 47.3768, "lon": 8.5398, "alt_m": 408.0},
+        {"label": "Landesmuseum", "lat": 47.3790, "lon": 8.5406, "alt_m": 409.0},
+        {"label": "ETH Zurich", "lat": 47.3763, "lon": 8.5477, "alt_m": 460.0},
+    ]
+    f_walk = render_google_earth_flyover_frame(
+        waypoints=zurich_walk, style="google_road_navigator", width=640, height=360,
+        global_t=0.85, leg_index=0, leg_modes=["walk", "walk"], hdr_safe=True, allow_tile_fetch=False, cache_dir=tmp_path / "tiles",
+    )
+    assert np.asarray(f_walk).shape == (360, 640, 3)
+    assert int(np.asarray(f_walk).max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+
+    # Surgical v1_interlude placement splices standalone leg before stop clip and ripple-shifts downstream
+    proj = tmp_path / "interlude_proj"
+    vid = _make_test_video(tmp_path / "stop1.mp4", duration=4.0, color="teal")
+    tl = EditTimeline(
+        project_title="Zurich Playbook Test",
+        settings=TimelineSettings(width=640, height=360, fps=15, hdr=False),
+        visual_track=[
+            VisualTrackItem(
+                id="clip_stop_01",
+                type="video",
+                roll_type="b_roll",
+                source=str(vid),
+                timeline_start=0.0,
+                duration=4.0,
+                source_in=0.0,
+                source_out=4.0,
+            )
+        ],
+    )
+    proj.mkdir(parents=True, exist_ok=True)
+    tl.to_yaml(proj / "timeline.yaml")
+    res_v1 = apply_surgical_edit(
+        proj,
+        {
+            "action": "insert-travel-map",
+            "clip_id": "clip_stop_01",
+            "placement": "v1_interlude",
+            "waypoints": zurich_walk,
+            "leg_index": 0,
+            "leg_modes": ["walk", "walk"],
+            "transport_mode": "walk",
+            "style": "google_road_navigator",
+            "duration": 2.0,
+        },
+    )
+    assert res_v1["operations_count"] == 1
+    tl_after = EditTimeline.from_yaml(proj / "timeline.yaml")
+    assert len(tl_after.visual_track) == 2
+    assert tl_after.visual_track[0].id.startswith("clip_map_")
+    assert abs(tl_after.visual_track[0].duration - 2.0) < 0.05
+    assert tl_after.visual_track[1].id == "clip_stop_01"
+    assert abs(tl_after.visual_track[1].timeline_start - 2.0) < 0.05
 
 

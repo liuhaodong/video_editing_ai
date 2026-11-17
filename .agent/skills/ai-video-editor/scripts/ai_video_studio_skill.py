@@ -938,6 +938,12 @@ def cmd_edit_cut(args: argparse.Namespace) -> int:
             op["placement"] = args.placement
         if getattr(args, "transport_mode", None):
             op["transport_mode"] = args.transport_mode
+        if getattr(args, "leg_index", None) is not None:
+            op["leg_index"] = int(args.leg_index)
+        if getattr(args, "waypoints_json", None):
+            raw_wp = args.waypoints_json
+            wp_p = Path(raw_wp)
+            op["waypoints"] = json.loads(wp_p.read_text(encoding="utf-8")) if wp_p.exists() else json.loads(raw_wp)
         ops.append(op)
 
     result = apply_surgical_edit(project_dir=project_dir, operations=ops)
@@ -1275,17 +1281,30 @@ def cmd_render_travel_map(args: argparse.Namespace) -> int:
     ] if len(wps) >= 2 and all(isinstance(w, dict) for w in wps) and any(w.get("transport_mode") for w in wps[1:] if isinstance(w, dict)) else None
 
     allow_tiles = os.environ.get("AI_EDITOR_OFFLINE_MAPS", "0") != "1"
-    tm_style = resolve_travel_map_style(
-        args.style or "auto",
-        prompt_text=f"{args.origin or ''} {args.destination or ''}",
-        transport_mode=args.transport_mode or "auto",
-    )
+    eff_mode = (leg_modes[0] if leg_modes else None) or args.transport_mode or "auto"
+    if (args.style or "auto").strip().lower() == "auto" and allow_tiles:
+        from video_editing_ai.renderer.travel_map import haversine_km, infer_transport_mode
+        focus_i = max(0, min(max(0, len(wps) - 2), int(getattr(args, "leg_index", None) or 0)))
+        km_est = haversine_km(float(wps[focus_i]["lat"]), float(wps[focus_i]["lon"]), float(wps[focus_i + 1]["lat"]), float(wps[focus_i + 1]["lon"])) if len(wps) >= 2 else 0.0
+        inf_m = infer_transport_mode(km_est, str(wps[focus_i].get("label", "")), str(wps[focus_i + 1].get("label", "")), hint=eff_mode)
+        if inf_m in ("flight", "boat") or (inf_m == "train" and km_est >= 10.0):
+            tm_style = "satellite_hybrid_4k"
+        else:
+            tm_style = resolve_travel_map_style("auto", prompt_text=f"{args.origin or ''} {args.destination or ''}", transport_mode=inf_m)
+    else:
+        tm_style = resolve_travel_map_style(
+            args.style or "auto",
+            prompt_text=f"{args.origin or ''} {args.destination or ''}",
+            transport_mode=eff_mode,
+        )
+    req_leg_idx = getattr(args, "leg_index", None)
+    use_leg_idx = int(req_leg_idx) if req_leg_idx is not None else (None if len(wps) > 2 else 0)
     res_mp4 = render_travel_map_clip(
         waypoints=wps,
         output_mp4=out_mp4,
         style=tm_style,
         duration=float(args.duration or 5.2),
-        leg_index=None if len(wps) > 2 else 0,
+        leg_index=use_leg_idx,
         transport_mode=args.transport_mode or "auto",
         allow_tile_fetch=allow_tiles,
         with_audio=bool(args.with_audio),
@@ -1577,9 +1596,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("--duck-volume", type=float, default=None, help="BGM ducking volume (0.02-0.5) for --action audio-mix")
     p_ec.add_argument("--origin", default=None, help="Departure city/place or 'lat,lon' for --action insert-travel-map")
     p_ec.add_argument("--destination", default=None, help="Arrival city/place or 'lat,lon' for --action insert-travel-map")
-    p_ec.add_argument("--map-style", default=None, help="Cartography style for --action insert-travel-map")
-    p_ec.add_argument("--placement", default=None, help="Placement mode: v2_flyover or v3_pip for --action insert-travel-map")
+    p_ec.add_argument("--map-style", default=None, help="Cartography style for --action insert-travel-map (auto | satellite_hybrid_4k | google_road_navigator | aerial_relief_hybrid | midnight_vox_atlas | archival_expedition_parchment | kinfolk_minimal_monograph)")
+    p_ec.add_argument("--placement", default=None, help="Placement mode: v1_interlude | v2_flyover | v3_pip for --action insert-travel-map")
     p_ec.add_argument("--transport-mode", default=None, help="Transport mode: auto | flight | train | drive | walk | boat")
+    p_ec.add_argument("--leg-index", type=int, default=None, help="Optional 0-based focused leg index when passing multi-stop waypoints")
+    p_ec.add_argument("--waypoints-json", default=None, help="Optional multi-stop waypoints JSON string or file path for --action insert-travel-map")
     p_ec.add_argument("--ops-json", default=None, help="JSON string or file path containing a list of surgical operations")
     p_ec.add_argument("--output", default=None, help="Optional output report JSON path")
     p_ec.set_defaults(func=cmd_edit_cut)
@@ -1703,9 +1724,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_rtm.add_argument("--origin", default=None, help="Departure city/place or 'lat,lon'")
     p_rtm.add_argument("--destination", default=None, help="Arrival city/place or 'lat,lon'")
     p_rtm.add_argument("--waypoints-json", default=None, help="Optional multi-stop waypoints JSON string or file")
-    p_rtm.add_argument("--style", default="auto", help="auto | midnight_vox_atlas | archival_expedition_parchment | aerial_relief_hybrid | kinfolk_minimal_monograph")
+    p_rtm.add_argument("--style", default="auto", help="auto | satellite_hybrid_4k | google_road_navigator | aerial_relief_hybrid | midnight_vox_atlas | archival_expedition_parchment | kinfolk_minimal_monograph")
     p_rtm.add_argument("--transport-mode", default="auto", help="auto | flight | train | drive | walk | boat")
-    p_rtm.add_argument("--duration", type=float, default=3.2, help="Animation duration in seconds (default 3.2)")
+    p_rtm.add_argument("--leg-index", type=int, default=None, help="Optional 0-based leg index to zoom closely into one stop leg while keeping full multi-stop context visible")
+    p_rtm.add_argument("--duration", type=float, default=5.2, help="Animation duration in seconds (default 5.2)")
     p_rtm.add_argument("--with-audio", action="store_true", default=False, help="Synthesize stereo flyover sweep + landing chime audio")
     p_rtm.add_argument("--output", default=None, help="Optional output MP4 path")
     p_rtm.set_defaults(func=cmd_render_travel_map)

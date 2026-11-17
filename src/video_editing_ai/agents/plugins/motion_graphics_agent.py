@@ -474,7 +474,17 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
         ]
         total_route_km = round(sum(leg_kms), 2)
         max_leg_km = max(leg_kms, default=0.0)
-        map_active = (tm_mode != "off") and (len(waypoints) >= 2) and (force_syn or max_leg_km >= 0.35)
+        existing_v1_map_wins: list[tuple[float, float]] = [
+            (float(vc.timeline_start) - 0.15, float(vc.timeline_start) + float(vc.duration) + 0.15)
+            for vc in timeline.visual_track
+            if "travel_maps" in str(vc.source) or "[2.5D TRAVEL MAP" in str(vc.narrative_note or "")
+        ]
+        map_active = (
+            (tm_mode != "off")
+            and (len(waypoints) >= 2)
+            and (force_syn or max_leg_km >= 0.35)
+            and not existing_v1_map_wins
+        )
 
         map_segments: list[TravelMapSegmentSpec] = []
         v2_map_windows: list[tuple[float, float]] = []
@@ -496,6 +506,12 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 step = (n_total_legs - 1) / 7.0
                 chosen_legs = sorted({int(round(i * step)) for i in range(8)})
 
+            all_leg_modes: list[str] = []
+            for k_m in range(n_total_legs):
+                ch_d = chap_by_id.get(waypoints[k_m + 1].chapter_id)
+                h_m = getattr(ch_d, "transport_mode", "auto") if ch_d is not None else "auto"
+                all_leg_modes.append(infer_transport_mode(leg_kms[k_m], waypoints[k_m].label, waypoints[k_m + 1].label, hint=h_m))
+
             allow_tiles = os.environ.get("AI_EDITOR_OFFLINE_MAPS", "0") != "1"
             maps_dir = blackboard.project_dir / "cache" / "maps"
             tiles_cache_dir = maps_dir / "tiles"
@@ -510,21 +526,21 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 dest_wp = waypoints[leg_i + 1]
                 leg_km = leg_kms[leg_i]
                 bearing = round(initial_bearing_deg(orig_wp.lat, orig_wp.lon, dest_wp.lat, dest_wp.lon), 1)
-                ch_dest = chap_by_id.get(dest_wp.chapter_id)
-                mode_hint = getattr(ch_dest, "transport_mode", "auto") if ch_dest is not None else "auto"
-                t_mode = infer_transport_mode(leg_km, orig_wp.label, dest_wp.label, hint=mode_hint)
-                leg_style = (
-                    resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
-                    if str(tm_raw_style or "auto").strip().lower() == "auto"
-                    else tm_style
-                )
+                t_mode = all_leg_modes[leg_i]
+                if str(tm_raw_style or "auto").strip().lower() == "auto":
+                    if t_mode in ("flight", "boat") or (t_mode == "train" and leg_km >= 10.0):
+                        leg_style = "satellite_hybrid_4k" if allow_tiles else resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
+                    else:
+                        leg_style = resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
+                else:
+                    leg_style = tm_style
 
                 if tm_mode == "picture_in_picture":
                     want_place = "v3_pip"
                 elif tm_mode == "flyover_interlude":
                     want_place = "v2_flyover"
                 elif tm_mode == "hybrid":
-                    want_place = "v2_flyover" if leg_pos == 0 else "v3_pip"
+                    want_place = "v2_flyover" if (leg_pos < 4 and (leg_pos == 0 or leg_km >= 0.35)) else "v3_pip"
                 else:
                     want_place = "v2_flyover" if max_leg_km >= 1.0 else "v3_pip"
 
@@ -555,7 +571,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                                 abs(float(vc.timeline_start) - dest_t),
                             ),
                         )
-                        seg_dur = round(min(5.6, max(1.8, float(host_v1.duration) - 0.12)), 2)
+                        seg_dur = round(min(7.2, max(1.8, float(host_v1.duration) - 0.12)), 2)
                         seg_start = round(float(host_v1.timeline_start) + 0.06, 2)
                         map_mp4 = maps_dir / f"flyover_leg_{leg_i + 1:02d}.mp4"
                         render_travel_map_clip(
@@ -572,6 +588,8 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                             allow_tile_fetch=allow_tiles,
                             with_audio=False,
                             cache_dir=tiles_cache_dir,
+                            leg_modes=all_leg_modes,
+                            dynamic_zoom=allow_tiles,
                         )
                         broll_id = f"broll_map_{len(v2_map_windows) + 1:02d}"
                         timeline.broll_track.append(
@@ -748,9 +766,13 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             except Exception:
                 pass
 
-        # Helper to check if a bottom-third card would collide with a burned-in photo plaque or active subtitle
+        # Helper to check if a bottom-third card would collide with a burned-in photo plaque, full-screen travel map, or active subtitle
+        all_map_wins = [*existing_v1_map_wins, *v2_map_windows]
+
         def _has_bottom_collision(start_t: float, dur_t: float, style_name: str) -> bool:
             end_t = start_t + dur_t
+            if _overlaps_intervals(start_t, end_t, all_map_wins):
+                return True
             # Check photo burned-in caption plaque (top-level or nested ken_burns caption)
             for vc in timeline.visual_track:
                 if vc.timeline_start < end_t and (vc.timeline_start + vc.duration) > start_t:
@@ -770,6 +792,8 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
 
         for mg in mg_items:
             st_t, dur_t = _clamp_to_v1_segment(timeline, mg.timeline_start, mg.duration)
+            if _overlaps_intervals(st_t, st_t + dur_t, all_map_wins):
+                continue
             route_style = "curved_gps_ribbon" if len(mg.waypoints) >= 2 else "route_map_card"
             ch_accent = sample_shot_accent_hex(
                 _resolve_sample_image_for_time(st_t, timeline, catalog),
