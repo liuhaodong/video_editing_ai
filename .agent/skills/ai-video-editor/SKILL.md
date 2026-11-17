@@ -157,10 +157,29 @@ When the user asks for targeted edits (e.g., *"trim the second clip by 1.5s"*, *
 ```
 
 ### Phase 6: Interactive 5-Tab Web Studio (`serve`)
-To let the user interactively manage projects, co-refine intake, watch real-time Agent Doing + Director Thinking streams, or download the newly rendered `.mp4` in their browser:
+To let the user interactively manage projects, co-refine intake, watch real-time Agent Doing + Director Thinking streams, or download/publish the newly rendered `.mp4` in their browser:
 ```bash
 .venv/bin/python -m video_editing_ai.cli serve --project-dir "<project_dir>" --host 0.0.0.0 --port 8000
 ```
+
+### Phase 7: Confirmation-Gated Direct YouTube Publishing (`publish-youtube`)
+Whenever the user asks to upload or publish a rendered video to YouTube, follow this strict **two-step confirmed publish workflow** (NEVER upload without explicit user confirmation):
+1. **Mechanical Preparation Step (Zero Network Upload)**: Generate `<project_dir>/youtube_publish_draft.json`, custom `1280x720` `< 2 MB` `youtube_thumbnail.jpg`, auto-detected `00:00` YouTube Chapters, and a SHA-256 `confirmation_token`:
+   ```bash
+   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py publish-youtube --project-dir "<project_dir>" --prepare
+   ```
+2. **AI Visual Audit & Mandatory User Confirmation Gate (`ask_question`)**:
+   - Inspect `<project_dir>/youtube_thumbnail.jpg` via `read_file` and read `<project_dir>/youtube_publish_draft.json`.
+   - Present the exact **Title**, **Description & `00:00` Chapters**, **Visibility** (`unlisted` default | `private` | `public`), **Audience (`self_declared_made_for_kids`: `False` default)**, **Video Resolution / HDR / File Size**, and **Resolved Auth Mode** (`oauth` or zero-setup `browser`) to the user via `ask_question` (`ask_question_tool_payload`).
+3. **Confirmed Publish Step (Only After Explicit User Approval)**:
+   - If `auth_mode_resolved == "oauth"`:
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py publish-youtube --project-dir "<project_dir>" --confirmed --confirm-token "<sha256_token>"
+     ```
+   - If `auth_mode_resolved == "browser"` (Zero-Setup Studio Browser Upload): copy `<project_dir>/final_story.mp4` and `<project_dir>/youtube_thumbnail.jpg` into `<Artifact Directory>/browser_sandbox/uploads/`, invoke `invoke_subagent(TypeName="browser", Model="flash")` on `https://studio.youtube.com` (pausing cleanly if Google Sign-In is required, then resuming via `send_message` to upload, set Title, Description with chapters, Thumbnail, Made-for-Kids, Tags, and Privacy, click Save/Publish, and capture the `https://youtu.be/...` link), then record the receipt:
+     ```bash
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py publish-youtube --project-dir "<project_dir>" --record-browser-receipt "<youtube_url>" --confirmed --confirm-token "<sha256_token>"
+     ```
 
 ---
 

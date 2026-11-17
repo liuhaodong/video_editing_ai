@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import sys
 from typing import Optional
 
 from rich.console import Console
@@ -20,6 +21,11 @@ from .cloud.google_photos import (
     format_picker_date_query,
     get_default_browser_downloads_dir,
     run_google_photos_sync,
+)
+from .cloud.youtube_publisher import (
+    YouTubeAuthManager,
+    execute_youtube_publish,
+    prepare_youtube_publish,
 )
 from .docs_sync import resolve_repo_root, sync_agent_documentation
 from .doctor import collect_environment_diagnostics
@@ -102,6 +108,170 @@ def cmd_google_photos_auth(
 
     auth.authenticate_interactive(open_browser=not no_browser, auth_url_callback=_show_url)
     console.print(f"[bold green][OK] Google Photos OAuth connected![/bold green] Token saved to: {auth.token_path}")
+
+
+@app.command("youtube-auth")
+def cmd_youtube_auth(
+    client_secrets: Optional[Path] = typer.Option(None, "--client-secrets", help="Path to Google Cloud Desktop OAuth client_secret.json"),
+    token_path: Optional[Path] = typer.Option(None, "--token-path", help="Optional custom path to store YouTube OAuth token.json"),
+    include_captions_scope: bool = typer.Option(False, "--include-captions-scope", help="Also request youtube.force-ssl scope to upload .srt captions"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not auto-open browser during OAuth consent"),
+    status: bool = typer.Option(False, "--status", help="Inspect current YouTube Studio Browser & OAuth readiness"),
+    revoke: bool = typer.Option(False, "--revoke", help="Delete the local stored YouTube OAuth token.json"),
+) -> None:
+    """Inspect YouTube Studio readiness or configure optional YouTube Data API v3 OAuth 2.0 PKCE credentials."""
+    auth = YouTubeAuthManager(
+        client_secrets_path=client_secrets,
+        token_path=token_path,
+        include_captions_scope=include_captions_scope,
+    )
+    if revoke:
+        removed = auth.revoke_local_token()
+        console.print(f"[green][OK][/green] Local YouTube OAuth token removed: {removed} ({auth.token_path})")
+        return
+    if status:
+        st = auth.get_auth_status()
+        oauth_badge = "[green]READY[/green]" if st["ready"] else "[yellow]OPTIONAL / NOT CONFIGURED[/yellow]"
+        console.print(
+            Panel(
+                "[bold cyan]YouTube Publishing Connection Status[/bold cyan]\n"
+                "  - YouTube Studio Browser Mode: [green]READY[/green] (https://studio.youtube.com)\n"
+                f"  - YouTube Data API OAuth:      {oauth_badge}\n"
+                f"  - Config Dir:     {st['config_dir']}\n"
+                f"  - Client Secrets: {st['client_secrets_path']} (exists={st['client_secrets_configured']})\n"
+                f"  - Token File:     {st['token_path']} (present={st['token_present']}, valid={st['token_valid']}, refresh={st['refresh_token_present']})\n"
+                f"  - Scope:          {st['scope']}"
+            )
+        )
+        return
+
+    if not auth.client_secrets_path.exists():
+        console.print(
+            Panel(
+                "[bold green]Zero-Setup Tip:[/bold green] You can publish via YouTube Studio Browser mode with no GCP OAuth setup!\n"
+                "Run: [bold cyan]ai-editor youtube-publish --project-dir <project_dir> --prepare-only[/bold cyan]\n\n"
+                + auth.format_setup_instructions(),
+                title="[bold yellow]Optional YouTube Data API v3 OAuth Setup[/bold yellow]",
+            )
+        )
+        raise typer.Exit(code=1)
+
+    def _show_url(url: str) -> None:
+        console.print(f"[bold cyan]Open this Google OAuth consent URL in your browser:[/bold cyan]\n{url}\n")
+        if not no_browser:
+            import webbrowser
+
+            webbrowser.open(url, new=2)
+
+    auth.authenticate_interactive(open_browser=not no_browser, auth_url_callback=_show_url)
+    console.print(f"[bold green][OK] YouTube OAuth connected![/bold green] Token saved to: {auth.token_path}")
+
+
+@app.command("youtube-publish")
+def cmd_youtube_publish(
+    project_dir: Path = typer.Option(Path("workspace_project"), "-o", "--project-dir", help="Project workspace directory containing final_story.mp4"),
+    video: Optional[Path] = typer.Option(None, "--video", help="Optional custom MP4 path (defaults to <project_dir>/final_story.mp4)"),
+    title: Optional[str] = typer.Option(None, "--title", help="Custom YouTube video title (<= 100 chars)"),
+    description: Optional[str] = typer.Option(None, "--description", help="Custom YouTube description (<= 5000 chars)"),
+    tags: Optional[str] = typer.Option(None, "--tags", help="Comma-separated YouTube tags"),
+    privacy: str = typer.Option("unlisted", "--privacy", help="Visibility: unlisted (default) | private | public"),
+    made_for_kids: bool = typer.Option(False, "--made-for-kids/--not-made-for-kids", help="YouTube Kids COPPA declaration (default: False)"),
+    category_id: Optional[str] = typer.Option(None, "--category-id", help="YouTube numeric categoryId (default: 19 Travel or 22 People)"),
+    thumbnail: Optional[Path] = typer.Option(None, "--thumbnail", help="Optional source image for 1280x720 custom thumbnail"),
+    auth_mode: str = typer.Option("auto", "--auth-mode", help="auto | oauth | browser"),
+    prepare_only: bool = typer.Option(False, "--prepare-only", help="Generate draft, 00:00 chapters & thumbnail without uploading"),
+    confirm_token: Optional[str] = typer.Option(None, "--confirm-token", help="Explicit confirmation SHA-256 token from --prepare-only"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not auto-open browser"),
+    client_secrets: Optional[Path] = typer.Option(None, "--client-secrets", help="Optional custom client_secret.json path"),
+    token_path: Optional[Path] = typer.Option(None, "--token-path", help="Optional custom YouTube token.json path"),
+) -> None:
+    """Prepare YouTube metadata + thumbnail and publish ONLY after explicit user confirmation."""
+    auth_mgr = YouTubeAuthManager(
+        client_secrets_path=client_secrets,
+        token_path=token_path,
+        include_captions_scope=True,
+    )
+    draft = prepare_youtube_publish(
+        project_dir=project_dir,
+        video_path=video,
+        title=title,
+        description=description,
+        tags=tags,
+        privacy_status=privacy,
+        self_declared_made_for_kids=made_for_kids,
+        category_id=category_id,
+        thumbnail_source=thumbnail,
+        auth_mode=auth_mode,
+        auth_manager=auth_mgr,
+    )
+    size_mb = draft.video_size_bytes / (1024 * 1024)
+    hdr_lbl = "10-bit HLG HDR" if draft.is_hdr else "SDR"
+    chap_preview = "\n    ".join(f"{c.timecode} {c.title}" for c in draft.chapters[:8]) if draft.chapters else "(none)"
+    warn_lines = ("\n  - Warnings: " + " | ".join(draft.warnings)) if draft.warnings else ""
+    console.print(
+        Panel(
+            f"[bold cyan]Prepared YouTube Publish Draft[/bold cyan]\n"
+            f"  - Video:         {draft.video_path} ({draft.width}x{draft.height} {hdr_lbl}, {size_mb:.1f} MB)\n"
+            f"  - Title:         {draft.title}\n"
+            f"  - Visibility:    [bold]{draft.privacy_status}[/bold]\n"
+            f"  - Made for Kids: {draft.self_declared_made_for_kids}\n"
+            f"  - Mode:          {draft.auth_mode_resolved}\n"
+            f"  - Thumbnail:     {draft.thumbnail_path}\n"
+            f"  - Chapters:\n    {chap_preview}\n"
+            f"  - Confirm Token: [yellow]{draft.confirmation_token}[/yellow]{warn_lines}",
+            title="[bold yellow]Review Before Publishing[/bold yellow]",
+        )
+    )
+
+    if prepare_only:
+        console.print(
+            f"[green][OK][/green] Draft saved to {Path(draft.project_dir) / 'youtube_publish_draft.json'}.\n"
+            f"To confirm & publish non-interactively, re-run with:\n"
+            f"  [bold cyan]ai-editor youtube-publish --project-dir \"{draft.project_dir}\" --confirm-token {draft.confirmation_token}[/bold cyan]"
+        )
+        return
+
+    token_to_use = str(confirm_token or "").strip()
+    if not token_to_use:
+        refuse_msg = (
+            "[bold yellow]Upload blocked:[/bold yellow] Non-interactive shell requires explicit --confirm-token.\n"
+            f"Review the draft above and re-run with --confirm-token {draft.confirmation_token}"
+        )
+        if not sys.stdin.isatty():
+            console.print(refuse_msg)
+            raise typer.Exit(code=2)
+        try:
+            approved = typer.confirm("Confirm publishing this video to YouTube with the settings above?", default=False)
+        except Exception:
+            console.print(refuse_msg)
+            raise typer.Exit(code=2)
+        if not approved:
+            console.print("[yellow]Publish cancelled by user. Local video untouched.[/yellow]")
+            return
+        token_to_use = draft.confirmation_token
+
+    try:
+        receipt = execute_youtube_publish(
+            draft=draft,
+            confirmed=True,
+            confirmation_token=token_to_use,
+            auth_manager=auth_mgr,
+            open_browser=not no_browser,
+            progress_callback=lambda sent, tot, msg: console.print(f"  [cyan]{msg}[/cyan]") if tot > 0 else None,
+        )
+    except PermissionError as exc:
+        console.print(f"[bold red]Confirmation Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel(
+            f"[bold green]YouTube Publish Complete ({receipt.auth_mode_used})[/bold green]\n"
+            f"  - Watch URL:  {receipt.watch_url or '(upload in opened Studio tab)'}\n"
+            f"  - Studio URL: {receipt.studio_url}\n"
+            f"  - Visibility: {receipt.effective_privacy_status}\n"
+            f"  - Receipt:    {Path(draft.project_dir) / 'youtube_publish_receipt.json'}"
+        )
+    )
 
 
 def _make_cli_cloud_callbacks(no_browser: bool = False):
@@ -659,6 +829,7 @@ def cmd_doctor(
     fp = report["ffprobe"]
     hw = report["hardware"]
     gp = report.get("google_photos") or {}
+    yt = report.get("youtube") or {}
     heif = report["heif"]
     ag = report["antigravity"]
     pkgs = report["packages"]
@@ -674,6 +845,11 @@ def cmd_doctor(
         if gp.get("ready")
         else "[green]READY (Browser Login)[/green]"
     )
+    yt_badge = (
+        "[green]READY (OAuth + Studio Browser)[/green]"
+        if yt.get("ready")
+        else "[green]READY (Studio Browser)[/green]"
+    )
 
     console.print(
         Panel(
@@ -684,6 +860,7 @@ def cmd_doctor(
             + f"\n  - ffprobe:   {fp_badge} {fp['path'] or 'Not found on PATH'}"
             + f"\n  - HEIF/HEIC: {heif_badge} {'pillow-heif registered' if heif['ok'] else heif['error']}"
             + f"\n  - Google Photos: {gp_badge} (secrets={gp.get('client_secrets_configured', False)}, token={gp.get('token_valid', False)})"
+            + f"\n  - YouTube:       {yt_badge} (secrets={yt.get('client_secrets_configured', False)}, token={yt.get('token_valid', False)})"
             + f"\n  - Antigravity: {ag_badge} sdk={ag['sdk_version'] or 'missing'}, "
             + f"skill={'OK' if ag['workspace_skill_ok'] else 'missing'}, "
             + f"rules={'OK' if ag['workspace_rules_ok'] else 'missing'}, "

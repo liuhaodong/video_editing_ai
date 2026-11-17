@@ -2198,7 +2198,7 @@ def _paste_hero_photo_callout(
 
     s = world_w / 1920.0
     accent_rgb = accent_override or spec["accent"]
-    card_w = int(round(212 * s * (0.84 + 0.16 * bloom_p)))
+    card_w = int(round(256 * s * (0.88 + 0.12 * bloom_p)))
     img_h = int(round(card_w * 0.60))
     cap_h = max(14, int(round(24 * s)))
     card_h = img_h + cap_h + int(round(12 * s))
@@ -3096,7 +3096,7 @@ def render_travel_map_frame(
     # Screen-space FROM / TO hero photo Polaroids placed cleanly outside label/HUD rects, BEFORE drawing text pills on top
     orig_card_center: Optional[tuple[float, float]] = None
     if orig.hero_thumbnail_path:
-        orig_bloom = min(1.0, 0.50 + float(t_norm) * 3.0)
+        orig_bloom = min(1.0, 0.72 + float(t_norm) * 3.0)
         orig_card_center = _paste_hero_photo_callout(
             world_rgba=out_rgba,
             dest_px=screen_stops[i0],

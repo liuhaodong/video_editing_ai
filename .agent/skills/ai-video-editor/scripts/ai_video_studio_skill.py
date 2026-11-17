@@ -91,10 +91,15 @@ from video_editing_ai.agents import (  # noqa: E402
 )
 from video_editing_ai.cloud import (  # noqa: E402
     GooglePhotosAuthManager,
+    YouTubeAuthManager,
     build_google_photos_web_search_url,
+    execute_youtube_publish,
     format_picker_date_query,
+    prepare_youtube_publish,
+    record_browser_publish_receipt,
     run_google_photos_sync,
 )
+from video_editing_ai.models.schema import YouTubePublishDraft  # noqa: E402
 from video_editing_ai.exporters.nle_export import export_all_nle_formats  # noqa: E402
 from video_editing_ai.models.schema import CreativeBrief, EditTimeline  # noqa: E402
 from video_editing_ai.planner.story_director import generate_storyboard_markdown  # noqa: E402
@@ -204,6 +209,124 @@ def cmd_google_photos_auth(args: argparse.Namespace) -> int:
         auth_url_callback=lambda url: print(f"Open Google Photos consent URL in your browser:\n{url}"),
     )
     print(f"Success! Google Photos OAuth connected -> {auth.token_path}")
+    return 0
+
+
+def cmd_youtube_auth(args: argparse.Namespace) -> int:
+    """Inspect or configure YouTube Data API v3 OAuth 2.0 PKCE credentials."""
+    auth = YouTubeAuthManager(
+        client_secrets_path=getattr(args, "client_secrets", None),
+        token_path=getattr(args, "token_path", None),
+        include_captions_scope=bool(getattr(args, "include_captions_scope", False)),
+    )
+    if getattr(args, "revoke", False):
+        removed = auth.revoke_local_token()
+        print(f"Removed YouTube OAuth token: {removed} ({auth.token_path})")
+        return 0
+    if getattr(args, "status", False):
+        st = auth.get_auth_status()
+        st["studio_browser_ready"] = True
+        print(json.dumps(st, indent=2))
+        return 0
+    if not auth.client_secrets_path.exists():
+        print(auth.format_setup_instructions(), file=sys.stderr)
+        return 1
+    auth.authenticate_interactive(
+        open_browser=not bool(getattr(args, "no_browser", False)),
+        auth_url_callback=lambda url: print(f"Open YouTube consent URL in your browser:\n{url}"),
+    )
+    print(f"Success! YouTube OAuth connected -> {auth.token_path}")
+    return 0
+
+
+def cmd_publish_youtube(args: argparse.Namespace) -> int:
+    """Prepare or execute confirmation-gated YouTube publishing."""
+    proj = Path(args.project_dir).expanduser().resolve()
+    auth_mgr = YouTubeAuthManager(
+        client_secrets_path=getattr(args, "client_secrets", None),
+        token_path=getattr(args, "token_path", None),
+        include_captions_scope=True,
+    )
+
+    draft_path = proj / "youtube_publish_draft.json"
+    record_url = getattr(args, "record_browser_receipt", None)
+    confirm_tok = getattr(args, "confirm_token", None)
+    confirmed_flag = bool(getattr(args, "confirmed", False))
+
+    if record_url:
+        if not draft_path.is_file():
+            print(f"Error: Draft file missing at {draft_path}. Run --prepare first.", file=sys.stderr)
+            return 1
+        draft = YouTubePublishDraft.from_json_file(draft_path)
+        try:
+            receipt = record_browser_publish_receipt(
+                project_dir=proj,
+                draft=draft,
+                confirmed=confirmed_flag,
+                confirmation_token=confirm_tok or "",
+                video_url_or_id=record_url,
+                auth_mode_used="antigravity_browser",
+            )
+        except PermissionError as exc:
+            print(f"Confirmation Error: {exc}", file=sys.stderr)
+            return 2
+        if args.output:
+            _write_json(Path(args.output).resolve(), receipt.model_dump(mode="json"))
+        print(json.dumps(receipt.model_dump(mode="json"), indent=2, ensure_ascii=False))
+        return 0
+
+    has_meta_overrides = any(
+        getattr(args, f, None) is not None
+        for f in ("video", "title", "description", "tags", "category_id", "thumbnail")
+    ) or bool(getattr(args, "made_for_kids", False)) or (
+        getattr(args, "privacy", "unlisted") != "unlisted"
+    ) or (getattr(args, "auth_mode", "auto") != "auto")
+
+    if confirmed_flag and confirm_tok and not has_meta_overrides and draft_path.is_file():
+        draft = YouTubePublishDraft.from_json_file(draft_path)
+    else:
+        draft = prepare_youtube_publish(
+            project_dir=proj,
+            video_path=getattr(args, "video", None),
+            title=getattr(args, "title", None),
+            description=getattr(args, "description", None),
+            tags=getattr(args, "tags", None),
+            privacy_status=getattr(args, "privacy", "unlisted"),
+            self_declared_made_for_kids=bool(getattr(args, "made_for_kids", False)),
+            category_id=getattr(args, "category_id", None),
+            thumbnail_source=getattr(args, "thumbnail", None),
+            auth_mode=getattr(args, "auth_mode", "auto"),
+            auth_manager=auth_mgr,
+        )
+
+    if getattr(args, "prepare", False) or not confirmed_flag:
+        payload = draft.model_dump(mode="json")
+        if args.output:
+            _write_json(Path(args.output).resolve(), payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        if not getattr(args, "prepare", False) and not confirmed_flag:
+            print(
+                "\nAwaiting explicit confirmation. Re-run with --confirmed --confirm-token "
+                f"{draft.confirmation_token} after user approval.",
+                file=sys.stderr,
+            )
+            return 2
+        return 0
+
+    try:
+        receipt = execute_youtube_publish(
+            draft=draft,
+            confirmed=True,
+            confirmation_token=confirm_tok or "",
+            auth_manager=auth_mgr,
+            open_browser=not bool(getattr(args, "no_browser", False)),
+        )
+    except PermissionError as exc:
+        print(f"Confirmation Error: {exc}", file=sys.stderr)
+        return 2
+    if args.output:
+        _write_json(Path(args.output).resolve(), receipt.model_dump(mode="json"))
+    print(json.dumps(receipt.model_dump(mode="json"), indent=2, ensure_ascii=False))
     return 0
 
 
@@ -1608,6 +1731,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_sgp.add_argument("--token-path", default=None, help="Optional path to OAuth token.json")
     p_sgp.add_argument("--output", default=None, help="Optional output JSON report path")
     p_sgp.set_defaults(func=cmd_sync_google_photos)
+
+    # 23. youtube-auth
+    p_yta = sub.add_parser(
+        "youtube-auth",
+        help="Inspect YouTube Studio readiness or configure OAuth 2.0 PKCE credentials for YouTube Data API v3",
+    )
+    p_yta.add_argument("--client-secrets", default=None, help="Optional path to Desktop OAuth client_secret.json")
+    p_yta.add_argument("--token-path", default=None, help="Optional path to YouTube OAuth token.json")
+    p_yta.add_argument("--include-captions-scope", action="store_true", default=False, help="Include youtube.force-ssl scope for .srt upload")
+    p_yta.add_argument("--no-browser", action="store_true", default=False, help="Print consent URL without opening browser")
+    p_yta.add_argument("--status", action="store_true", default=False, help="Print JSON credential & token readiness status")
+    p_yta.add_argument("--revoke", action="store_true", default=False, help="Delete stored YouTube OAuth token.json")
+    p_yta.set_defaults(func=cmd_youtube_auth)
+
+    # 24. publish-youtube
+    p_ytp = sub.add_parser(
+        "publish-youtube",
+        help="Prepare YouTube draft/thumbnail/chapters and publish ONLY with explicit confirmation token",
+    )
+    p_ytp.add_argument("--project-dir", required=True, help="Project workspace directory containing final_story.mp4")
+    p_ytp.add_argument("--video", default=None, help="Optional custom MP4 path")
+    p_ytp.add_argument("--title", default=None, help="Custom YouTube video title")
+    p_ytp.add_argument("--description", default=None, help="Custom YouTube video description")
+    p_ytp.add_argument("--tags", default=None, help="Comma-separated YouTube tags")
+    p_ytp.add_argument("--privacy", default="unlisted", help="unlisted (default) | private | public")
+    p_ytp.add_argument("--made-for-kids", action="store_true", default=False, help="Mark selfDeclaredMadeForKids=True (default False)")
+    p_ytp.add_argument("--category-id", default=None, help="Optional numeric YouTube categoryId")
+    p_ytp.add_argument("--thumbnail", default=None, help="Optional custom thumbnail source image")
+    p_ytp.add_argument("--auth-mode", default="auto", help="auto | oauth | browser")
+    p_ytp.add_argument("--prepare", action="store_true", default=False, help="Generate draft, 00:00 chapters & thumbnail without uploading")
+    p_ytp.add_argument("--confirmed", action="store_true", default=False, help="Confirm explicit user approval to publish")
+    p_ytp.add_argument("--confirm-token", default=None, help="SHA-256 confirmation token generated by --prepare")
+    p_ytp.add_argument("--record-browser-receipt", default=None, help="Record published YouTube URL or ID after browser upload")
+    p_ytp.add_argument("--no-browser", action="store_true", default=False, help="Do not auto-open browser")
+    p_ytp.add_argument("--client-secrets", default=None, help="Optional path to OAuth client_secret.json")
+    p_ytp.add_argument("--token-path", default=None, help="Optional path to YouTube OAuth token.json")
+    p_ytp.add_argument("--output", default=None, help="Optional output JSON report path")
+    p_ytp.set_defaults(func=cmd_publish_youtube)
 
     return parser
 

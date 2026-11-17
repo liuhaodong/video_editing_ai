@@ -298,6 +298,9 @@
             <a id="btnBannerDownloadMp4" class="btn primary" href="#" download style="text-decoration:none;">
               ⬇️ Download Newly Rendered Video (.mp4)
             </a>
+            <button class="btn youtube-btn" id="btnBannerPublishYoutube" type="button" style="display:none;">
+              📺 Publish to YouTube...
+            </button>
             <button class="btn secondary" id="btnGoToTheaterTab" type="button">
               🎬 Watch in Video Theater (Tab 4) &rarr;
             </button>
@@ -369,9 +372,14 @@
             <h2>Final 4K HDR Video Theater, Downloads &amp; Curated Gallery</h2>
             <p class="muted">Preview your rendered 4K 10-bit HLG HDR master cut, download the newly rendered <code>.mp4</code> to your computer, and inspect the Director's Sign-Off.</p>
           </div>
-          <a id="btnHeroDownloadMp4" class="btn primary btn-hero" href="#" download style="display:none; text-decoration:none;">
-            ⬇️ Download Newly Rendered Video (.mp4)
-          </a>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <a id="btnHeroDownloadMp4" class="btn primary btn-hero" href="#" download style="display:none; text-decoration:none;">
+              ⬇️ Download Newly Rendered Video (.mp4)
+            </a>
+            <button class="btn youtube-btn btn-hero" id="btnHeroPublishYoutube" type="button" style="display:none;">
+              📺 Publish to YouTube...
+            </button>
+          </div>
         </div>
 
         <div class="split-grid">
@@ -502,6 +510,94 @@
       </div>
       <div id="browserFolderStats" class="muted" style="font-size:0.8rem; margin-bottom:8px;"></div>
       <div id="browserSubdirList" class="browser-subdir-list">Loading folders...</div>
+    </div>
+  </div>
+
+  <!-- YOUTUBE PUBLISH REVIEW & EXPLICIT CONFIRMATION MODAL -->
+  <div id="youtubePublishModal" class="modal-backdrop" style="display:none;">
+    <div class="modal-card youtube-modal-card">
+      <div class="card-header-row">
+        <div>
+          <h3 style="margin:0;">📺 Publish Video to YouTube (Review &amp; Confirm)</h3>
+          <p class="muted" style="margin:4px 0 0; font-size:0.8rem;">Nothing is uploaded until you review every setting below and check confirmation.</p>
+        </div>
+        <button class="btn small secondary" id="btnCloseYtModal" type="button">&times; Close</button>
+      </div>
+
+      <div class="yt-preview-grid">
+        <div class="yt-thumb-box">
+          <img id="ytThumbPreview" alt="YouTube 1280x720 Thumbnail Preview" />
+          <div id="ytVideoSpecsBadge" class="yt-meta-pill">Preparing draft...</div>
+          <div id="ytAuthStatusBadge" class="yt-meta-pill secondary">Checking auth mode...</div>
+          <div id="ytWarningsBox" class="yt-warnings-box" style="display:none;"></div>
+        </div>
+
+        <div class="yt-form-box">
+          <label for="ytTitleInput">Video Title (max 100 chars)</label>
+          <input id="ytTitleInput" type="text" maxlength="100" />
+
+          <div class="form-grid" style="margin-top:8px;">
+            <div>
+              <label for="ytPrivacySelect">Visibility</label>
+              <select id="ytPrivacySelect">
+                <option value="unlisted" selected>Unlisted (Anyone with link)</option>
+                <option value="private">Private (Only you / invited)</option>
+                <option value="public">Public (Visible on channel)</option>
+              </select>
+            </div>
+            <div>
+              <label for="ytMadeForKidsSelect">Audience (Made for Kids)</label>
+              <select id="ytMadeForKidsSelect">
+                <option value="false" selected>No, it is not made for kids</option>
+                <option value="true">Yes, it is made for kids</option>
+              </select>
+            </div>
+            <div>
+              <label for="ytAuthModeSelect">Publish Method</label>
+              <select id="ytAuthModeSelect">
+                <option value="auto" selected>Auto (OAuth if ready, else Studio Browser)</option>
+                <option value="oauth">YouTube Data API v3 (OAuth Resumable)</option>
+                <option value="browser">Zero-Setup YouTube Studio Browser</option>
+              </select>
+            </div>
+            <div>
+              <label for="ytTagsInput">Tags (comma-separated)</label>
+              <input id="ytTagsInput" type="text" placeholder="travel film, 4K, family highlights" />
+            </div>
+          </div>
+
+          <label for="ytDescInput" style="margin-top:8px;">Description &amp; Auto-Generated <code>00:00</code> Chapters</label>
+          <textarea id="ytDescInput" rows="6"></textarea>
+
+          <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+            <button class="btn small secondary" id="btnYtRefreshDraft" type="button">🔄 Update Draft &amp; Refresh Token</button>
+            <button class="btn small secondary" id="btnYtConnectOAuth" type="button" style="display:none;">🔑 Connect OAuth</button>
+            <span class="muted" id="ytTokenShortText" style="font-size:0.74rem;">Token: pending</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="yt-confirm-box">
+        <label class="checkbox-label" style="gap:10px; cursor:pointer;">
+          <input type="checkbox" id="ytConfirmCheckbox" />
+          <span>I have reviewed the Title, Visibility, Made-for-Kids audience setting, and Chapters above, and explicitly confirm publishing this video to YouTube.</span>
+        </label>
+        <button class="btn youtube-btn" id="btnYtConfirmPublish" type="button" disabled>
+          🚀 Confirm &amp; Publish to YouTube
+        </button>
+      </div>
+
+      <div id="ytUploadProgressBox" style="display:none; margin-top:12px;">
+        <div style="display:flex; justify-content:space-between; font-size:0.82rem; margin-bottom:4px;">
+          <span id="ytProgressLabel">Starting upload...</span>
+          <strong id="ytProgressPct">0%</strong>
+        </div>
+        <div class="yt-progress-track">
+          <div id="ytProgressFill" class="yt-progress-fill" style="width:0%;"></div>
+        </div>
+      </div>
+
+      <div id="ytReceiptBox" class="yt-receipt-card" style="display:none;"></div>
     </div>
   </div>
 

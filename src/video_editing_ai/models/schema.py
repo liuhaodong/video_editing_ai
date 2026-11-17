@@ -2064,3 +2064,91 @@ class GooglePhotosSyncManifest(BaseModel):
     @classmethod
     def from_json_file(cls, path: str | Path) -> "GooglePhotosSyncManifest":
         return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+# ============================================================================
+# YouTube Direct Publishing Contracts (Two-Step Confirmed Publish Flow)
+# ============================================================================
+
+
+YouTubePrivacyType = Literal["private", "unlisted", "public"]
+YouTubeAuthModeType = Literal["auto", "browser", "oauth"]
+VALID_YOUTUBE_PRIVACY: tuple[str, ...] = ("private", "unlisted", "public")
+
+
+class YouTubeChapterEntry(BaseModel):
+    """A single YouTube timestamp chapter entry formatted from timeline markers."""
+
+    timestamp_sec: float = Field(ge=0.0)
+    timecode: str
+    title: str
+
+
+class YouTubePublishDraft(BaseModel):
+    """Prepared YouTube upload draft (youtube_publish_draft.json) awaiting user confirmation."""
+
+    project_dir: str
+    video_path: str
+    video_size_bytes: int = Field(ge=0)
+    video_mtime_ns: int = Field(ge=0)
+    duration_sec: float = Field(default=0.0, ge=0.0)
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    is_hdr: bool = False
+    title: str
+    description: str
+    tags: list[str] = Field(default_factory=list)
+    category_id: str = "22"
+    privacy_status: YouTubePrivacyType = "unlisted"
+    self_declared_made_for_kids: bool = False
+    default_language: str = "en"
+    chapters: list[YouTubeChapterEntry] = Field(default_factory=list)
+    thumbnail_path: Optional[str] = None
+    captions_srt_path: Optional[str] = None
+    upload_captions: bool = True
+    auth_mode_requested: YouTubeAuthModeType = "auto"
+    auth_mode_resolved: Literal["browser", "oauth"] = "browser"
+    status: Literal["awaiting_confirmation", "published", "cancelled"] = "awaiting_confirmation"
+    confirmation_token: str
+    created_at: str
+    warnings: list[str] = Field(default_factory=list)
+    ask_question_tool_payload: dict[str, Any] = Field(default_factory=dict)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "YouTubePublishDraft":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+class YouTubePublishReceipt(BaseModel):
+    """Completed YouTube publish receipt (youtube_publish_receipt.json)."""
+
+    video_id: str
+    watch_url: str
+    studio_url: str
+    auth_mode_used: Literal["oauth", "antigravity_browser", "browser_assisted"]
+    title: str
+    privacy_status: YouTubePrivacyType
+    effective_privacy_status: str
+    self_declared_made_for_kids: bool = False
+    thumbnail_uploaded: bool = False
+    captions_uploaded: bool = False
+    video_size_bytes: int = 0
+    confirmation_token: str
+    published_at: str
+    notes: list[str] = Field(default_factory=list)
+
+    def to_json_file(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.model_dump(mode="json"), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "YouTubePublishReceipt":
+        return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
+

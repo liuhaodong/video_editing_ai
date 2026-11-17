@@ -180,6 +180,15 @@ def collect_environment_diagnostics() -> dict[str, Any]:
     except Exception as exc:
         gp_status = {"browser_login_ready": True, "ready": False, "error": str(exc)}
 
+    yt_status: dict[str, Any] = {"studio_browser_ready": True, "ready": False}
+    try:
+        from .cloud.youtube_publisher import YouTubeAuthManager
+
+        yt_status = YouTubeAuthManager().get_auth_status()
+        yt_status["studio_browser_ready"] = True
+    except Exception as exc:
+        yt_status = {"studio_browser_ready": True, "ready": False, "error": str(exc)}
+
     healthy = bool(
         python_compatible
         and ffmpeg_info["ok"]
@@ -202,6 +211,7 @@ def collect_environment_diagnostics() -> dict[str, Any]:
         "heif": {"ok": heif_ok, "error": heif_error},
         "hardware": hardware_info,
         "google_photos": gp_status,
+        "youtube": yt_status,
         "antigravity": {
             "sdk_ok": ag_sdk_ok,
             "sdk_version": ag_version,

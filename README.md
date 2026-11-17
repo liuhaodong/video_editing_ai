@@ -266,3 +266,22 @@ This repository ships a ready-to-use Antigravity Skill at `.agent/skills/ai-vide
 | **Windows (NVIDIA GeForce RTX)** | `hevc_nvenc` (`p4`, `main10`, `p010le`) | `h264_nvenc` | 5-worker parallel segment rendering + NVENC hardware encode |
 | **Windows (AMD Radeon / Intel Arc & iGPU)** | `hevc_amf` / `hevc_qsv` (`p010le`) | `h264_amf` / `h264_qsv` | Native AMF and QuickSync hardware acceleration |
 | **Linux / CPU Fallback** | `libx265` (`yuv420p10le`) | `libx264` (`yuv420p`) | Deterministic multi-threaded software fallback |
+
+---
+
+## Confirmation-Gated Direct YouTube Publishing
+
+Publish rendered masters (`final_story.mp4`) directly to YouTube via **Zero-Setup Studio Browser** (`studio.youtube.com`) or **YouTube Data API v3 Resumable OAuth (`oauth`)** — strictly gated behind an explicit user confirmation step and SHA-256 `confirmation_token`:
+
+```bash
+# Step 1: Prepare metadata, 00:00 chapters, 1280x720 thumbnail (< 2 MB), and review token
+ai-editor youtube-publish --project-dir workspace_project --privacy unlisted --prepare-only
+
+# Step 2 (interactive confirmation prompt, or --confirm-token <sha256> after review)
+ai-editor youtube-publish --project-dir workspace_project --confirm-token <sha256>
+
+# Optional: inspect or configure YouTube Data API v3 OAuth PKCE credentials
+ai-editor youtube-auth --status
+```
+
+You can also review, edit metadata/chapters/privacy, check confirmation, and monitor chunked upload progress inside Tab 4 (`Final Video & Downloads`) of `ai-editor serve`.

@@ -1416,3 +1416,114 @@ input[type="text"], select, textarea {
   border-color: var(--accent-cyan);
   background: rgba(0, 229, 255, 0.06);
 }
+
+.btn.youtube-btn {
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  color: #ffffff;
+  border: 1px solid #ef4444;
+  font-weight: 700;
+}
+
+.btn.youtube-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+}
+
+.btn.youtube-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.youtube-modal-card {
+  width: min(920px, 95vw);
+  max-height: 92vh;
+  overflow-y: auto;
+}
+
+.yt-preview-grid {
+  display: grid;
+  grid-template-columns: 310px 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+@media (max-width: 780px) {
+  .yt-preview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.yt-thumb-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.yt-thumb-box img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  background: #0b0e14;
+}
+
+.yt-meta-pill {
+  font-size: 0.78rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #e0f2fe;
+}
+
+.yt-meta-pill.secondary {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.28);
+  color: #cbd5e1;
+}
+
+.yt-warnings-box {
+  font-size: 0.76rem;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fde68a;
+}
+
+.yt-confirm-box {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.yt-progress-track {
+  width: 100%;
+  height: 10px;
+  background: #0b0e14;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+}
+
+.yt-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ef4444, #f59e0b);
+  transition: width 0.25s ease;
+}
+
+.yt-receipt-card {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  font-size: 0.85rem;
+}

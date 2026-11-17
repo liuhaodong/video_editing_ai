@@ -32,8 +32,20 @@ from ..agents import (
 )
 from ..analyzer.ag_annotator import analyze_media_directory
 from ..analyzer.media_probe import AUDIO_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
+from ..cloud.youtube_publisher import (
+    YouTubeAuthManager,
+    execute_youtube_publish,
+    prepare_youtube_publish,
+    record_browser_publish_receipt,
+    verify_publish_confirmation,
+)
 from ..exporters.nle_export import export_all_nle_formats
-from ..models.schema import EditTimeline, MediaCatalog
+from ..models.schema import (
+    EditTimeline,
+    MediaCatalog,
+    YouTubePublishDraft,
+    YouTubePublishReceipt,
+)
 from ..planner.story_director import generate_edit_plan, generate_storyboard_markdown
 from ..planner.timeline_surgeon import apply_surgical_edit
 from ..renderer.ffmpeg_composer import render_timeline, render_timeline_segment
@@ -147,6 +159,39 @@ class SegmentRenderRequest(BaseModel):
     end_sec: float = 8.0
     fast_preview: bool = True
     output_filename: Optional[str] = None
+
+
+class YouTubePrepareRequest(BaseModel):
+    project_dir: str = "workspace_project"
+    video_path: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[list[str] | str] = None
+    privacy_status: str = "unlisted"
+    self_declared_made_for_kids: bool = False
+    category_id: Optional[str] = None
+    thumbnail_source: Optional[str] = None
+    auth_mode: str = "auto"
+
+
+class YouTubePublishRequest(BaseModel):
+    project_dir: str = "workspace_project"
+    confirmed: bool = False
+    confirmation_token: str = ""
+    open_browser: bool = True
+
+
+class YouTubeBrowserReceiptRequest(BaseModel):
+    project_dir: str = "workspace_project"
+    confirmed: bool = False
+    confirmation_token: str = ""
+    video_url_or_id: str
+
+
+class YouTubeAuthRequest(BaseModel):
+    client_secrets_path: Optional[str] = None
+    include_captions_scope: bool = True
+    open_browser: bool = True
 
 
 def _now_iso() -> str:
@@ -384,6 +429,9 @@ def create_app(default_project_dir: str | Path = "active_video_project") -> Fast
         "last_status": "Ready",
         "progress": 0.0,
     }
+
+    youtube_jobs_lock = threading.Lock()
+    youtube_jobs: dict[str, dict[str, Any]] = {}
 
     job_lock = threading.Lock()
     job_state: dict[str, Any] = {
@@ -1282,5 +1330,163 @@ def create_app(default_project_dir: str | Path = "active_video_project") -> Fast
             content_disposition_type="inline",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @app.get("/api/youtube/status")
+    def api_youtube_status(project_dir: str = Query(..., description="Project workspace directory")) -> dict:
+        proj = Path(project_dir).resolve()
+        auth_status = YouTubeAuthManager(include_captions_scope=True).get_auth_status()
+        auth_status["studio_browser_ready"] = True
+        draft_data = _read_json_if_exists(proj / "youtube_publish_draft.json")
+        receipt_data = _read_json_if_exists(proj / "youtube_publish_receipt.json")
+        return {
+            "auth": auth_status,
+            "draft": draft_data,
+            "receipt": receipt_data,
+        }
+
+    @app.post("/api/youtube/auth")
+    def api_youtube_auth(req: YouTubeAuthRequest) -> dict:
+        mgr = YouTubeAuthManager(
+            client_secrets_path=req.client_secrets_path,
+            include_captions_scope=req.include_captions_scope,
+        )
+        try:
+            mgr.authenticate_interactive(open_browser=req.open_browser)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        st = mgr.get_auth_status()
+        st["studio_browser_ready"] = True
+        return {"auth": st}
+
+    @app.post("/api/youtube/prepare")
+    def api_youtube_prepare(req: YouTubePrepareRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        mgr = YouTubeAuthManager(include_captions_scope=True)
+        try:
+            draft = prepare_youtube_publish(
+                project_dir=proj,
+                video_path=req.video_path,
+                title=req.title,
+                description=req.description,
+                tags=req.tags,
+                privacy_status=req.privacy_status,
+                self_declared_made_for_kids=req.self_declared_made_for_kids,
+                category_id=req.category_id,
+                thumbnail_source=req.thumbnail_source,
+                auth_mode=req.auth_mode,
+                auth_manager=mgr,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        st = mgr.get_auth_status()
+        st["studio_browser_ready"] = True
+        return {"draft": draft.model_dump(mode="json"), "auth": st}
+
+    @app.post("/api/youtube/publish")
+    def api_youtube_publish(req: YouTubePublishRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        draft_path = proj / "youtube_publish_draft.json"
+        if not draft_path.is_file():
+            raise HTTPException(status_code=400, detail="Prepare a YouTube publish draft first (/api/youtube/prepare).")
+        draft = YouTubePublishDraft.from_json_file(draft_path)
+        try:
+            verify_publish_confirmation(draft, confirmed=req.confirmed, confirmation_token=req.confirmation_token)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        job_id = str(uuid.uuid4())[:12]
+        with youtube_jobs_lock:
+            youtube_jobs[job_id] = {
+                "job_id": job_id,
+                "status": "uploading",
+                "bytes_sent": 0,
+                "total_bytes": draft.video_size_bytes,
+                "pct": 0.0,
+                "message": "Starting YouTube publish...",
+                "receipt": None,
+                "error": None,
+            }
+
+        def _worker() -> None:
+            mgr = YouTubeAuthManager(include_captions_scope=bool(draft.upload_captions and draft.captions_srt_path))
+
+            def _on_prog(sent: int, total: int, msg: str) -> None:
+                pct = round((sent / max(1, total)) * 100.0, 1)
+                with youtube_jobs_lock:
+                    youtube_jobs[job_id].update(
+                        {
+                            "bytes_sent": int(sent),
+                            "total_bytes": int(total),
+                            "pct": pct,
+                            "message": msg,
+                        }
+                    )
+
+            try:
+                receipt: YouTubePublishReceipt = execute_youtube_publish(
+                    draft=draft,
+                    confirmed=True,
+                    confirmation_token=req.confirmation_token,
+                    auth_manager=mgr,
+                    open_browser=req.open_browser,
+                    progress_callback=_on_prog,
+                )
+                with youtube_jobs_lock:
+                    youtube_jobs[job_id].update(
+                        {
+                            "status": "completed",
+                            "bytes_sent": draft.video_size_bytes,
+                            "total_bytes": draft.video_size_bytes,
+                            "pct": 100.0,
+                            "message": "YouTube publish complete.",
+                            "receipt": receipt.model_dump(mode="json"),
+                        }
+                    )
+            except Exception as exc:
+                with youtube_jobs_lock:
+                    youtube_jobs[job_id].update(
+                        {
+                            "status": "failed",
+                            "error": str(exc),
+                            "message": f"Publish failed: {exc}",
+                        }
+                    )
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return {"job_id": job_id, "status": "uploading"}
+
+    @app.post("/api/youtube/record-browser-receipt")
+    def api_youtube_record_browser_receipt(req: YouTubeBrowserReceiptRequest) -> dict:
+        proj = Path(req.project_dir).resolve()
+        draft_path = proj / "youtube_publish_draft.json"
+        if not draft_path.is_file():
+            raise HTTPException(status_code=400, detail="Prepare a YouTube publish draft first.")
+        draft = YouTubePublishDraft.from_json_file(draft_path)
+        try:
+            receipt = record_browser_publish_receipt(
+                project_dir=proj,
+                draft=draft,
+                confirmed=req.confirmed,
+                confirmation_token=req.confirmation_token,
+                video_url_or_id=req.video_url_or_id,
+                auth_mode_used="browser_assisted",
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"receipt": receipt.model_dump(mode="json")}
+
+    @app.get("/api/youtube/job/{job_id}")
+    def api_youtube_job(job_id: str) -> dict:
+        with youtube_jobs_lock:
+            job = youtube_jobs.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail=f"YouTube job not found: {job_id}")
+            return dict(job)
 
     return app

@@ -1322,8 +1322,10 @@ function updateVideoDownloadButtons(exportsMap, projectSummary = null) {
   const topBtn = document.getElementById("btnTopDownloadVideo");
   const bannerBox = document.getElementById("runCompleteDownloadBanner");
   const bannerBtn = document.getElementById("btnBannerDownloadMp4");
+  const bannerYtBtn = document.getElementById("btnBannerPublishYoutube");
   const bannerSub = document.getElementById("runCompleteBannerSubtext");
   const heroBtn = document.getElementById("btnHeroDownloadMp4");
+  const heroYtBtn = document.getElementById("btnHeroPublishYoutube");
 
   const hasMp4 = Boolean(exportsMap?.mp4 || projectSummary?.has_rendered_video);
   const projDir = (
@@ -1335,7 +1337,9 @@ function updateVideoDownloadButtons(exportsMap, projectSummary = null) {
   if (!hasMp4 || !projDir) {
     if (topBtn) topBtn.style.display = "none";
     if (bannerBox) bannerBox.style.display = "none";
+    if (bannerYtBtn) bannerYtBtn.style.display = "none";
     if (heroBtn) heroBtn.style.display = "none";
+    if (heroYtBtn) heroYtBtn.style.display = "none";
     return null;
   }
 
@@ -1361,10 +1365,16 @@ function updateVideoDownloadButtons(exportsMap, projectSummary = null) {
   if (bannerBox) {
     bannerBox.style.display = "flex";
   }
+  if (bannerYtBtn) {
+    bannerYtBtn.style.display = "inline-flex";
+  }
   if (heroBtn) {
     heroBtn.href = dlUrl;
     heroBtn.textContent = `⬇️ Download Newly Rendered Video (.mp4)${sizeMb}`;
     heroBtn.style.display = "inline-flex";
+  }
+  if (heroYtBtn) {
+    heroYtBtn.style.display = "inline-flex";
   }
   return dlUrl;
 }
@@ -1733,6 +1743,216 @@ document.getElementById("btnRenderVideo")?.addEventListener("click", async () =>
   }
   await refreshProjectState();
   setStatus("Render Complete!");
+});
+
+// ---------------------------------------------------------------------------
+// YOUTUBE DIRECT PUBLISHING (TWO-STEP CONFIRMED FLOW)
+// ---------------------------------------------------------------------------
+let currentYtDraft = null;
+let currentYtConfirmationToken = "";
+let ytPollTimer = null;
+
+function invalidateYtConfirmation() {
+  currentYtConfirmationToken = "";
+  const cb = document.getElementById("ytConfirmCheckbox");
+  const btn = document.getElementById("btnYtConfirmPublish");
+  const tokEl = document.getElementById("ytTokenShortText");
+  if (cb) cb.checked = false;
+  if (btn) btn.disabled = true;
+  if (tokEl) tokEl.textContent = "Token invalidated — click Refresh Draft & Token to review.";
+}
+
+function populateYouTubeModalFromDraft(draft, auth) {
+  currentYtDraft = draft;
+  currentYtConfirmationToken = draft?.confirmation_token || "";
+
+  document.getElementById("ytTitleInput").value = draft.title || "";
+  document.getElementById("ytDescInput").value = draft.description || "";
+  document.getElementById("ytTagsInput").value = (draft.tags || []).join(", ");
+  document.getElementById("ytPrivacySelect").value = draft.privacy_status || "unlisted";
+  document.getElementById("ytMadeForKidsSelect").value = draft.self_declared_made_for_kids ? "true" : "false";
+  document.getElementById("ytAuthModeSelect").value = draft.auth_mode_requested || "auto";
+
+  const thumbImg = document.getElementById("ytThumbPreview");
+  if (thumbImg && draft.thumbnail_path) {
+    thumbImg.src = `/api/file?path=${encodeURIComponent(draft.thumbnail_path)}&t=${Date.now()}`;
+  }
+
+  const sizeMb = ((draft.video_size_bytes || 0) / (1024 * 1024)).toFixed(1);
+  const hdrTxt = draft.is_hdr ? "10-bit HLG HDR" : "SDR";
+  document.getElementById("ytVideoSpecsBadge").textContent = `${draft.width}x${draft.height} ${hdrTxt} · ${sizeMb} MB · ${(draft.chapters || []).length} chapters`;
+  document.getElementById("ytAuthStatusBadge").textContent =
+    draft.auth_mode_resolved === "oauth"
+      ? "Method: YouTube Data API v3 (OAuth Connected)"
+      : "Method: Zero-Setup YouTube Studio Browser";
+
+  const oauthBtn = document.getElementById("btnYtConnectOAuth");
+  if (oauthBtn) {
+    oauthBtn.style.display = auth?.client_secrets_configured && !auth?.ready ? "inline-flex" : "none";
+  }
+
+  const warnBox = document.getElementById("ytWarningsBox");
+  if (warnBox) {
+    if (draft.warnings && draft.warnings.length > 0) {
+      warnBox.style.display = "block";
+      warnBox.textContent = draft.warnings.join(" ");
+    } else {
+      warnBox.style.display = "none";
+    }
+  }
+
+  const cb = document.getElementById("ytConfirmCheckbox");
+  const btn = document.getElementById("btnYtConfirmPublish");
+  const tokEl = document.getElementById("ytTokenShortText");
+  if (cb) cb.checked = false;
+  if (btn) btn.disabled = true;
+  if (tokEl) tokEl.textContent = `Token: ${currentYtConfirmationToken.slice(0, 12)}...`;
+}
+
+async function prepareYouTubeDraftFromModal(useExistingDefaults = false) {
+  const projDir = (document.getElementById("projectDirInput")?.value || "").trim();
+  if (!projDir) return;
+  const payload = useExistingDefaults
+    ? { project_dir: projDir }
+    : {
+        project_dir: projDir,
+        title: document.getElementById("ytTitleInput").value.trim() || null,
+        description: document.getElementById("ytDescInput").value,
+        tags: document.getElementById("ytTagsInput").value,
+        privacy_status: document.getElementById("ytPrivacySelect").value,
+        self_declared_made_for_kids: document.getElementById("ytMadeForKidsSelect").value === "true",
+        auth_mode: document.getElementById("ytAuthModeSelect").value,
+      };
+  const res = await fetch("/api/youtube/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    setStatus(`YouTube prepare error: ${err.detail}`);
+    return;
+  }
+  const data = await res.json();
+  populateYouTubeModalFromDraft(data.draft, data.auth);
+}
+
+async function openYouTubePublishModal() {
+  const modal = document.getElementById("youtubePublishModal");
+  if (!modal) return;
+  document.getElementById("ytUploadProgressBox").style.display = "none";
+  document.getElementById("ytReceiptBox").style.display = "none";
+  modal.style.display = "flex";
+  setStatus("Preparing YouTube draft, 00:00 chapters & custom thumbnail...");
+  await prepareYouTubeDraftFromModal(true);
+  setStatus("Review YouTube draft details and check confirmation to publish.");
+}
+
+function renderYouTubeReceipt(receipt) {
+  const box = document.getElementById("ytReceiptBox");
+  if (!box || !receipt) return;
+  box.style.display = "block";
+  const linkHtml = receipt.watch_url
+    ? `<a href="${receipt.watch_url}" target="_blank" rel="noopener noreferrer" style="color:#6ee7b7;font-weight:700;">${receipt.watch_url}</a>`
+    : `<a href="${receipt.studio_url}" target="_blank" rel="noopener noreferrer" style="color:#6ee7b7;font-weight:700;">Open YouTube Studio</a>`;
+  const notesHtml = (receipt.notes || []).length
+    ? `<ul style="margin:6px 0 0 18px;padding:0;">${receipt.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>`
+    : "";
+  box.innerHTML =
+    `<div><strong>🎉 Published / Handoff Ready (${escapeHtml(receipt.auth_mode_used)})</strong> · Visibility: <code>${escapeHtml(receipt.effective_privacy_status)}</code></div>` +
+    `<div style="margin-top:4px;">Link: ${linkHtml}</div>${notesHtml}`;
+}
+
+async function startConfirmedYouTubePublish() {
+  const projDir = (document.getElementById("projectDirInput")?.value || "").trim();
+  const cb = document.getElementById("ytConfirmCheckbox");
+  if (!projDir || !cb?.checked) return;
+
+  if (!currentYtConfirmationToken) {
+    await prepareYouTubeDraftFromModal(false);
+    document.getElementById("ytConfirmCheckbox").checked = true;
+  }
+
+  const progBox = document.getElementById("ytUploadProgressBox");
+  const progLabel = document.getElementById("ytProgressLabel");
+  const progPct = document.getElementById("ytProgressPct");
+  const progFill = document.getElementById("ytProgressFill");
+  progBox.style.display = "block";
+  progLabel.textContent = "Initiating confirmed publish...";
+  progPct.textContent = "0%";
+  progFill.style.width = "0%";
+  document.getElementById("btnYtConfirmPublish").disabled = true;
+
+  const res = await fetch("/api/youtube/publish", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      project_dir: projDir,
+      confirmed: true,
+      confirmation_token: currentYtConfirmationToken,
+      open_browser: true,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    progLabel.textContent = `Blocked/Error: ${err.detail}`;
+    document.getElementById("btnYtConfirmPublish").disabled = false;
+    return;
+  }
+  const { job_id } = await res.json();
+  if (ytPollTimer) clearInterval(ytPollTimer);
+  ytPollTimer = setInterval(async () => {
+    const jr = await fetch(`/api/youtube/job/${encodeURIComponent(job_id)}`);
+    if (!jr.ok) return;
+    const job = await jr.json();
+    const pct = Number(job.pct || 0);
+    progLabel.textContent = job.message || "Publishing...";
+    progPct.textContent = `${pct.toFixed(1)}%`;
+    progFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    if (job.status === "completed") {
+      clearInterval(ytPollTimer);
+      ytPollTimer = null;
+      renderYouTubeReceipt(job.receipt);
+      setStatus("YouTube Publish Complete!");
+    } else if (job.status === "failed") {
+      clearInterval(ytPollTimer);
+      ytPollTimer = null;
+      progLabel.textContent = `Failed: ${job.error || "Upload error"}`;
+      document.getElementById("btnYtConfirmPublish").disabled = false;
+      setStatus(`YouTube upload failed: ${job.error}`);
+    }
+  }, 600);
+}
+
+document.getElementById("btnBannerPublishYoutube")?.addEventListener("click", openYouTubePublishModal);
+document.getElementById("btnHeroPublishYoutube")?.addEventListener("click", openYouTubePublishModal);
+document.getElementById("btnCloseYtModal")?.addEventListener("click", () => {
+  document.getElementById("youtubePublishModal").style.display = "none";
+});
+document.getElementById("btnYtRefreshDraft")?.addEventListener("click", () => prepareYouTubeDraftFromModal(false));
+document.getElementById("btnYtConfirmPublish")?.addEventListener("click", startConfirmedYouTubePublish);
+document.getElementById("btnYtConnectOAuth")?.addEventListener("click", async () => {
+  setStatus("Opening Google OAuth consent screen for YouTube...");
+  const r = await fetch("/api/youtube/auth", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ include_captions_scope: true, open_browser: true }),
+  });
+  if (r.ok) {
+    await prepareYouTubeDraftFromModal(false);
+    setStatus("YouTube OAuth connected!");
+  } else {
+    const err = await r.json();
+    setStatus(`OAuth error: ${err.detail}`);
+  }
+});
+document.getElementById("ytConfirmCheckbox")?.addEventListener("change", (ev) => {
+  const btn = document.getElementById("btnYtConfirmPublish");
+  if (btn) btn.disabled = !(ev.target.checked && currentYtConfirmationToken);
+});
+["ytTitleInput", "ytDescInput", "ytTagsInput", "ytPrivacySelect", "ytMadeForKidsSelect", "ytAuthModeSelect"].forEach((id) => {
+  document.getElementById(id)?.addEventListener("input", invalidateYtConfirmation);
+  document.getElementById(id)?.addEventListener("change", invalidateYtConfirmation);
 });
 
 // ---------------------------------------------------------------------------
