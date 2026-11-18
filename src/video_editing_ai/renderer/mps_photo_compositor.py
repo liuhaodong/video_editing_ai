@@ -713,11 +713,14 @@ class MPSPhotoCompositor:
 
             boxes: list[tuple[float, float, float, float]] = []
             centers: list[tuple[int, int]] = []
+            s_lx, s_ly = ctx["loupe_start_xy"]
+            e_lx, e_ly = ctx["loupe_end_xy"]
             for eased in eased_list:
-                lx_norm = (sx - 0.08) + ((ex + 0.08) - (sx - 0.08)) * eased
-                ly_norm = (sy + 0.03 * math.sin(math.pi * eased)) * 0.88
-                lcx = int(round(max(0.24, min(0.76, lx_norm)) * w))
-                lcy = int(round(max(0.24, min(0.68, ly_norm)) * h))
+                lcx = max(0, min(w - 1, int(round(s_lx + (e_lx - s_lx) * eased))))
+                lcy = max(
+                    0,
+                    min(h - 1, int(round(s_ly + (e_ly - s_ly) * eased - 4.0 * sf * math.sin(math.pi * eased)))),
+                )
                 sx0 = max(0.0, min(float(w) - 2.0 * src_half, lcx - src_half))
                 sy0 = max(0.0, min(float(h) - 2.0 * src_half, lcy - src_half))
                 boxes.append((sx0, sy0, sx0 + 2.0 * src_half, sy0 + 2.0 * src_half))
@@ -1026,14 +1029,26 @@ class MPSPhotoCompositor:
             return canvas
 
         if mode == "panoramic_frieze_scroll":
+            fr = ctx["frieze"]
             kb_cfg = ctx.get("kb")
             preset_val = getattr(kb_cfg, "preset", "pan_left_to_right") if kb_cfg is not None else "pan_left_to_right"
-            pan_cxs = [
-                (0.72 - 0.44 * e) if preset_val == "pan_right_to_left" else (0.28 + 0.44 * e)
-                for e in eased_list
-            ]
-            pan_zs = [1.005 + 0.018 * math.sin(math.pi * e) for e in eased_list]
-            return self._crop_plane_batch(tex["frieze_canvas_rgb"], (w, h), pan_zs, pan_cxs, [0.50] * batch_n)
+            fw_f, fh_f = float(fr["fw"]), float(fr["fh"])
+            outer_pad_f = float(fr.get("outer_pad", 0.0))
+            boxes = []
+            for eased in eased_list:
+                pan_p = (1.0 - eased) if preset_val == "pan_right_to_left" else eased
+                pan_z = 1.005 + 0.018 * math.sin(math.pi * eased)
+                view_h = fh_f / pan_z
+                view_w = view_h * (float(w) / max(1.0, float(h)))
+                if view_w > fw_f:
+                    view_w = fw_f
+                    view_h = view_w * (float(h) / max(1.0, float(w)))
+                max_x0 = max(0.0, fw_f - view_w)
+                x_margin = min(max_x0 * 0.5, outer_pad_f * 0.25)
+                bx0 = x_margin + (max_x0 - 2.0 * x_margin) * pan_p
+                by0 = max(0.0, (fh_f - view_h) * 0.5)
+                boxes.append((bx0, by0, bx0 + view_w, by0 + view_h))
+            return self._warp_extents_batch(tex["frieze_canvas_rgb"], (w, h), boxes)
 
         if mode == "atelier_layered_duo":
             zooms = [1.03 - 0.02 * e for e in eased_list]
@@ -1307,7 +1322,8 @@ class MPSPhotoCompositor:
                 blurred_small.float(), size=(ph, pw), mode="bilinear", align_corners=False
             ).to(dtype=self.work_dtype)
 
-            frosted = blurred * 0.42 + dark_tint * 0.58
+            w_tint = max(0.0, min(1.0, float(ctx.get("card_tint_weight", 0.58))))
+            frosted = blurred * (1.0 - w_tint) + dark_tint * w_tint
             frosted = frosted * fg_inv_a + fg_premul
 
             if all(am >= 0.98 for am in alphas):

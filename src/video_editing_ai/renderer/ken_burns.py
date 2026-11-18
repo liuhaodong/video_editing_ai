@@ -12,7 +12,7 @@ import sys
 import textwrap
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import cv2
 import numpy as np
@@ -418,11 +418,12 @@ def _composite_frosted_card_on_rgb(
     py: int,
     alpha_mult: float = 1.0,
     slide_y: int = 0,
+    tint_weight: float = 0.58,
 ) -> None:
     """
     In-place composite of the smoked-glass documentary card onto `frame_rgb`:
     Crops only the small `(pw, ph)` region, blurs it at 1/4 scale (16x faster than full-res blur),
-    tints it with translucent charcoal glass (0.58 blend), layers the typography, and pastes back onto `frame_rgb`.
+    tints it with translucent charcoal glass, layers the typography, and pastes back onto `frame_rgb`.
     """
     pw, ph = text_fg_rgba.size
     w, h = frame_rgb.size
@@ -439,8 +440,8 @@ def _composite_frosted_card_on_rgb(
         .resize((pw, ph), Image.Resampling.BILINEAR)
     )
 
-    # 2. Blend with neutral smoked charcoal glass (58% opacity so scene colors glow softly through the glass)
-    frosted_rgb = Image.blend(blurred_patch, dark_tint_rgb, 0.58)
+    # 2. Blend with neutral smoked charcoal glass
+    frosted_rgb = Image.blend(blurred_patch, dark_tint_rgb, max(0.0, min(1.0, float(tint_weight))))
 
     # 3. Composite crisp typography & specular rim onto the frosted glass patch
     frosted_rgb.paste(text_fg_rgba, (0, 0), text_fg_rgba)
@@ -501,10 +502,10 @@ def build_links_white_matte_image(
     height: int = 1080,
     border_px: Optional[int] = None,
     raw_img: Optional[Image.Image] = None,
+    exhibition_tone: Literal["pure_white", "soft_limestone"] = "pure_white",
 ) -> Image.Image:
-    """Create a pure #FFFFFF full-frame gallery exhibition plate with crisp symmetrical margins and subtle hairline."""
+    """Create a gallery exhibition plate (`pure_white` or calm `soft_limestone` museum wall) with crisp margins."""
     img = raw_img.convert("RGB") if raw_img is not None else _load_graded_photo_rgb(src_path)
-    canvas = Image.new("RGB", (width, height), (255, 255, 255))
 
     scale_factor = width / 1920.0
     margin_ratio = (
@@ -525,6 +526,38 @@ def build_links_white_matte_image(
     fg.thumbnail((max(32, max_w), max(32, max_h)), Image.Resampling.LANCZOS)
     px = (width - fg.width) // 2
     py = (height - fg.height) // 2
+
+    if exhibition_tone == "soft_limestone":
+        canvas = _make_textured_surface_rgb(
+            width,
+            height,
+            (206, 203, 196),
+            seed=202,
+            grad_top=3.5,
+            grad_bot=-4.5,
+            grain_std=1.4,
+        )
+        sh_blur = max(5, int(round(9 * scale_factor)))
+        sh_pad = sh_blur * 2 + 4
+        sh_off_y = max(3, int(round(5 * scale_factor)))
+        sh_img = Image.new("RGBA", (fg.width + sh_pad * 2, fg.height + sh_pad * 2), (0, 0, 0, 0))
+        ImageDraw.Draw(sh_img).rectangle(
+            [sh_pad, sh_pad + sh_off_y, sh_pad + fg.width, sh_pad + fg.height + sh_off_y],
+            fill=(0, 0, 0, 82),
+        )
+        sh_img = sh_img.filter(ImageFilter.GaussianBlur(radius=sh_blur))
+        canvas.paste(sh_img, (px - sh_pad, py - sh_pad), sh_img)
+        canvas.paste(fg, (px, py))
+        draw = ImageDraw.Draw(canvas)
+        hair_w = max(1, int(round(1.0 * scale_factor)))
+        draw.rectangle(
+            [max(0, px - hair_w), max(0, py - hair_w), min(width - 1, px + fg.width), min(height - 1, py + fg.height)],
+            outline=(160, 157, 150),
+            width=hair_w,
+        )
+        return canvas
+
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
     canvas.paste(fg, (px, py))
 
     draw = ImageDraw.Draw(canvas)
@@ -537,6 +570,69 @@ def build_links_white_matte_image(
     return canvas
 
 
+def _detect_photo_salient_point(
+    raw_img: Image.Image,
+    hint_uv: Optional[tuple[float, float]] = None,
+) -> tuple[float, float]:
+    """
+    Locate the photograph's primary visual interest center `(u, v)` in normalized photo coordinates `[0..1]`.
+    Prefers detected human faces/upper heads first, then explicit non-default curator hints, then Sobel + chroma saliency.
+    """
+    thumb = raw_img.copy()
+    thumb.thumbnail((480, 480), Image.Resampling.BILINEAR)
+    tw, th = thumb.size
+    if tw < 16 or th < 16:
+        return (0.50, 0.45)
+
+    arr_rgb = np.asarray(thumb, dtype=np.uint8)
+    bgr = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    try:
+        from ..analyzer.semantic_intelligence import _detect_faces_and_skin_heads
+
+        faces = _detect_faces_and_skin_heads(bgr, gray)
+        if faces:
+            best_face = max(
+                faces,
+                key=lambda b: float(b[2] * b[3])
+                * max(0.35, 1.15 - 0.50 * math.hypot((b[0] + 0.5 * b[2]) / tw - 0.5, (b[1] + 0.42 * b[3]) / th - 0.48)),
+            )
+            fx, fy, fw, fh = best_face
+            u = max(0.16, min(0.84, (fx + 0.50 * fw) / float(tw)))
+            v = max(0.16, min(0.82, (fy + 0.40 * fh) / float(th)))
+            return (float(u), float(v))
+    except Exception:
+        pass
+
+    if hint_uv is not None:
+        hx, hy = float(hint_uv[0]), float(hint_uv[1])
+        if abs(hx - 0.5) > 0.035 or abs(hy - 0.49) > 0.035:
+            return (max(0.18, min(0.82, hx)), max(0.18, min(0.82, hy)))
+
+    gray_f = gray.astype(np.float32)
+    gx = cv2.Sobel(gray_f, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray_f, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.hypot(gx, gy)
+
+    arr_f = arr_rgb.astype(np.float32)
+    chroma = np.max(arr_f, axis=2) - np.min(arr_f, axis=2)
+    sal = grad + 0.35 * chroma
+
+    yy, xx = np.mgrid[0:th, 0:tw].astype(np.float32)
+    nx = xx / max(1.0, float(tw - 1))
+    ny = yy / max(1.0, float(th - 1))
+    wx = np.clip(np.minimum(nx, 1.0 - nx) / 0.14, 0.25, 1.0)
+    wy = np.clip(np.minimum(ny, 1.0 - ny) / 0.14, 0.25, 1.0)
+    ground_damp = np.where(ny > 0.80, 0.55, 1.0)
+    sal = sal * wx * wy * ground_damp
+    sal_blur = cv2.GaussianBlur(sal, (31, 31), 0)
+    py_idx, px_idx = np.unravel_index(int(np.argmax(sal_blur)), sal_blur.shape)
+    u = max(0.20, min(0.80, px_idx / max(1.0, float(tw - 1))))
+    v = max(0.20, min(0.78, py_idx / max(1.0, float(th - 1))))
+    return (float(u), float(v))
+
+
 def _resolve_kb_endpoints(
     kb: KenBurnsConfig,
 ) -> tuple[float, float, tuple[float, float], tuple[float, float]]:
@@ -545,6 +641,8 @@ def _resolve_kb_endpoints(
     if preset == "static":
         return (1.0, 1.0, (0.5, 0.5), (0.5, 0.5))
     if preset == "floating_gallery":
+        if kb.end_center != (0.5, 0.48) or kb.start_center != (0.5, 0.5):
+            return (1.0, max(1.05, kb.end_zoom), kb.start_center, kb.end_center)
         return (1.0, 1.05, (0.5, 0.5), (0.5, 0.485))
     if preset == "zoom_in":
         return (1.0, max(1.08, kb.end_zoom), (0.5, 0.5), kb.end_center)
@@ -1001,25 +1099,36 @@ def _build_curator_loupe_assets(
     height: int,
     has_card: bool,
     scale_factor: float,
-) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image, int]:
+    focal_uv: tuple[float, float] = (0.50, 0.45),
+) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image, int, tuple[float, float], tuple[float, float]]:
     """
     Pre-build assets for 'curator_loupe' (Art-Historian 1.65x Optical Magnifying Glass Spotlight):
-    Returns (dimmed_canvas_rgb, sharp_canvas_rgb, loupe_mask_l, loupe_bezel_rgba, radius_px).
+    Maps `focal_uv` directly into the uncropped framed photograph coordinates so magnification stays locked
+    on the actual subject/face rather than margins or empty floor.
+    Returns (dimmed_canvas_rgb, sharp_canvas_rgb, loupe_mask_l, loupe_bezel_rgba, radius_px, start_xy, end_xy).
     """
-    # Fit or frame the full artwork on the 16:9 canvas
-    sharp_canvas = build_gallery_frame_image(raw_primary, width=width, height=height) if isinstance(raw_primary, (str, Path)) else None
-    if sharp_canvas is None:
-        # Build clean dimmed background + centered uncropped artwork
-        bg_small = ImageOps.fit(raw_primary, (width // 4, height // 4), method=Image.Resampling.BILINEAR)
-        bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(9 * scale_factor)))))
-        sharp_canvas = bg_small.resize((width, height), Image.Resampling.BILINEAR)
-        sharp_canvas = Image.blend(sharp_canvas, Image.new("RGB", (width, height), (8, 10, 18)), 0.35)
+    bg_small = ImageOps.fit(raw_primary, (max(32, width // 4), max(18, height // 4)), method=Image.Resampling.BILINEAR)
+    bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(9 * scale_factor)))))
+    sharp_canvas = bg_small.resize((width, height), Image.Resampling.BILINEAR)
+    sharp_canvas = Image.blend(sharp_canvas, Image.new("RGB", (width, height), (8, 10, 18)), 0.35)
 
-        max_w = int(width * 0.84)
-        max_h = int(height * (0.76 if has_card else 0.84))
-        card = _build_double_matte_card(raw_primary, max_w=max_w, max_h=max_h, scale_factor=scale_factor)
-        cy = int(height * (0.43 if has_card else 0.48))
-        sharp_canvas.paste(card, ((width - card.width) // 2, max(10, cy - card.height // 2)), card)
+    max_w = int(width * 0.84)
+    max_h = int(height * (0.76 if has_card else 0.84))
+    b_px = max(10, int(round(14 * scale_factor)))
+    bevel_pad = max(2, int(round(3 * scale_factor)))
+    shadow_margin = max(18, int(round(28 * scale_factor)))
+    pad_total = shadow_margin + b_px + bevel_pad
+
+    card = _build_double_matte_card(raw_primary, max_w=max_w, max_h=max_h, scale_factor=scale_factor, border_px=b_px)
+    cy = int(height * (0.43 if has_card else 0.48))
+    card_x = (width - card.width) // 2
+    card_y = max(10, cy - card.height // 2)
+    sharp_canvas.paste(card, (card_x, card_y), card)
+
+    img_x0 = card_x + pad_total
+    img_y0 = card_y + pad_total
+    img_w = max(32, card.width - pad_total * 2)
+    img_h = max(32, card.height - pad_total * 2)
 
     dimmed_canvas = Image.blend(sharp_canvas, Image.new("RGB", (width, height), (6, 8, 14)), 0.36)
 
@@ -1057,7 +1166,44 @@ def _build_curator_loupe_assets(
         fill=(255, 255, 255, 130),
         width=max(1, int(round(2.0 * scale_factor))),
     )
-    return dimmed_canvas, sharp_canvas, loupe_mask_l, bezel, radius_px
+
+    mag = 1.65
+    src_half = radius_px / mag
+    fu, fv = float(focal_uv[0]), float(focal_uv[1])
+    target_cx = img_x0 + fu * img_w
+    target_cy = img_y0 + fv * img_h
+
+    if img_w > 2.0 * src_half:
+        min_cx = img_x0 + src_half
+        max_cx = img_x0 + img_w - src_half
+    else:
+        min_cx = max_cx = img_x0 + 0.5 * img_w
+    min_cx = max(src_half, min_cx)
+    max_cx = min(float(width) - src_half, max_cx)
+    if min_cx > max_cx:
+        min_cx = max_cx = img_x0 + 0.5 * img_w
+
+    max_plaque_y = height * (0.74 if has_card else 0.88)
+    if img_h > 2.0 * src_half:
+        min_cy = img_y0 + src_half
+        max_cy = min(img_y0 + img_h - src_half, max_plaque_y)
+    else:
+        min_cy = max_cy = min(img_y0 + 0.5 * img_h, max_plaque_y)
+    min_cy = max(src_half, min_cy)
+    if min_cy > max_cy:
+        min_cy = max_cy = max(src_half, min(float(height) - src_half, img_y0 + 0.5 * img_h))
+
+    drift_x = min(22.0 * scale_factor, img_w * 0.045)
+    drift_y = min(10.0 * scale_factor, img_h * 0.025)
+    start_xy = (
+        float(min(max_cx, max(min_cx, target_cx - drift_x))),
+        float(min(max_cy, max(min_cy, target_cy + drift_y))),
+    )
+    end_xy = (
+        float(min(max_cx, max(min_cx, target_cx + drift_x))),
+        float(min(max_cy, max(min_cy, target_cy - drift_y))),
+    )
+    return dimmed_canvas, sharp_canvas, loupe_mask_l, bezel, radius_px, start_xy, end_xy
 
 
 def _build_editorial_magazine_assets(
@@ -1527,6 +1673,7 @@ def _build_criterion_atelier_assets(
     height: int,
     scale_factor: float,
     color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
 ) -> dict[str, Any]:
     """
     Build Criterion / Kinfolk 3-Viewport Asymmetric Exhibition Bento Grid:
@@ -1572,9 +1719,9 @@ def _build_criterion_atelier_assets(
             method=Image.Resampling.LANCZOS,
         )
     else:
-        # Tight macro crop around primary focal_point
+        # Tight macro crop around primary salient focal point
         sw, sh = raw_primary.size
-        fx, fy = kb.start_center
+        fx, fy = focal_uv if focal_uv is not None else kb.start_center
         crop_h = max(64.0, sh * 0.54)
         crop_w = crop_h * (right_w / max(1.0, float(bot_h)))
         if crop_w > sw * 0.85:
@@ -1604,26 +1751,26 @@ def _build_criterion_atelier_assets(
 _SURFACE_PALETTE_SPECS: dict[str, dict[str, Any]] = {
     "warm_linen": {
         "name": "warm_linen",
-        "bg": (234, 229, 220),
-        "mat": (238, 234, 226),
-        "ink_primary": (34, 32, 30),
-        "ink_secondary": (92, 88, 80),
-        "ink_muted": (132, 126, 118),
-        "rule": (172, 166, 156),
-        "bevel_hi": (246, 243, 237),
-        "bevel_lo": (184, 178, 168),
+        "bg": (200, 193, 182),
+        "mat": (205, 198, 187),
+        "ink_primary": (32, 30, 28),
+        "ink_secondary": (78, 74, 66),
+        "ink_muted": (110, 104, 96),
+        "rule": (140, 133, 122),
+        "bevel_hi": (220, 215, 205),
+        "bevel_lo": (150, 143, 132),
         "is_light": True,
     },
     "gallery_white": {
         "name": "gallery_white",
-        "bg": (242, 241, 238),
-        "mat": (245, 244, 241),
+        "bg": (210, 208, 202),
+        "mat": (214, 212, 206),
         "ink_primary": (26, 28, 32),
-        "ink_secondary": (84, 88, 96),
-        "ink_muted": (128, 132, 140),
-        "rule": (186, 186, 182),
-        "bevel_hi": (248, 248, 246),
-        "bevel_lo": (194, 193, 188),
+        "ink_secondary": (74, 78, 86),
+        "ink_muted": (108, 112, 120),
+        "rule": (152, 149, 142),
+        "bevel_hi": (228, 226, 220),
+        "bevel_lo": (164, 161, 154),
         "is_light": True,
     },
     "obsidian_slate": {
@@ -1703,17 +1850,20 @@ def _make_textured_surface_rgb(
     grad_bot: float = -5.0,
     grain_std: float = 1.8,
 ) -> Image.Image:
-    """Create a deterministic cotton-rag or obsidian surface board with gentle vertical gallery wash."""
+    """Create a deterministic museum surface board with gentle gallery top-light wash and radial corner falloff."""
     sw, sh = max(32, width // 3), max(32, height // 3)
-    ny = np.linspace(0.0, 1.0, sh, dtype=np.float32).reshape(sh, 1, 1)
+    ny = np.linspace(0.0, 1.0, sh, dtype=np.float32).reshape(sh, 1)
+    nx_2d = np.linspace(-1.0, 1.0, sw, dtype=np.float32).reshape(1, sw)
+    ny_2d = np.linspace(-1.0, 1.0, sh, dtype=np.float32).reshape(sh, 1)
+    vig = (-9.5 * (0.55 * (nx_2d * nx_2d) + 0.45 * (ny_2d * ny_2d))).reshape(sh, sw, 1)
     rng = np.random.default_rng(seed=seed)
     grain = rng.normal(loc=0.0, scale=grain_std, size=(sh, sw, 1)).astype(np.float32)
-    wash = grad_top * (1.0 - ny) + grad_bot * ny
+    wash = (grad_top * (1.0 - ny) + grad_bot * ny).reshape(sh, 1, 1)
     arr = np.empty((sh, sw, 3), dtype=np.float32)
-    arr[:, :, 0] = base_rgb[0] + wash[:, :, 0] + grain[:, :, 0]
-    arr[:, :, 1] = base_rgb[1] + wash[:, :, 0] + grain[:, :, 0]
-    arr[:, :, 2] = base_rgb[2] + wash[:, :, 0] + grain[:, :, 0]
-    u8 = np.clip(arr, 4.0, 248.0).astype(np.uint8)
+    arr[:, :, 0] = base_rgb[0] + wash[:, :, 0] + vig[:, :, 0] + grain[:, :, 0]
+    arr[:, :, 1] = base_rgb[1] + wash[:, :, 0] + vig[:, :, 0] + grain[:, :, 0]
+    arr[:, :, 2] = base_rgb[2] + wash[:, :, 0] + vig[:, :, 0] + grain[:, :, 0]
+    u8 = np.clip(arr, 4.0, 244.0).astype(np.uint8)
     return Image.fromarray(u8, mode="RGB").resize((width, height), Image.Resampling.BILINEAR)
 
 
@@ -1906,15 +2056,9 @@ def _build_panoramic_frieze_assets(
     scale_factor: float,
     pal: dict[str, Any],
     color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
 ) -> dict[str, Any]:
-    """Build a wide 1.85x exhibition frieze hanging 3 matted prints across generous architectural gutters."""
-    fw = int(round(width * 1.85))
-    fw -= fw % 2
-    fh = int(round(height * 1.04))
-    fh -= fh % 2
-
-    canvas = _make_textured_surface_rgb(fw, fh, pal["bg"], seed=505, grad_top=5.0, grad_bot=-6.0, grain_std=1.5)
-
+    """Build an exhibition gallery wall hanging 3 aspect-preserved matted prints across equal gutters."""
     sec_img = (
         _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
         if (kb.secondary_source and Path(kb.secondary_source).exists())
@@ -1927,17 +2071,16 @@ def _build_panoramic_frieze_assets(
     )
 
     sw, sh = raw_primary.size
+    fx, fy = focal_uv if focal_uv is not None else kb.start_center
     if sec_img is not None and tert_img is not None:
         imgs = [raw_primary, sec_img, tert_img]
     elif sec_img is not None:
         cw_d, ch_d = max(48, int(sw * 0.62)), max(48, int(sh * 0.62))
-        ex, ey = kb.end_center
-        dx0 = int(round(min(max(0.0, ex * sw - cw_d * 0.5), max(0.0, float(sw - cw_d)))))
-        dy0 = int(round(min(max(0.0, ey * sh - ch_d * 0.5), max(0.0, float(sh - ch_d)))))
+        dx0 = int(round(min(max(0.0, fx * sw - cw_d * 0.5), max(0.0, float(sw - cw_d)))))
+        dy0 = int(round(min(max(0.0, fy * sh - ch_d * 0.5), max(0.0, float(sh - ch_d)))))
         imgs = [raw_primary, sec_img, raw_primary.crop((dx0, dy0, dx0 + cw_d, dy0 + ch_d))]
     else:
         cw_s, ch_s = max(48, int(sw * 0.68)), max(48, int(sh * 0.68))
-        fx, fy = kb.start_center
         centers = [(0.24, 0.50), (fx, fy), (0.76, 0.46)]
         imgs = []
         for cx_p, cy_p in centers:
@@ -1945,18 +2088,35 @@ def _build_panoramic_frieze_assets(
             y0 = int(round(min(max(0.0, cy_p * sh - ch_s * 0.5), max(0.0, float(sh - ch_s)))))
             imgs.append(raw_primary.crop((x0, y0, x0 + cw_s, y0 + ch_s)))
 
-    slot_w = int(width * 0.44)
+    slot_w = int(width * 0.43)
     slot_h = int(height * (0.68 if has_card else 0.76))
     border_px = max(10, int(round(13 * scale_factor)))
-    cy = int(fh * (0.435 if has_card else 0.49))
-    centers_x = [int(fw * 0.21), int(fw * 0.50), int(fw * 0.79)]
-    for cx_slot, im in zip(centers_x, imgs):
-        card = _build_double_matte_card(im, max_w=slot_w, max_h=slot_h, scale_factor=scale_factor, border_px=border_px)
-        px = max(8, min(fw - card.width - 8, cx_slot - card.width // 2))
-        py = max(8, min(fh - card.height - 8, cy - card.height // 2))
-        canvas.paste(card, (px, py), card)
+    cards = [
+        _build_double_matte_card(im, max_w=slot_w, max_h=slot_h, scale_factor=scale_factor, border_px=border_px)
+        for im in imgs
+    ]
+    gutter = max(16, int(round(width * 0.045)))
+    outer_pad = max(28, int(round(width * 0.08)))
+    row_w = sum(c.width for c in cards) + gutter * max(0, len(cards) - 1)
+    fw = max(int(round(width * 1.38)), row_w + outer_pad * 2)
+    fw -= fw % 2
+    fh = int(round(height * 1.04))
+    fh -= fh % 2
 
-    return {"canvas_rgb": canvas}
+    canvas = _make_textured_surface_rgb(fw, fh, pal["bg"], seed=505, grad_top=5.0, grad_bot=-6.0, grain_std=1.5)
+    cy = int(fh * (0.435 if has_card else 0.49))
+    x_cur = (fw - row_w) // 2
+    for card in cards:
+        py = max(8, min(fh - card.height - 8, cy - card.height // 2))
+        canvas.paste(card, (x_cur, py), card)
+        x_cur += card.width + gutter
+
+    return {
+        "canvas_rgb": canvas,
+        "fw": fw,
+        "fh": fh,
+        "outer_pad": outer_pad,
+    }
 
 
 def _build_atelier_layered_duo_assets(
@@ -1968,6 +2128,7 @@ def _build_atelier_layered_duo_assets(
     scale_factor: float,
     pal: dict[str, Any],
     color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
 ) -> dict[str, Any]:
     """Build two strictly orthogonal (0-deg) layered archival prints with soft ambient-occlusion shadow."""
     bw = int(round(width * 1.05))
@@ -1993,7 +2154,7 @@ def _build_atelier_layered_duo_assets(
         sw, sh = raw_primary.size
         cw_d = max(48, int(round(sw * 0.56)))
         ch_d = max(48, int(round(sh * 0.56)))
-        ex, ey = kb.end_center
+        ex, ey = focal_uv if focal_uv is not None else kb.end_center
         dx0 = int(round(min(max(0.0, ex * sw - cw_d * 0.5), max(0.0, float(sw - cw_d)))))
         dy0 = int(round(min(max(0.0, ey * sh - ch_d * 0.5), max(0.0, float(sh - ch_d)))))
         fg_src = raw_primary.crop((dx0, dy0, dx0 + cw_d, dy0 + ch_d))
@@ -2617,18 +2778,25 @@ def _prepare_photo_scene_context(
         ctx["bloom_depth_q"] = depth_q
 
     elif mode == "curator_loupe":
-        dimmed_c, sharp_c, loupe_mask, loupe_bezel, rad_px = _build_curator_loupe_assets(
+        salient_uv = _detect_photo_salient_point(
+            raw_primary,
+            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center,
+        )
+        dimmed_c, sharp_c, loupe_mask, loupe_bezel, rad_px, s_xy, e_xy = _build_curator_loupe_assets(
             raw_primary=raw_primary,
             width=width,
             height=height,
             has_card=has_card,
             scale_factor=scale_factor,
+            focal_uv=salient_uv,
         )
         ctx["loupe_dimmed"] = dimmed_c
         ctx["loupe_sharp"] = sharp_c
         ctx["loupe_mask"] = loupe_mask
         ctx["loupe_bezel"] = loupe_bezel
         ctx["loupe_radius"] = rad_px
+        ctx["loupe_start_xy"] = s_xy
+        ctx["loupe_end_xy"] = e_xy
 
     elif mode == "editorial_magazine":
         left_over, right_col, left_w = _build_editorial_magazine_assets(
@@ -2673,9 +2841,13 @@ def _prepare_photo_scene_context(
         ctx["contact_hero_xy"] = (hero_cx, hero_cy)
 
     elif mode == "split_diopter_focus":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary,
+            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center,
+        )
         sd_left, sd_right, sd_seam, sd_left_w = _build_split_diopter_assets(
             raw_primary=raw_primary,
-            focal_point=kb.start_center,
+            focal_point=salient_uv,
             width=width,
             height=height,
             scale_factor=scale_factor,
@@ -2715,6 +2887,10 @@ def _prepare_photo_scene_context(
         ctx["tilt_shadow_rgba"] = detached_shadow
 
     elif mode == "criterion_atelier_split":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary,
+            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center,
+        )
         ctx["atelier"] = _build_criterion_atelier_assets(
             raw_primary=raw_primary,
             kb=kb,
@@ -2722,6 +2898,7 @@ def _prepare_photo_scene_context(
             height=height,
             scale_factor=scale_factor,
             color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
         )
 
     elif mode == "passepartout_shadowbox":
@@ -2751,6 +2928,12 @@ def _prepare_photo_scene_context(
     elif mode == "panoramic_frieze_scroll":
         pal = _resolve_surface_palette(raw_primary, kb)
         ctx["surface_palette"] = pal["name"]
+        if pal["is_light"]:
+            ctx["card_tint_weight"] = 0.78
+        salient_uv = _detect_photo_salient_point(
+            raw_primary,
+            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center,
+        )
         ctx["frieze"] = _build_panoramic_frieze_assets(
             raw_primary=raw_primary,
             kb=kb,
@@ -2760,11 +2943,18 @@ def _prepare_photo_scene_context(
             scale_factor=scale_factor,
             pal=pal,
             color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
         )
 
     elif mode == "atelier_layered_duo":
         pal = _resolve_surface_palette(raw_primary, kb)
         ctx["surface_palette"] = pal["name"]
+        if pal["is_light"]:
+            ctx["card_tint_weight"] = 0.78
+        salient_uv = _detect_photo_salient_point(
+            raw_primary,
+            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center,
+        )
         ctx["layered_duo"] = _build_atelier_layered_duo_assets(
             raw_primary=raw_primary,
             kb=kb,
@@ -2774,6 +2964,7 @@ def _prepare_photo_scene_context(
             scale_factor=scale_factor,
             pal=pal,
             color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
         )
 
     elif mode == "leica_frame_finder":
@@ -2791,7 +2982,12 @@ def _prepare_photo_scene_context(
         work_h = int(round(height * oversample))
         if mode == "links_white_matte":
             ctx["base_static_img"] = build_links_white_matte_image(
-                photo_path, width=work_w, height=work_h, border_px=kb.border_px, raw_img=raw_primary
+                photo_path,
+                width=work_w,
+                height=work_h,
+                border_px=kb.border_px,
+                raw_img=raw_primary,
+                exhibition_tone="soft_limestone",
             )
         elif mode == "gallery_frame":
             ctx["base_static_img"] = build_gallery_frame_image(
@@ -3065,11 +3261,13 @@ def _render_photo_frame_from_context(
         diam = rad * 2
 
         frame = dimmed_c.copy()
-        # Smoothly glide the optical loupe across the focal path
-        lx_norm = (sx - 0.08) + ((ex + 0.08) - (sx - 0.08)) * eased
-        ly_norm = (sy + 0.03 * math.sin(math.pi * eased)) * 0.88
-        lcx = int(round(max(0.24, min(0.76, lx_norm)) * width))
-        lcy = int(round(max(0.24, min(0.68, ly_norm)) * height))
+        # Smoothly glide the optical loupe tightly across the salient subject focal coordinates
+        s_lx, s_ly = ctx["loupe_start_xy"]
+        e_lx, e_ly = ctx["loupe_end_xy"]
+        lcx = int(round(s_lx + (e_lx - s_lx) * eased))
+        lcy = int(round(s_ly + (e_ly - s_ly) * eased - 4.0 * scale_factor * math.sin(math.pi * eased)))
+        lcx = max(0, min(width - 1, lcx))
+        lcy = max(0, min(height - 1, lcy))
 
         # Extract 1.65x magnified patch from sharp_c around (lcx, lcy)
         mag = 1.65
@@ -3355,9 +3553,25 @@ def _render_photo_frame_from_context(
         fr = ctx["frieze"]
         kb_cfg = ctx.get("kb")
         preset_val = getattr(kb_cfg, "preset", "pan_left_to_right") if kb_cfg is not None else "pan_left_to_right"
-        pan_cx = (0.72 - 0.44 * eased) if preset_val == "pan_right_to_left" else (0.28 + 0.44 * eased)
+        fw_f, fh_f = float(fr["fw"]), float(fr["fh"])
+        outer_pad_f = float(fr.get("outer_pad", 0.0))
+        pan_p = (1.0 - eased) if preset_val == "pan_right_to_left" else eased
         pan_z = 1.005 + 0.018 * math.sin(math.pi * eased)
-        frame = _crop_plane_clamped(fr["canvas_rgb"], (width, height), pan_z, pan_cx, 0.50, resample_mode)
+        view_h = fh_f / pan_z
+        view_w = view_h * (float(width) / max(1.0, float(height)))
+        if view_w > fw_f:
+            view_w = fw_f
+            view_h = view_w * (float(height) / max(1.0, float(width)))
+        max_x0 = max(0.0, fw_f - view_w)
+        x_margin = min(max_x0 * 0.5, outer_pad_f * 0.25)
+        bx0 = x_margin + (max_x0 - 2.0 * x_margin) * pan_p
+        by0 = max(0.0, (fh_f - view_h) * 0.5)
+        frame = fr["canvas_rgb"].transform(
+            (width, height),
+            Image.Transform.EXTENT,
+            (bx0, by0, bx0 + view_w, by0 + view_h),
+            resample=resample_mode,
+        )
 
     elif mode == "atelier_layered_duo":
         ld = ctx["layered_duo"]
@@ -3457,6 +3671,7 @@ def _render_photo_frame_from_context(
                 py=ctx["card_y"],
                 alpha_mult=alpha_mult,
                 slide_y=slide_y,
+                tint_weight=float(ctx.get("card_tint_weight", 0.58)),
             )
 
     return frame
@@ -4136,7 +4351,7 @@ def render_photo_effects_showcase_sheet(
         ("diptych_frame", "golden_light_leak", "19. Side-by-Side Diptych Split-Screen", "auto"),
         ("gallery_frame", "champagne_bokeh", "20. Classic Gallery Frame + Bokeh", "auto"),
         ("full_bleed", "halation_bloom_35mm", "21. Full-Bleed Ken Burns + Halation", "auto"),
-        ("links_white_matte", "none", "22. Links Pure-White Exhibition Matte", "gallery_white"),
+        ("links_white_matte", "none", "22. Soft Limestone Exhibition Matte", "gallery_white"),
         ("passepartout_shadowbox", "none", "23. Shadow-Box (Gallery White Surface)", "gallery_white"),
         ("kinfolk_linen_folio", "velvet_vignette_rembrandt", "24. Kinfolk Folio (Obsidian Slate)", "obsidian_slate"),
     ]

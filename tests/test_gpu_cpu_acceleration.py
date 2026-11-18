@@ -555,6 +555,7 @@ def test_new_premium_photo_modes_cuda_fp16_parity(tmp_path: Path) -> None:
         ("panoramic_frieze_scroll", "architectural_window_dapple", "gallery_white"),
         ("atelier_layered_duo", "golden_light_leak", "obsidian_slate"),
         ("leica_frame_finder", "nostalgic_film_grain", "auto"),
+        ("curator_loupe", "museum_spotlight", "auto"),
         ("archival_color_bloom", "architectural_window_dapple", "auto"),
     ]
     for mode_name, fx_name, palette_name in cases:

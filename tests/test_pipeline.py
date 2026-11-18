@@ -709,6 +709,7 @@ def test_cross_platform_macbook_pro_2019_hardware_encoding_and_filters(monkeypat
 
 def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
     """Verify all 19 Premium Photo Presentation Modes + 10 Atmospheric Finishers and 4x5 showcase sheet generator."""
+    import numpy as np
     from PIL import Image, ImageDraw
     from video_editing_ai.models.schema import (
         VALID_PHOTO_MODES,
@@ -806,8 +807,8 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
     )
     assert out_mp4.exists() and out_mp4.stat().st_size > 1000
 
-    # Render the 4x4 (16-mode) showcase sheet
-    showcase_jpg = tmp_path / "showcase_16modes.jpg"
+    # Render the 4x6 (24-tile) showcase sheet
+    showcase_jpg = tmp_path / "showcase_24modes.jpg"
     render_photo_effects_showcase_sheet(
         photo_path=p1,
         output_jpg=showcase_jpg,
@@ -817,6 +818,52 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
         tile_height=180,
     )
     assert showcase_jpg.exists() and showcase_jpg.stat().st_size > 8000
+
+    # Regression 1: curator_loupe targets an off-center high-salience object rather than flat background
+    p_sal = tmp_path / "salient_upper_left.jpg"
+    sal_img = Image.new("RGB", (600, 800), (140, 140, 140))
+    sal_d = ImageDraw.Draw(sal_img)
+    sal_d.rectangle([70, 110, 210, 260], fill=(235, 72, 48), outline=(255, 255, 255), width=6)
+    sal_d.ellipse([95, 135, 185, 235], fill=(40, 210, 225), outline=(20, 20, 20), width=4)
+    sal_img.save(p_sal, quality=95)
+    ctx_loupe = _prepare_photo_scene_context(
+        p_sal,
+        width=640,
+        height=360,
+        kb=KenBurnsConfig(mode="curator_loupe", overlay_fx="none"),
+    )
+    lx_mid = 0.5 * (ctx_loupe["loupe_start_xy"][0] + ctx_loupe["loupe_end_xy"][0])
+    ly_mid = 0.5 * (ctx_loupe["loupe_start_xy"][1] + ctx_loupe["loupe_end_xy"][1])
+    assert lx_mid < 320 and ly_mid < 180, f"Loupe missed upper-left salient region: ({lx_mid:.1f}, {ly_mid:.1f})"
+
+    # Regression 2: panoramic_frieze_scroll preserves exact 1:1 square aspect ratio without horizontal squish
+    p_sq = tmp_path / "square_marker.jpg"
+    sq_img = Image.new("RGB", (600, 600), (60, 80, 110))
+    ImageDraw.Draw(sq_img).rectangle([120, 120, 480, 480], fill=(220, 40, 40))
+    sq_img.save(p_sq, quality=95)
+    ctx_frieze = _prepare_photo_scene_context(
+        p1,
+        width=640,
+        height=360,
+        kb=KenBurnsConfig(mode="panoramic_frieze_scroll", secondary_source=str(p_sq), tertiary_source=str(p3), caption_title=""),
+    )
+    fr_mid = np.asarray(_render_photo_frame_from_context(ctx_frieze, t_norm=0.5, f_idx=15, duration=3.0, fps=30))
+    red_mask = (fr_mid[:, :, 0] > 180) & (fr_mid[:, :, 1] < 80) & (fr_mid[:, :, 2] < 80)
+    ys, xs = np.where(red_mask)
+    assert ys.size > 0
+    box_ar = (int(xs.max()) - int(xs.min()) + 1) / float(int(ys.max()) - int(ys.min()) + 1)
+    assert 0.90 <= box_ar <= 1.12, f"Panoramic frieze distorted square print aspect ratio: {box_ar:.3f}"
+
+    # Regression 3: links_white_matte contextual exhibition canvas uses calm limestone (never stark 255 corners)
+    ctx_limestone = _prepare_photo_scene_context(
+        p1,
+        width=640,
+        height=360,
+        kb=KenBurnsConfig(mode="links_white_matte", overlay_fx="none"),
+    )
+    fr_limestone = np.asarray(_render_photo_frame_from_context(ctx_limestone, t_norm=0.5, f_idx=15, duration=3.0, fps=30))
+    corner_mean = float(fr_limestone[8, 8].mean())
+    assert 180.0 <= corner_mean <= 220.0, f"links_white_matte corner too bright/dark: {corner_mean:.1f}"
 
 
 def test_ai_creative_intelligence_and_interactive_multi_choice_intake(
