@@ -1392,10 +1392,18 @@ class MPSPhotoCompositor:
                 duration=duration,
                 fps=fps,
             )
-        except torch.OutOfMemoryError:
-            if self.device.type != "cuda" or len(frame_indices) <= 1:
+        except (torch.OutOfMemoryError, RuntimeError) as exc:
+            is_oom = isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower()
+            if self.device.type != "cuda" or not is_oom:
                 raise
+            try:
+                if self._cuda_stream is not None:
+                    self._cuda_stream.synchronize()
+            except Exception:
+                pass
             torch.cuda.empty_cache()
+            if len(frame_indices) <= 1:
+                raise
             singles = [
                 self._render_batch_impl(
                     frame_indices=[f_idx],

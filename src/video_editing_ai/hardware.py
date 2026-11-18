@@ -170,6 +170,34 @@ def _detect_cuda_device_info(has_cuda: bool) -> tuple[str, float]:
     return "", 0.0
 
 
+def get_cuda_free_vram_gb(device_idx: int = 0) -> float:
+    """Return live free VRAM in GiB for CUDA device `device_idx` (0.0 if unavailable)."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            free_bytes, _total_bytes = torch.cuda.mem_get_info(device_idx)
+            return round(float(free_bytes) / float(1024 ** 3), 2)
+    except Exception:
+        pass
+    if sys.platform != "darwin" and shutil.which("nvidia-smi"):
+        try:
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=4,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                first_val = proc.stdout.strip().splitlines()[0].strip()
+                if first_val:
+                    return round(float(first_val) / 1024.0, 2)
+        except Exception:
+            pass
+    return 0.0
+
+
 def _detect_macos_gpus() -> list[dict[str, str]]:
     """Query macOS display adapters via system_profiler once and cache the result."""
     global _MACOS_GPUS_CACHE

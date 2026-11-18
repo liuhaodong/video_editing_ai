@@ -588,3 +588,53 @@ def test_new_premium_photo_modes_cuda_fp16_parity(tmp_path: Path) -> None:
                 )
         finally:
             comp.close()
+
+
+def test_cuda_photo_budget_and_free_vram_guard() -> None:
+    """Verify dynamic CUDA batch sizing & 4K serialization respect live free VRAM."""
+    from video_editing_ai.renderer import ken_burns
+
+    free_gb = hardware.get_cuda_free_vram_gb()
+    assert isinstance(free_gb, float) and free_gb >= 0.0
+
+    b_hi, sch_hi, ser_hi = ken_burns._cuda_photo_budget(3840, total_vram_gb=16.0, free_vram_gb=13.5)
+    assert (b_hi, sch_hi, ser_hi) == (3, (3, 1), True)
+
+    b_mid, sch_mid, ser_mid = ken_burns._cuda_photo_budget(3840, total_vram_gb=16.0, free_vram_gb=8.6)
+    assert (b_mid, sch_mid, ser_mid) == (2, (2, 1), True)
+
+    b_low, sch_low, ser_low = ken_burns._cuda_photo_budget(3840, total_vram_gb=16.0, free_vram_gb=5.2)
+    assert (b_low, sch_low, ser_low) == (1, (1,), True)
+
+    b_hd, sch_hd, ser_hd = ken_burns._cuda_photo_budget(1920, total_vram_gb=16.0, free_vram_gb=9.5)
+    assert (b_hd, sch_hd, ser_hd) == (12, (12, 6, 2, 1), False)
+
+    b_hd_low, sch_hd_low, ser_hd_low = ken_burns._cuda_photo_budget(1920, total_vram_gb=16.0, free_vram_gb=4.5)
+    assert (b_hd_low, sch_hd_low, ser_hd_low) == (3, (3, 2, 1), True)
+
+
+def test_render_batch_rgb_retries_single_frame_on_runtime_cuda_oom(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify RuntimeError('CUDA error: out of memory') triggers cache clear + single-frame fallback."""
+    from video_editing_ai.renderer import mps_photo_compositor as mpc
+
+    calls: list[list[int]] = []
+    cache_clears = {"count": 0}
+
+    class _FakeComp:
+        device = torch.device("cuda", 0)
+        _cuda_stream = None
+
+        def _render_batch_impl(self, frame_indices: list[int], total_frames: int, duration: float, fps: int) -> torch.Tensor:
+            calls.append(list(frame_indices))
+            if len(frame_indices) > 1:
+                raise RuntimeError("CUDA error: out of memory")
+            return torch.zeros((1, 4, 4, 3), dtype=torch.uint8)
+
+        render_batch_rgb = mpc.MPSPhotoCompositor.render_batch_rgb
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cache_clears.__setitem__("count", cache_clears["count"] + 1))
+
+    out = _FakeComp().render_batch_rgb(frame_indices=[0, 1, 2], total_frames=3, duration=1.0, fps=3)
+    assert out.shape == (3, 4, 4, 3)
+    assert cache_clears["count"] == 1
+    assert calls == [[0, 1, 2], [0], [1], [2]]

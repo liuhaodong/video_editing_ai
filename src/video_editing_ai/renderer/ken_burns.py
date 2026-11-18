@@ -3837,6 +3837,29 @@ def build_segment_overlay_filtergraph(
 
 _PHOTO_PREBUFFER_SEM = threading.BoundedSemaphore(2)
 _CUDA_PHOTO_SEM = threading.BoundedSemaphore(2)
+_CUDA_4K_LOCK = threading.Lock()
+
+
+def _cuda_photo_budget(width: int, total_vram_gb: float, free_vram_gb: float) -> tuple[int, tuple[int, ...], bool]:
+    """Compute CUDA photo batch size, progressive retry schedule, and 4K/low-VRAM serialization."""
+    free_gb = free_vram_gb if free_vram_gb > 0.0 else total_vram_gb
+    if width >= 3840:
+        if free_gb >= 12.5:
+            init_b = 3
+        elif free_gb >= 7.5:
+            init_b = 2
+        else:
+            init_b = 1
+        retries = tuple(dict.fromkeys((init_b, max(1, init_b // 2), 1)))
+        return init_b, retries, True
+    if free_gb >= 8.0:
+        init_b = 12
+    elif free_gb >= 5.0:
+        init_b = 6
+    else:
+        init_b = 3
+    retries = tuple(sorted({init_b, max(1, init_b // 2), 2, 1}, reverse=True))
+    return init_b, retries, free_gb < 6.0
 
 
 def _resolve_ffmpeg_bin() -> str:
@@ -4018,25 +4041,35 @@ def render_photo_clip(
     v_enc = get_video_encoder_args(hdr=hdr, force_software=False)
     cmd = _build_photo_cmd(force_sw=False)
 
-    from ..hardware import nvenc_encode_guard, videotoolbox_hdr_encode_guard
+    from ..hardware import get_cuda_free_vram_gb, nvenc_encode_guard, videotoolbox_hdr_encode_guard
 
     try:
         hw = get_hardware_profile()
         if hw.has_cuda and total_frames > 0:
-            cuda_batch = (3 if hw.cuda_vram_gb >= 12.0 else 2) if width >= 3840 else 12
+            free_vram_gb = get_cuda_free_vram_gb()
+            cuda_batch, batch_schedule, serialize_cuda = _cuda_photo_budget(
+                width=width,
+                total_vram_gb=hw.cuda_vram_gb,
+                free_vram_gb=free_vram_gb,
+            )
             cuda_ok = False
+            last_ok_batch = cuda_batch
             stderr_bytes = b""
             ret = 1
             proc: Optional[subprocess.Popen[bytes]] = None
             attempt_out: Optional[Path] = None
             with nvenc_encode_guard(v_enc):
-                for attempt_idx, attempt_batch in enumerate((cuda_batch, max(1, cuda_batch // 2))):
+                for attempt_idx, attempt_batch in enumerate(batch_schedule):
                     cuda_ok = False
                     cuda_sem_held = False
+                    cuda_4k_held = False
                     proc = None
                     attempt_out = out_path.with_name(f".{out_path.stem}.tmp_{os.getpid()}_{threading.get_ident()}_a{attempt_idx}.mp4")
                     cmd_attempt = _build_photo_cmd(force_sw=False, out_target=attempt_out)
                     try:
+                        if serialize_cuda:
+                            _CUDA_4K_LOCK.acquire()
+                            cuda_4k_held = True
                         _CUDA_PHOTO_SEM.acquire()
                         cuda_sem_held = True
                         proc = subprocess.Popen(cmd_attempt, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -4053,6 +4086,7 @@ def render_photo_clip(
                             device_override="cuda",
                         )
                         cuda_ok = True
+                        last_ok_batch = attempt_batch
                         break
                     except Exception as exc:
                         if proc is not None:
@@ -4078,7 +4112,7 @@ def render_photo_clip(
                         except Exception:
                             pass
                         is_oom = "out of memory" in str(exc).lower()
-                        if is_oom and attempt_batch > max(1, cuda_batch // 2):
+                        if is_oom and attempt_idx < len(batch_schedule) - 1:
                             continue
                         print(f"[ken_burns] CUDA photo compositor fallback to CPU: {exc}", file=sys.stderr)
                         break
@@ -4090,6 +4124,8 @@ def render_photo_clip(
                                 pass
                         if cuda_sem_held:
                             _CUDA_PHOTO_SEM.release()
+                        if cuda_4k_held:
+                            _CUDA_4K_LOCK.release()
 
                 if cuda_ok and proc is not None and attempt_out is not None:
                     stderr_bytes = proc.stderr.read() if proc.stderr else b""
@@ -4103,7 +4139,11 @@ def render_photo_clip(
                 sw_cmd = _build_photo_cmd(force_sw=True, out_target=sw_out)
                 sw_proc: Optional[subprocess.Popen[bytes]] = None
                 sw_sem_held = False
+                sw_4k_held = False
                 try:
+                    if serialize_cuda:
+                        _CUDA_4K_LOCK.acquire()
+                        sw_4k_held = True
                     _CUDA_PHOTO_SEM.acquire()
                     sw_sem_held = True
                     sw_proc = subprocess.Popen(sw_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -4116,7 +4156,7 @@ def render_photo_clip(
                         duration=duration,
                         fps=fps,
                         pipe_stdin=sw_proc.stdin,
-                        batch_size=cuda_batch,
+                        batch_size=last_ok_batch,
                         device_override="cuda",
                     )
                 finally:
@@ -4127,6 +4167,8 @@ def render_photo_clip(
                             pass
                     if sw_sem_held:
                         _CUDA_PHOTO_SEM.release()
+                    if sw_4k_held:
+                        _CUDA_4K_LOCK.release()
                 assert sw_proc is not None
                 sw_err = sw_proc.stderr.read() if sw_proc.stderr else b""
                 sw_ret = sw_proc.wait()
