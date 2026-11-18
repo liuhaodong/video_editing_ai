@@ -279,9 +279,9 @@ def _build_baseline_timeline(
                 timeline_start=0.0,
                 duration=round(cursor, 2),
                 source_in=0.0,
-                volume=0.25,
+                volume=0.55,
                 duck_under_dialogue=True,
-                duck_volume=0.08,
+                duck_volume=0.184,
                 fade_in=1.2,
                 fade_out=3.0,
             )

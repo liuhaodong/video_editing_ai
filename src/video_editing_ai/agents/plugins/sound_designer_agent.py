@@ -297,22 +297,48 @@ class SoundDesignerMixerAgent(BaseEditingAgent):
         if timeline is None:
             return {"ambient_beds_count": 0, "foley_accents_count": 0}
 
+        bgm_sel = blackboard.bgm_selection
+        target_bgm_vol = float(getattr(bgm_sel, "recommended_bgm_volume", 0.62) or 0.62)
+        target_duck_db = float(getattr(bgm_sel, "recommended_speech_duck_db", -9.5) or -9.5)
+
+        # Let AI sound designer tailor mix balance when creative synthesis is active
+        ai_mix = self.ask_ai_creative_json(
+            blackboard=blackboard,
+            prompt=(
+                f"Project: {blackboard.creative_brief.project_title if blackboard.creative_brief else timeline.project_name}, "
+                f"Clips: {len(timeline.visual_track)}, Duration: {timeline.total_duration:.1f}s, "
+                f"Music Supervisor direction: {getattr(bgm_sel, 'target_mood_profile', 'default')} "
+                f"(suggested bgm_volume={target_bgm_vol}, speech_duck_db={target_duck_db}). "
+                "Recommend final BGM loudness & ducking balance so BGM feels lively on scenic/still moments while speech stays intelligible. "
+                'Return JSON: {"bgm_volume": 0.62, "bgm_speech_duck_db": -9.5}'
+            ),
+            decision_key="sound_mixer_levels",
+            timeout_sec=20.0,
+        )
+        if isinstance(ai_mix, dict):
+            if ai_mix.get("bgm_volume") is not None:
+                target_bgm_vol = max(0.15, min(1.2, float(ai_mix["bgm_volume"])))
+            if ai_mix.get("bgm_speech_duck_db") is not None:
+                target_duck_db = max(-24.0, min(-3.0, float(ai_mix["bgm_speech_duck_db"])))
+
         # 1. Compute post-assembly dialogue loudness normalization (-14 LUFS), -20 dB Nat-Sound, -30 dB diegetic mute & 0.33s crossfades
         clip_mix_entries, ducking_envelope = build_audio_mix_plan(
             timeline=timeline,
             media_index=blackboard.media_index,
             target_dialogue_lufs=-14.0,
             nat_sound_bed_db=-20.0,
-            bgm_speech_duck_db=-14.0,
+            bgm_speech_duck_db=target_duck_db,
             bgm_diegetic_duck_db=-30.0,
             crossfade_sec=0.33,
         )
 
-        # Calibrate Track A3 BGM duck_volume to -14 dB relative to base_vol (0.28 * 10^(-14/20) = 0.0559)
+        # Calibrate Track A3 BGM presence using AI-chosen base & duck attenuation
         for a_trk in timeline.audio_tracks:
             if a_trk.role == "music":
+                if a_trk.volume <= 0.30:
+                    a_trk.volume = round(target_bgm_vol, 3)
                 a_trk.duck_under_dialogue = True
-                a_trk.duck_volume = round(a_trk.volume * (10.0 ** (-14.0 / 20.0)), 4)
+                a_trk.duck_volume = round(a_trk.volume * (10.0 ** (target_duck_db / 20.0)), 4)
                 a_trk.duration = round(timeline.total_duration, 2)
                 src_p = Path(a_trk.source)
                 if src_p.exists() and src_p.stat().st_size > 16_000:
@@ -473,7 +499,7 @@ class SoundDesignerMixerAgent(BaseEditingAgent):
             project_title=proj_title,
             target_dialogue_lufs=-14.0,
             nat_sound_bed_db=-20.0,
-            bgm_speech_duck_db=-14.0,
+            bgm_speech_duck_db=round(target_duck_db, 2),
             bgm_diegetic_duck_db=-30.0,
             default_crossfade_sec=0.33,
             diegetic_music_clips_muted=diegetic_muted,

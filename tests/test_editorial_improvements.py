@@ -177,6 +177,62 @@ def test_sound_designer_remasters_short_bgm_to_full_timeline(tmp_path: Path) -> 
     assert probe_audio_diagnostics(remastered)["duration_sec"] >= 27.5
 
 
+def test_music_supervisor_ai_driven_selection_and_mix_styling(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import MagicMock
+    from video_editing_ai.agents import music_supervisor_agent as msa
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True)
+    proj_dir = tmp_path / "proj"
+
+    track_a = _make_audio_mp3(tmp_path / "src_a.mp3", dur=12.0)
+    track_b = _make_audio_mp3(tmp_path / "src_b.mp3", dur=12.0)
+
+    def _fake_search(query_keywords, max_results=5, timeout_sec=6.0):
+        kw = ",".join(query_keywords)
+        if "tropical" in kw:
+            return [{"track_id": "t_trop", "title": "Coral Sun", "composer_or_artist": "Artist A", "genre_mood": "Tropical", "license_info": "CC BY", "source_url": "https://example.com/a.mp3", "tempo_bpm_estimate": 102.0, "mood_match_score": 9.8, "notes": "Sunny"}]
+        return [{"track_id": "t_warm", "title": "Candlelight", "composer_or_artist": "Artist B", "genre_mood": "Warm", "license_info": "CC BY", "source_url": "https://example.com/b.mp3", "tempo_bpm_estimate": 88.0, "mood_match_score": 9.6, "notes": "Dinner"}]
+
+    def _fake_dl(url, dest_path, timeout_sec=15.0):
+        src = track_a if url.endswith("a.mp3") else track_b
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(src.read_bytes())
+        return True
+
+    monkeypatch.setattr(msa, "search_online_royalty_free_catalog", _fake_search)
+    monkeypatch.setattr(msa, "_try_download_free_bgm", _fake_dl)
+
+    agent = msa.MusicSupervisorAgent()
+    ai_mock = MagicMock(
+        side_effect=[
+            {
+                "mood_profile": "sunlit_caribbean_anniversary",
+                "chapter_search_queries": [["tropical", "steel drum"], ["warm", "acoustic guitar"]],
+                "recommended_bgm_volume": 0.68,
+                "recommended_speech_duck_db": -9.0,
+                "direction_notes": "Breezy island groove into intimate anniversary strings.",
+            },
+            {
+                "selected_track_ids": ["t_trop", "t_warm"],
+                "ai_rationale": "Contrasts bright beach groove with warm acoustic evening.",
+            },
+        ]
+    )
+    monkeypatch.setattr(agent, "ask_ai_creative_json", ai_mock)
+
+    bb = PipelineBlackboard(media_dir=media_dir, project_dir=proj_dir)
+    bb.creative_brief = CreativeBrief(project_title="Cancun Test", target_duration_sec=20.0)
+    res = agent.run(bb)
+
+    assert Path(res["selected_track_path"]).exists()
+    assert bb.bgm_selection is not None
+    assert bb.bgm_selection.target_mood_profile == "sunlit_caribbean_anniversary"
+    assert abs(bb.bgm_selection.recommended_bgm_volume - 0.68) < 1e-4
+    assert abs(bb.bgm_selection.recommended_speech_duck_db - (-9.0)) < 1e-4
+    assert [c.track_id for c in bb.bgm_selection.candidates][:2] == ["t_trop", "t_warm"]
+
+
 def test_transport_inference_and_title_sanitization() -> None:
     assert infer_transport_mode(46.9, "San Diego Safari Park", "San Diego Bay") == "drive"
     assert infer_transport_mode(28.0, "Ferry Terminal", "Harbor Bay") == "boat"

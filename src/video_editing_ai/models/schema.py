@@ -28,6 +28,7 @@ PhotoModeType = Literal[
     "medium_format_slide",
     "floating_tilt_plate",
     "criterion_atelier_split",
+    "links_white_matte",
 ]
 
 PhotoOverlayFxType = Literal[
@@ -64,6 +65,7 @@ VALID_PHOTO_MODES: tuple[str, ...] = (
     "medium_format_slide",
     "floating_tilt_plate",
     "criterion_atelier_split",
+    "links_white_matte",
 )
 
 FilmStockLookType = Literal[
@@ -75,6 +77,7 @@ FilmStockLookType = Literal[
     "museum_chiaroscuro",
     "twilight_teal_amber",
     "a24_indie_matte",
+    "links_nordic_clean",
     "neutral_reference",
 ]
 
@@ -87,6 +90,7 @@ VALID_FILM_STOCK_LOOKS: tuple[str, ...] = (
     "museum_chiaroscuro",
     "twilight_teal_amber",
     "a24_indie_matte",
+    "links_nordic_clean",
     "neutral_reference",
 )
 
@@ -111,6 +115,7 @@ TitleThemeType = Literal[
     "kinfolk_magazine",
     "archival_35mm",
     "kinetic_travelogue",
+    "links_minimal",
 ]
 
 VALID_TITLE_THEMES: tuple[str, ...] = (
@@ -120,10 +125,12 @@ VALID_TITLE_THEMES: tuple[str, ...] = (
     "kinfolk_magazine",
     "archival_35mm",
     "kinetic_travelogue",
+    "links_minimal",
 )
 
 TitleStyleType = Literal[
     "opening_card",
+    "hero_opening_card",
     "act_banner",
     "lower_third",
     "editorial_caption",
@@ -140,6 +147,7 @@ TitleStyleType = Literal[
 
 VALID_TITLE_STYLES: tuple[str, ...] = (
     "opening_card",
+    "hero_opening_card",
     "act_banner",
     "lower_third",
     "editorial_caption",
@@ -706,6 +714,8 @@ class BGMSelectionReport(BaseModel):
     license_info: str = "CC0 / Public Domain"
     source_url: str = ""
     mood_match_score: float = Field(default=9.5, ge=0.0, le=10.0)
+    recommended_bgm_volume: float = Field(default=0.62, ge=0.05, le=1.5)
+    recommended_speech_duck_db: float = Field(default=-9.5, ge=-30.0, le=0.0)
     selection_rationale: str = ""
     rejected_user_bgm_reason: Optional[str] = None
     candidates: list[BGMCandidate] = Field(default_factory=list)
@@ -1476,6 +1486,7 @@ class SoundDesignCue(BaseModel):
         "warm_room_tone",
         "velvet_whoosh",
         "polaroid_shutter",
+        "camera_shutter_click",
         "optical_loupe_chime",
         "cartography_flyover_whoosh",
     ] = "warm_room_tone"
@@ -1768,15 +1779,15 @@ class ClipColorTransform(BaseModel):
         "sdr_bt709_8bit",
         "srgb_still",
     ] = "sdr_bt709_8bit"
-    transform_mode: str = "zscale_sdr_to_hlg_203nits"
+    transform_mode: str = "zscale_sdr_to_hlg_880nits"
     color_primaries: str = "bt709"
     color_trc: str = "bt709"
     color_space: str = "bt709"
     pix_fmt: str = "yuv420p"
     target_trc: str = "arib-std-b67"
-    target_diffuse_white_nits: float = 203.0
-    hdr_diffuse_white_nits: float = 203.0
-    hdr_signal_ceiling: float = 0.75
+    target_diffuse_white_nits: float = 880.0
+    hdr_diffuse_white_nits: float = 880.0
+    hdr_signal_ceiling: float = 0.98
     chapter_look: str = "archival_kodak_2383"
     wb_red_shift: float = 0.0
     wb_green_shift: float = 0.0
@@ -1808,7 +1819,7 @@ class ColorTransformManifest(BaseModel):
     hdr_delivery: bool = True
     target_transfer: str = "arib-std-b67"
     target_primaries: str = "bt2020"
-    diffuse_white_nits: float = 203.0
+    diffuse_white_nits: float = 880.0
     primary_film_stock_look: str = "archival_kodak_2383"
     zscale_available: bool = True
     shots_classified_count: int = 0

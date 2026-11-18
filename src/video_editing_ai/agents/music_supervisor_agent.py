@@ -76,6 +76,109 @@ CURATED_FREE_BGM_CATALOG: dict[str, list[dict[str, Any]]] = {
             "notes": "Timeless Impressionist solo piano piece written in 1888.",
         },
     ],
+    "tropical_vacation_beach": [
+        {
+            "track_id": "island_meet_and_greet",
+            "title": "Island Meet and Greet (Steel Drum, Marimba & Ukulele)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Bouncy Tropical Island Groove · Sunny & Breezy",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Island%20Meet%20and%20Greet.mp3",
+            "tempo_bpm_estimate": 100.0,
+            "mood_match_score": 9.9,
+            "notes": "Steel drum, marimba, and ukulele tropical resort groove for bright beach and coastal days.",
+        },
+        {
+            "track_id": "modern_jazz_samba",
+            "title": "Modern Jazz Samba (Acoustic Guitar, Flute & Bossa Kit)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Warm Latin Bossa Samba · Coastal Evening & Dining",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Modern%20Jazz%20Samba.mp3",
+            "tempo_bpm_estimate": 85.0,
+            "mood_match_score": 9.8,
+            "notes": "Upbeat acoustic guitar and flute bossa-samba suite suited to Latin dining and waterfront evenings.",
+        },
+        {
+            "track_id": "rainbows_marimba",
+            "title": "Rainbows (Marimba, Ukulele & Cello Adventure)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Bright Calming Travel · Coastal Excursions",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Rainbows.mp3",
+            "tempo_bpm_estimate": 110.0,
+            "mood_match_score": 9.7,
+            "notes": "Warm marimba, ukulele, and cello interplay for boat excursions and family resort play.",
+        },
+        {
+            "track_id": "moonlight_beach",
+            "title": "Moonlight Beach (Steel Drum & Warm Percussion)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Relaxed Tropical Twilight · Resort Evening",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Moonlight%20Beach.mp3",
+            "tempo_bpm_estimate": 117.0,
+            "mood_match_score": 9.6,
+            "notes": "Laid-back steel drum and marimba pulse tailored for moonlit beach walks.",
+        },
+        {
+            "track_id": "carefree_acoustic",
+            "title": "Carefree (Uplifting Acoustic Ukulele, Guitar & Bells)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Warm Joyful Keepsake · Uplifting & Heartwarming",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Carefree.mp3",
+            "tempo_bpm_estimate": 96.0,
+            "mood_match_score": 9.5,
+            "notes": "Uplifting acoustic ukulele and marimba opener for vacation departures.",
+        },
+    ],
+    "heartfelt_anniversary_cinematic": [
+        {
+            "track_id": "autumn_day",
+            "title": "Autumn Day (Acoustic Guitar, Strings & Piano)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Bright Emotional Keepsake · Piano & Strings",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Autumn%20Day.mp3",
+            "tempo_bpm_estimate": 126.0,
+            "mood_match_score": 9.8,
+            "notes": "Warm acoustic guitar, sweeping strings, and piano for anniversaries and heartfelt milestones.",
+        },
+        {
+            "track_id": "eternal_hope",
+            "title": "Eternal Hope (Lyrical Piano & Warm Strings)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Reflective & Uplifting Cinematic Finale",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Eternal%20Hope.mp3",
+            "tempo_bpm_estimate": 88.0,
+            "mood_match_score": 9.7,
+            "notes": "Lyrical piano and warm French horn/strings for emotional farewell chapters.",
+        },
+        {
+            "track_id": "vibing_over_venus",
+            "title": "Vibing Over Venus (Vibraphone, Brushed Drums & Strings)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Lounge Romance · Warm Golden-Hour Dinner",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Vibing%20Over%20Venus.mp3",
+            "tempo_bpm_estimate": 94.0,
+            "mood_match_score": 9.6,
+            "notes": "Smooth vibraphone and strings lounge score suited for candlelit anniversary dinners.",
+        },
+        {
+            "track_id": "heartwarming",
+            "title": "Heartwarming (Intimate Piano Reflection)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Tender Piano Keepsake · Hopeful & Sweet",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Heartwarming.mp3",
+            "tempo_bpm_estimate": 82.0,
+            "mood_match_score": 9.5,
+            "notes": "Tender uplifting piano piece for family portraits and closing credits.",
+        },
+    ],
     "warm_family_acoustic": [
         {
             "track_id": "carefree_acoustic",
@@ -89,6 +192,17 @@ CURATED_FREE_BGM_CATALOG: dict[str, list[dict[str, Any]]] = {
             "notes": "Warm acoustic harmonic progression designed for travel highlights and candid smiles.",
         },
         {
+            "track_id": "porch_swing_days_slower",
+            "title": "Porch Swing Days (Warm Acoustic Guitars & Percussion)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Sunlit Acoustic Travelogue · Relaxed & Upbeat",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Porch%20Swing%20Days%20-%20slower.mp3",
+            "tempo_bpm_estimate": 110.0,
+            "mood_match_score": 9.6,
+            "notes": "Bright layered acoustic guitars with warm sunlit road-trip energy.",
+        },
+        {
             "track_id": "wholesome_family",
             "title": "Wholesome (Warm Travel Documentary Score)",
             "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
@@ -99,8 +213,30 @@ CURATED_FREE_BGM_CATALOG: dict[str, list[dict[str, Any]]] = {
             "mood_match_score": 9.5,
             "notes": "Rich, heartwarming instrumental score for travel vlogs and keepsakes.",
         },
+        {
+            "track_id": "daily_beetle",
+            "title": "Daily Beetle (Ukulele, Guitar & Marimba)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Playful Acoustic Family Stroll",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Daily%20Beetle.mp3",
+            "tempo_bpm_estimate": 100.0,
+            "mood_match_score": 9.4,
+            "notes": "Gentle marimba and ukulele groove for kids' moments and sightseeing.",
+        },
     ],
     "playful_whimsical_adventure": [
+        {
+            "track_id": "doobly_doo",
+            "title": "Doobly Doo (Playful Pizzicato Strings & Percussion)",
+            "composer_or_artist": "Kevin MacLeod (Incompetech CC BY 4.0)",
+            "genre_mood": "Bright Whimsical Pizzicato · Family Magic & Games",
+            "license_info": "CC BY 4.0 (Royalty-Free)",
+            "source_url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Doobly%20Doo.mp3",
+            "tempo_bpm_estimate": 85.0,
+            "mood_match_score": 9.6,
+            "notes": "Lighthearted pizzicato groove suited for kids' clubs, magic shows, and playful twists.",
+        },
         {
             "track_id": "enchanted_twilight_waltz",
             "title": "One-Eyed Maestro / Whimsical Festival Waltz",
@@ -111,7 +247,7 @@ CURATED_FREE_BGM_CATALOG: dict[str, list[dict[str, Any]]] = {
             "tempo_bpm_estimate": 102.0,
             "mood_match_score": 9.4,
             "notes": "Playful strings and brass suited for theme park rides, festivals, and evening light displays.",
-        }
+        },
     ],
 }
 
@@ -551,17 +687,17 @@ def master_bgm_soundtrack(
 
     filter_parts: list[str] = []
     for i in range(len(playlist)):
-        # Normalize each track's sample rate and trim any trailing silence before crossfading
+        # Normalize each track cleanly while preserving its dynamic timbre before crossfading
         filter_parts.append(
             f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"dynaudnorm=f=250:g=15:p=0.85[a{i}]"
+            f"loudnorm=I={target_lufs:.1f}:TP=-2.0:LRA=11[a{i}]"
         )
 
     cur_lbl = "[a0]"
     for i in range(1, len(playlist)):
         next_lbl = f"[cf{i}]"
         cf_d = min(crossfade_sec, 3.5)
-        filter_parts.append(f"{cur_lbl}[a{i}]acrossfade=d={cf_d:.2f}:c1=tri:c2=tri{next_lbl}")
+        filter_parts.append(f"{cur_lbl}[a{i}]acrossfade=d={cf_d:.2f}:c1=qsin:c2=qsin{next_lbl}")
         cur_lbl = next_lbl
 
     filter_parts.append(
@@ -680,16 +816,50 @@ def scout_bgm_candidates_for_project(
     return payload
 
 
+def _extract_dynamic_brief_keywords(prompt_blob: str, max_keywords: int = 6) -> list[str]:
+    """Extract non-generic content keywords from a brief purely for offline/no-SDK online catalog fallback."""
+    stop = {
+        "with", "from", "this", "that", "have", "they", "their", "them", "were", "will",
+        "your", "about", "into", "over", "after", "before", "including", "highlights",
+        "story", "film", "video", "clips", "photos", "documentary", "family", "prioritize",
+        "tell", "make", "very", "high", "production", "project", "during", "then",
+    }
+    words = re.findall(r"[a-z]{4,}", prompt_blob.lower())
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in stop or w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+        if len(out) >= max_keywords:
+            break
+    return out or ["acoustic", "travel", "uplifting", "warm"]
+
+
+def _offline_fallback_catalog() -> list[dict[str, Any]]:
+    """Flatten the curated offline catalog into a de-duplicated emergency pool when offline."""
+    seen: set[str] = set()
+    pool: list[dict[str, Any]] = []
+    for entries in CURATED_FREE_BGM_CATALOG.values():
+        for m in entries:
+            tid = str(m["track_id"])
+            if tid not in seen:
+                seen.add(tid)
+                pool.append(dict(m))
+    return pool
+
+
 @register_agent
 class MusicSupervisorAgent(BaseEditingAgent):
-    """Stage 05: Evaluates story mood, scouts/downloads suitable free BGM tracks, masters full-length audio, and writes bgm_selection.json."""
+    """Stage 05: Lets the AI supervise mood, catalog discovery, multi-chapter BGM curation, and mix styling."""
 
     role_id = "music_supervisor"
     display_name = "0b. Music Supervisor & BGM Scout"
     stage_order = 5
     description = (
-        "Analyzes destination, story tone, and creative brief to find, download, and EBU-R128 master mood-matched "
-        "royalty-free background music across the full video duration, producing bgm_selection.json."
+        "Analyzes destination, story tone, and creative brief with AI to discover diverse royalty-free music "
+        "tracks from live catalogs, curate a multi-track chapter suite, set mix levels, and master bgm_selection.json."
     )
     enabled_by_default = True
     requires_artifacts = ["creative_brief.json"]
@@ -701,34 +871,69 @@ class MusicSupervisorAgent(BaseEditingAgent):
         prompt_blob = (
             f"{brief.project_title if brief else ''} "
             f"{brief.raw_user_prompt if brief else blackboard.user_prompt} "
-            f"{blackboard.media_dir}"
-        ).lower()
-
-        is_cultural_or_documentary = any(
-            k in prompt_blob
-            for k in ("museum", "gallery", "sculpture", "architecture", "cathedral", "palace", "art", "history", "documentary", "classical")
-        )
-        is_whimsical_festival = any(
-            k in prompt_blob for k in ("festival", "theme park", "carnival", "whimsical", "amusement")
-        )
-
-        if is_cultural_or_documentary:
-            target_profile = "classical_chamber_documentary"
-        elif is_whimsical_festival:
-            target_profile = "playful_whimsical_adventure"
-        else:
-            target_profile = "warm_family_acoustic"
+            f"{blackboard.media_dir.name}"
+        ).strip()
 
         bgm_dir = blackboard.project_dir / "bgm_library"
         bgm_dir.mkdir(parents=True, exist_ok=True)
-        blackboard.emit_activity(
-            self.role_id,
-            f"Scouting & mastering royalty-free soundtrack for mood profile '{target_profile}'",
-            detail="Evaluating destination cultural tone, multi-chapter suite coverage, and EBU R128 loudness (-14 LUFS)",
-        )
-
         user_bgm: Optional[Path] = blackboard.extra_audio_paths[0] if blackboard.extra_audio_paths else None
         rejected_reason: Optional[str] = None
+
+        # Step 1: Let AI creatively determine mood profile, diverse chapter search queries, and mix styling
+        ai_direction = self.ask_ai_creative_json(
+            blackboard=blackboard,
+            prompt=(
+                "You are the Music Supervisor designing a unique soundtrack for this specific video (do NOT reuse generic classical defaults unless the footage truly calls for classical chamber).\n"
+                f"CreativeBrief: {brief.model_dump_json() if brief else prompt_blob}\n"
+                f"Existing User BGM (if any): {user_bgm.name if user_bgm and user_bgm.exists() else 'None'}\n"
+                "Return JSON:\n"
+                "{\n"
+                '  "mood_profile": "<bespoke short snake_case description of this film\'s musical identity>",\n'
+                '  "chapter_search_queries": [\n'
+                '    ["keyword1", "keyword2", "keyword3"],\n'
+                '    ["keyword4", "keyword5"],\n'
+                '    ["keyword6", "keyword7"]\n'
+                '  ],\n'
+                '  "recommended_bgm_volume": 0.62,\n'
+                '  "recommended_speech_duck_db": -9.5,\n'
+                '  "reject_user_bgm": false,\n'
+                '  "reject_reason": "",\n'
+                '  "direction_notes": "<1-2 sentences on emotional & musical arc across the film>"\n'
+                "}"
+            ),
+            decision_key="music_supervisor_direction",
+            timeout_sec=30.0,
+        )
+
+        target_profile = "ai_curated_soundtrack"
+        recommended_vol = 0.62
+        recommended_duck_db = -9.5
+        ai_queries: list[list[str]] = []
+        ai_direction_notes = ""
+
+        if isinstance(ai_direction, dict):
+            target_profile = str(ai_direction.get("mood_profile") or target_profile).strip() or target_profile
+            ai_direction_notes = str(ai_direction.get("direction_notes") or "").strip()
+            if ai_direction.get("recommended_bgm_volume") is not None:
+                recommended_vol = max(0.15, min(1.2, float(ai_direction["recommended_bgm_volume"])))
+            if ai_direction.get("recommended_speech_duck_db") is not None:
+                recommended_duck_db = max(-24.0, min(-3.0, float(ai_direction["recommended_speech_duck_db"])))
+            raw_qs = ai_direction.get("chapter_search_queries") or []
+            if isinstance(raw_qs, list):
+                for q in raw_qs[:5]:
+                    if isinstance(q, list) and any(str(x).strip() for x in q):
+                        ai_queries.append([str(x).strip() for x in q if str(x).strip()])
+                    elif isinstance(q, str) and q.strip():
+                        ai_queries.append([w.strip() for w in q.split(",") if w.strip()])
+            if ai_direction.get("reject_user_bgm") and user_bgm is not None:
+                rejected_reason = str(ai_direction.get("reject_reason") or f"AI Music Supervisor replaced '{user_bgm.name}' for better tonal fit.").strip()
+                user_bgm = None
+
+        blackboard.emit_activity(
+            self.role_id,
+            f"Scouting royalty-free BGM for AI mood direction '{target_profile}'",
+            detail="Discovering diverse chapter-matched candidates from live catalogs and setting dynamic mix styling",
+        )
 
         if blackboard.skip_auto_bgm and (user_bgm is None or not user_bgm.exists()):
             report = BGMSelectionReport(
@@ -739,7 +944,9 @@ class MusicSupervisorAgent(BaseEditingAgent):
                 composer_or_artist="Deferred",
                 license_info="Pending Selection",
                 mood_match_score=8.0,
-                selection_rationale="Auto-BGM scouting skipped (--skip-auto-bgm / --fast-prep); awaiting interactive BGM selection.",
+                recommended_bgm_volume=recommended_vol,
+                recommended_speech_duck_db=recommended_duck_db,
+                selection_rationale="Auto-BGM scouting skipped (--skip-auto-bgm / --fast-prep); awaiting interactive AI BGM curation.",
                 candidates=[],
             )
             out_path = blackboard.project_dir / "bgm_selection.json"
@@ -747,7 +954,7 @@ class MusicSupervisorAgent(BaseEditingAgent):
             blackboard.bgm_selection = report
             blackboard.emit_activity(
                 self.role_id,
-                f"Skipped auto-BGM scouting (--skip-auto-bgm) for profile '{target_profile}'",
+                f"Skipped auto-BGM scouting (--skip-auto-bgm) for '{target_profile}'",
                 detail="AudioVibeAgent will use deterministic beat grid until apply-bgm-plan runs.",
             )
             blackboard.send_message(
@@ -774,43 +981,60 @@ class MusicSupervisorAgent(BaseEditingAgent):
             m.message_type == "director_directive" and m.payload.get("swap_mismatched_bgm")
             for m in blackboard.get_messages_for(self.role_id)
         )
-
-        if user_bgm is not None and user_bgm.exists():
-            name_low = user_bgm.name.lower()
-            is_comical_or_spooky_bgm = any(
-                k in name_low for k in ("sneaky", "snitch", "spooky", "clown", "quirky")
-            )
-            if (is_cultural_or_documentary and is_comical_or_spooky_bgm) or force_swap:
-                rejected_reason = (
-                    f"Rejected '{user_bgm.name}' because a mischievous pizzicato track clashes with "
-                    f"the '{target_profile}' tone of the documentary."
-                )
-                user_bgm = None
+        if user_bgm is not None and user_bgm.exists() and force_swap:
+            rejected_reason = f"Replaced '{user_bgm.name}' per Director directive."
+            user_bgm = None
 
         target_dur = max(120.0, float(brief.target_duration_sec if brief else 180.0) + 20.0)
-        candidates_meta = list(
-            CURATED_FREE_BGM_CATALOG.get(
-                target_profile, CURATED_FREE_BGM_CATALOG["warm_family_acoustic"]
-            )
-        )
 
-        # Invoke AI Creative Intelligence to evaluate musical arc, search keywords, and candidate ranking
+        # Step 2: Live online discovery across AI-generated queries (or brief-derived fallback queries)
+        queries_to_run = ai_queries or [_extract_dynamic_brief_keywords(prompt_blob)]
+        discovered: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for q_terms in queries_to_run:
+            hits = search_online_royalty_free_catalog(q_terms, max_results=5, timeout_sec=6.0)
+            for h in hits:
+                tid = str(h.get("track_id") or "")
+                if tid and tid not in seen_ids:
+                    seen_ids.add(tid)
+                    discovered.append(h)
+
+        # Only supplement with local offline pool if live search produced too few tracks
+        if len(discovered) < 4:
+            for m in _offline_fallback_catalog():
+                tid = str(m["track_id"])
+                if tid not in seen_ids:
+                    seen_ids.add(tid)
+                    discovered.append(m)
+                if len(discovered) >= 12:
+                    break
+
+        candidates_meta = discovered[:18]
+
+        # Step 3: Let AI audition and sequence the actual discovered candidates into a diverse multi-track suite
         ai_bgm_resp = self.ask_ai_creative_json(
             blackboard=blackboard,
             prompt=(
-                f"CreativeBrief: {brief.model_dump_json() if brief else blackboard.user_prompt}\n"
-                f"Target Mood Profile: {target_profile}\n"
-                f"Candidate Tracks: {json.dumps(candidates_meta, ensure_ascii=False)}\n"
-                "Evaluate which track(s) best match the cultural setting, emotional arc, and spoken dialogue headroom. "
-                "Return JSON: {\"preferred_track_ids\": [\"...\"], \"search_keywords\": [\"...\"], \"ai_rationale\": \"...\"}"
+                f"CreativeBrief: {brief.model_dump_json() if brief else prompt_blob}\n"
+                f"Mood Direction: {target_profile} ({ai_direction_notes})\n"
+                f"Target Duration: {target_dur:.0f}s\n"
+                f"Discovered Royalty-Free Tracks: {json.dumps(candidates_meta, ensure_ascii=False)}\n"
+                "Choose 3 to 6 CONTRASTING tracks from Discovered Royalty-Free Tracks in the best playback order so chapters have distinct instrumentation & energy instead of sounding repetitive. "
+                'Return JSON: {"selected_track_ids": ["..."], "ai_rationale": "..."}'
             ),
             decision_key="music_supervisor",
             timeout_sec=30.0,
         )
-        ai_music_rationale = ""
+        ai_music_rationale = ai_direction_notes
         if isinstance(ai_bgm_resp, dict):
-            ai_music_rationale = str(ai_bgm_resp.get("ai_rationale") or "").strip()
-            pref_ids = [str(tid) for tid in (ai_bgm_resp.get("preferred_track_ids") or []) if tid]
+            rationale_part = str(ai_bgm_resp.get("ai_rationale") or "").strip()
+            if rationale_part:
+                ai_music_rationale = f"{ai_music_rationale} {rationale_part}".strip()
+            pref_ids = [
+                str(tid)
+                for tid in (ai_bgm_resp.get("selected_track_ids") or ai_bgm_resp.get("preferred_track_ids") or [])
+                if tid
+            ]
             if pref_ids:
                 by_tid = {str(m["track_id"]): m for m in candidates_meta}
                 reordered = [by_tid[tid] for tid in pref_ids if tid in by_tid] + [
@@ -866,7 +1090,7 @@ class MusicSupervisorAgent(BaseEditingAgent):
         # Master a continuous full-length soundtrack guaranteed to cover target_dur at -14 LUFS
         mastered_mp3 = bgm_dir / "mastered_soundtrack.mp3"
         selected_path = master_bgm_soundtrack(
-            track_paths=downloaded_paths[:3] if len(downloaded_paths) > 1 else downloaded_paths,
+            track_paths=downloaded_paths[:6] if len(downloaded_paths) > 1 else downloaded_paths,
             target_duration_sec=target_dur,
             output_mp3=mastered_mp3,
             target_lufs=-14.0,
@@ -909,6 +1133,8 @@ class MusicSupervisorAgent(BaseEditingAgent):
             license_info=selected_cand.license_info,
             source_url=selected_cand.source_url,
             mood_match_score=selected_cand.mood_match_score,
+            recommended_bgm_volume=recommended_vol,
+            recommended_speech_duck_db=recommended_duck_db,
             selection_rationale=rationale,
             rejected_user_bgm_reason=rejected_reason,
             candidates=candidates,

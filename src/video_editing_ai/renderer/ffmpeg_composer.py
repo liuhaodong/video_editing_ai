@@ -872,13 +872,13 @@ def _build_ducking_volume_expr(
 
     base_expr = f"{base_vol:.4f}"
     if merged_speech:
-        cond_speech = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_speech[:25])
+        cond_speech = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_speech[:80])
         base_expr = f"if(gt({cond_speech},0),{duck_vol:.4f},{base_expr})"
 
     if merged_diegetic:
         # -30 dB attenuation (~0.0316x of base_vol, exceeding -28 dB minimum diegetic ducking requirement)
         diegetic_vol = round(base_vol * (10.0 ** (-30.0 / 20.0)), 5)
-        cond_dieg = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_diegetic[:20])
+        cond_dieg = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_diegetic[:40])
         base_expr = f"if(gt({cond_dieg},0),{diegetic_vol:.5f},{base_expr})"
 
     return base_expr

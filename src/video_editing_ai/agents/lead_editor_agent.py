@@ -168,6 +168,9 @@ class LeadAssemblyEditorAgent(BaseEditingAgent):
             elif blackboard.bgm_selection and blackboard.bgm_selection.selected_track_path and Path(blackboard.bgm_selection.selected_track_path).exists():
                 bgm_src = blackboard.bgm_selection.selected_track_path
             if bgm_src:
+                bgm_vol = float(getattr(blackboard.bgm_selection, "recommended_bgm_volume", 0.62) or 0.62)
+                speech_duck_db = float(getattr(blackboard.bgm_selection, "recommended_speech_duck_db", -9.5) or -9.5)
+                duck_vol = round(bgm_vol * (10.0 ** (speech_duck_db / 20.0)), 4)
                 timeline.audio_tracks = [
                     AudioTrackItem(
                         id="bgm_main",
@@ -176,9 +179,9 @@ class LeadAssemblyEditorAgent(BaseEditingAgent):
                         timeline_start=0.0,
                         duration=round(timeline.total_duration, 2),
                         source_in=0.0,
-                        volume=0.28,
+                        volume=bgm_vol,
                         duck_under_dialogue=True,
-                        duck_volume=0.056,
+                        duck_volume=duck_vol,
                         duck_ramp_sec=0.8,
                         fade_in=1.0,
                         fade_out=2.5,
