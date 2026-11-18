@@ -71,11 +71,10 @@ def _build_color_grade_filter(fx: EffectTrackItem, hdr: Optional[bool] = None) -
 
     parts: list[str] = []
     if params.get("hlg_rolloff"):
-        # Smooth 10-bit limited-range YUV shoulder knee (compresses blown Pixel HLG highlights to ~203 nits)
+        # Smooth highlight-only 10-bit limited-range YUV knee: preserves 1.0x midtones/shadows/chroma, compresses >720 speculars
         parts.append(
             "format=p010le,"
-            "lutyuv=y='clip(64+(val-64)*0.78-if(gt(val,520),0.26*(val-520),0),64,760)':"
-            "u='512+(val-512)*0.94':v='512+(val-512)*0.94'"
+            "lutyuv=y='clip(if(gt(val,720),720+(val-720)*0.45,val),64,925)'"
         )
 
     lut_cube_raw = str(params.get("lut_cube_path") or "").strip()
