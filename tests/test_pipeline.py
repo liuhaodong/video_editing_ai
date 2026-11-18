@@ -736,8 +736,13 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
     ImageDraw.Draw(v_img).rectangle([55, 80, 245, 400], fill=(225, 185, 110), outline=(255, 255, 255), width=5)
     v_img.save(p_vert, quality=90)
 
-    # All 19 modes paired across all 10 finishers (+ 'none')
+    # All active + disabled-fallback modes paired across all 11 finishers (+ 'none')
     modes_and_finishers = [
+        ("passepartout_shadowbox", "architectural_window_dapple"),
+        ("kinfolk_linen_folio", "fine_art_rag_texture"),
+        ("panoramic_frieze_scroll", "none"),
+        ("atelier_layered_duo", "golden_light_leak"),
+        ("leica_frame_finder", "nostalgic_film_grain"),
         ("cinematic_depth_3d", "halation_bloom_35mm"),
         ("aperture_rack_focus", "museum_spotlight"),
         ("dolly_zoom_vertigo", "anamorphic_streak"),

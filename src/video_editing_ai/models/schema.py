@@ -29,6 +29,11 @@ PhotoModeType = Literal[
     "floating_tilt_plate",
     "criterion_atelier_split",
     "links_white_matte",
+    "passepartout_shadowbox",
+    "kinfolk_linen_folio",
+    "panoramic_frieze_scroll",
+    "atelier_layered_duo",
+    "leica_frame_finder",
 ]
 
 PhotoOverlayFxType = Literal[
@@ -43,7 +48,17 @@ PhotoOverlayFxType = Literal[
     "fine_art_rag_texture",
     "halation_bloom_35mm",
     "caustic_water_shimmer",
+    "architectural_window_dapple",
 ]
+
+PhotoSurfacePaletteType = Literal["auto", "warm_linen", "gallery_white", "obsidian_slate"]
+
+VALID_PHOTO_SURFACE_PALETTES: tuple[str, ...] = (
+    "auto",
+    "warm_linen",
+    "gallery_white",
+    "obsidian_slate",
+)
 
 VALID_PHOTO_MODES: tuple[str, ...] = (
     "gallery_frame",
@@ -66,6 +81,11 @@ VALID_PHOTO_MODES: tuple[str, ...] = (
     "floating_tilt_plate",
     "criterion_atelier_split",
     "links_white_matte",
+    "passepartout_shadowbox",
+    "kinfolk_linen_folio",
+    "panoramic_frieze_scroll",
+    "atelier_layered_duo",
+    "leica_frame_finder",
 )
 
 # Depth-warp photo modes disabled due to unnatural neural-depth cutout/bokeh artifacts
@@ -118,6 +138,7 @@ VALID_PHOTO_OVERLAY_FX: tuple[str, ...] = (
     "fine_art_rag_texture",
     "halation_bloom_35mm",
     "caustic_water_shimmer",
+    "architectural_window_dapple",
 )
 
 TitleThemeType = Literal[
@@ -467,6 +488,11 @@ class CreativeBrief(BaseModel):
     )
     enabled_photo_modes: list[PhotoModeType] = Field(
         default_factory=lambda: [
+            "passepartout_shadowbox",
+            "kinfolk_linen_folio",
+            "panoramic_frieze_scroll",
+            "atelier_layered_duo",
+            "leica_frame_finder",
             "archival_color_bloom",
             "triptych_cinematic",
             "polaroid_scrapbook",
@@ -485,6 +511,7 @@ class CreativeBrief(BaseModel):
     )
     enabled_overlay_fx: list[PhotoOverlayFxType] = Field(
         default_factory=lambda: [
+            "architectural_window_dapple",
             "golden_light_leak",
             "museum_spotlight",
             "champagne_bokeh",
@@ -629,11 +656,15 @@ class CulledSubClip(BaseModel):
     subject_category: Optional[str] = Field(default=None, description="Curatorial subject category")
     recommended_photo_mode: PhotoModeType = Field(
         default="parallax_gallery",
-        description="Curated photo presentation mode (parallax_gallery, cinematic_depth_3d, triptych_cinematic, polaroid_scrapbook, curator_loupe, editorial_magazine, cinema_anamorphic, diptych_frame, etc.)",
+        description="Curated photo presentation mode (passepartout_shadowbox, kinfolk_linen_folio, panoramic_frieze_scroll, atelier_layered_duo, leica_frame_finder, parallax_gallery, triptych_cinematic, polaroid_scrapbook, curator_loupe, editorial_magazine, cinema_anamorphic, diptych_frame, etc.)",
     )
     overlay_fx: PhotoOverlayFxType = Field(
         default="none",
-        description="Optional composable atmospheric finisher (golden_light_leak, champagne_bokeh, museum_spotlight, nostalgic_film_grain)",
+        description="Optional composable atmospheric finisher (architectural_window_dapple, golden_light_leak, champagne_bokeh, museum_spotlight, nostalgic_film_grain, etc.)",
+    )
+    surface_palette: PhotoSurfacePaletteType = Field(
+        default="auto",
+        description="Exhibition surface palette: auto, warm_linen, gallery_white, or obsidian_slate",
     )
     secondary_source_path: Optional[str] = Field(
         default=None, description="Optional paired second photo path for diptych_frame / polaroid_scrapbook / triptych_cinematic layout"
@@ -765,6 +796,7 @@ class CuratedPhotoItem(BaseModel):
     camera_badge: str = ""
     recommended_photo_mode: PhotoModeType = "parallax_gallery"
     overlay_fx: PhotoOverlayFxType = "none"
+    surface_palette: PhotoSurfacePaletteType = "auto"
     paired_with_subclip_id: Optional[str] = None
     tertiary_subclip_id: Optional[str] = None
     eye_open_score: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -1091,12 +1123,14 @@ class KenBurnsConfig(BaseModel):
     mode: PhotoModeType = Field(
         default="parallax_gallery",
         description=(
-            "One of 19 curated photo presentation modes: "
+            "Curated photo presentation mode: "
+            "'passepartout_shadowbox' (cotton-rag museum mat with 45-degree bevel & recessed inner window crop), "
+            "'kinfolk_linen_folio' (58/42 archival linen monograph spread with hairline rules & serif plate notes), "
+            "'panoramic_frieze_scroll' (horizontal gallery wall panning across paired exhibition prints), "
+            "'atelier_layered_duo' (two 0-degree orthogonal matted prints with differential 2D parallax), "
+            "'leica_frame_finder' (rangefinder brightline framelines locking onto the subject), "
             "'parallax_gallery' (2.5D multi-plane counter-panning matte), "
-            "'cinematic_depth_3d' (4-layer neural MPI depth parallax + disocclusion inpainting), "
-            "'aperture_rack_focus' (continuous depth-guided cinema focus pull), "
-            "'dolly_zoom_vertigo' (optical Hitchcock counter-dolly neural depth warp), "
-            "'archival_color_bloom' (selenium B&W -> depth-driven living color bloom), "
+            "'archival_color_bloom' (selenium B&W -> optical focal living color bloom), "
             "'triptych_cinematic' (3-panel staggered storyboard reveal), "
             "'polaroid_scrapbook' (tilted vintage instant-film print stack), "
             "'curator_loupe' (1.65x optical magnifying spotlight), "
@@ -1110,17 +1144,22 @@ class KenBurnsConfig(BaseModel):
             "'criterion_atelier_split' (3-viewport asymmetric architectural bento grid), "
             "'diptych_frame' (side-by-side paired portrait split), "
             "'gallery_frame' (classic floating gallery frame), "
-            "'full_bleed' (full-screen 16:9 Ken Burns)."
+            "'full_bleed' (full-screen 16:9 Ken Burns), or "
+            "'links_white_matte' (pure gallery-white exhibition matte)."
         ),
     )
     overlay_fx: PhotoOverlayFxType = Field(
         default="none",
         description=(
-            "Composable atmospheric finisher: 'none', 'golden_light_leak', 'champagne_bokeh', "
-            "'museum_spotlight', 'nostalgic_film_grain', 'anamorphic_streak', "
+            "Composable atmospheric finisher: 'none', 'architectural_window_dapple', 'golden_light_leak', "
+            "'champagne_bokeh', 'museum_spotlight', 'nostalgic_film_grain', 'anamorphic_streak', "
             "'prism_chromatic_edge', 'velvet_vignette_rembrandt', 'fine_art_rag_texture', "
             "'halation_bloom_35mm', or 'caustic_water_shimmer'"
         ),
+    )
+    surface_palette: PhotoSurfacePaletteType = Field(
+        default="auto",
+        description="Exhibition surface palette: auto, warm_linen, gallery_white, or obsidian_slate",
     )
     preset: Literal[
         "zoom_in",
@@ -1789,14 +1828,14 @@ class ClipColorTransform(BaseModel):
         "sdr_bt709_8bit",
         "srgb_still",
     ] = "sdr_bt709_8bit"
-    transform_mode: str = "zscale_sdr_to_hlg_203nits"
+    transform_mode: str = "zscale_sdr_to_hlg_380nits"
     color_primaries: str = "bt709"
     color_trc: str = "bt709"
     color_space: str = "bt709"
     pix_fmt: str = "yuv420p"
     target_trc: str = "arib-std-b67"
-    target_diffuse_white_nits: float = 203.0
-    hdr_diffuse_white_nits: float = 203.0
+    target_diffuse_white_nits: float = 380.0
+    hdr_diffuse_white_nits: float = 380.0
     hdr_signal_ceiling: float = 0.98
     chapter_look: str = "archival_kodak_2383"
     wb_red_shift: float = 0.0
@@ -1829,7 +1868,7 @@ class ColorTransformManifest(BaseModel):
     hdr_delivery: bool = True
     target_transfer: str = "arib-std-b67"
     target_primaries: str = "bt2020"
-    diffuse_white_nits: float = 203.0
+    diffuse_white_nits: float = 380.0
     primary_film_stock_look: str = "archival_kodak_2383"
     zscale_available: bool = True
     shots_classified_count: int = 0

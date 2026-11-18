@@ -35,10 +35,17 @@ class VFXAgent(BaseEditingAgent):
 
         for idx, item in enumerate(timeline.visual_track):
             note_low = (item.narrative_note or "").lower()
+            kb = item.ken_burns if item.type == "photo" else None
+            kb_mode = kb.mode if kb is not None else ""
+            kb_palette = getattr(kb, "surface_palette", "auto") if kb is not None else "auto"
+            preserve_light_surface = kb_mode == "links_white_matte" or (
+                kb_mode in ("passepartout_shadowbox", "kinfolk_linen_folio", "panoramic_frieze_scroll", "atelier_layered_duo")
+                and kb_palette != "obsidian_slate"
+            )
             if item.roll_type == "a_roll" or (
                 item.type == "photo"
-                and item.ken_burns
-                and item.ken_burns.mode
+                and kb is not None
+                and kb_mode
                 in (
                     "curator_loupe",
                     "split_diopter_focus",
@@ -61,8 +68,11 @@ class VFXAgent(BaseEditingAgent):
                     )
                 )
                 fx_counter += 1
-            elif item.type == "photo" and (
-                idx % 2 == 0 or any(k in note_low for k in ("portrait", "warm", "culinary", "dining", "family"))
+            elif (
+                item.type == "photo"
+                and not preserve_light_surface
+                and kb_mode != "leica_frame_finder"
+                and (idx % 2 == 0 or any(k in note_low for k in ("portrait", "warm", "culinary", "dining", "family")))
             ):
                 # Warm golden glow on keepsake photos (calibrated <=0.45 for 10-bit HLG HDR)
                 effects.append(

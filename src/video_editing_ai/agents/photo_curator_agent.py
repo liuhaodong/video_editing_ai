@@ -21,6 +21,7 @@ from ..analyzer.semantic_intelligence import (
 from ..models.schema import (
     VALID_PHOTO_MODES,
     VALID_PHOTO_OVERLAY_FX,
+    VALID_PHOTO_SURFACE_PALETTES,
     CulledSubClip,
     CuratedPhotoItem,
     EditTimeline,
@@ -541,11 +542,15 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     p1.annotation_subtitle = f"{s1_short} · {s2_short}"
                 absorbed_partner_ids.add(p2.subclip_id)
 
-        # Assign semantic AI-paired photo modes & atmospheric finishers to remaining primary selects,
-        # honoring both the photo's visual content (portrait vs. fine art vs. culinary vs. skyline)
-        # and the client's multi-select photo_effects_suite & photo_overlay_finishers from CreativeBrief
+        # Assign objective perceptual & geometric photo modes, palettes, and atmospheric finishers
+        # before passing all plates to the multimodal AI curator for full artistic overrides.
         active_selects = [it for it in selected_items if it.subclip_id not in absorbed_partner_ids]
         default_fx_map: dict[str, str] = {
+            "passepartout_shadowbox": "architectural_window_dapple",
+            "kinfolk_linen_folio": "fine_art_rag_texture",
+            "panoramic_frieze_scroll": "none",
+            "atelier_layered_duo": "golden_light_leak",
+            "leica_frame_finder": "nostalgic_film_grain",
             "archival_color_bloom": "nostalgic_film_grain",
             "parallax_gallery": "museum_spotlight",
             "editorial_magazine": "fine_art_rag_texture",
@@ -574,6 +579,11 @@ class PhotoCuratorAgent(BaseEditingAgent):
         client_modes = list(dict.fromkeys(m for m in client_modes if m not in disabled_set))
         if not client_modes:
             client_modes = [
+                "passepartout_shadowbox",
+                "kinfolk_linen_folio",
+                "panoramic_frieze_scroll",
+                "atelier_layered_duo",
+                "leica_frame_finder",
                 "parallax_gallery",
                 "floating_tilt_plate",
                 "glassmorphic_pedestal",
@@ -592,22 +602,30 @@ class PhotoCuratorAgent(BaseEditingAgent):
         allow_overlays = not ("none" in client_overlays and len(client_overlays) == 1)
         non_none_overlays = [fx for fx in client_overlays if fx != "none"]
 
-        def _pick_overlay_for_mode(m_code: str, idx_hint: int, semantic_blob: str = "") -> str:
+        def _pick_surface_palette_perceptual(sel_it: CuratedPhotoItem) -> str:
+            if brief and getattr(brief, "title_theme", None) == "links_minimal":
+                return "gallery_white"
+            perc = perception_by_id.get(sel_it.subclip_id) or {}
+            lab_mean = perc.get("lab_mean") or (128.0, 128.0, 128.0)
+            l_val = float(lab_mean[0])
+            b_val = float(lab_mean[2])
+            if l_val < 95.0:
+                return "obsidian_slate"
+            if b_val >= 134.0 or sel_it.portrait_warmth_score >= 8.5:
+                return "warm_linen"
+            return "gallery_white"
+
+        def _pick_overlay_for_mode(m_code: str, idx_hint: int, l_val: float, b_val: float) -> str:
             if not allow_overlays:
                 return "none"
-            if (
-                "caustic_water_shimmer" in client_overlays
-                and any(w in semantic_blob for w in ("beach", "ocean", "sea", "lagoon", "pool", "coast", "caribbean", "surf", "water"))
-                and m_code not in ("editorial_magazine", "curator_loupe")
-            ):
-                return "caustic_water_shimmer"
-            if (
-                "halation_bloom_35mm" in client_overlays
-                and any(w in semantic_blob for w in ("sunset", "golden", "sunrise", "sunlight", "lamp", "twilight", "candle", "lantern"))
-                and m_code not in ("archival_color_bloom",)
-            ):
-                return "halation_bloom_35mm"
             pref_fx = default_fx_map.get(m_code, "none")
+            # Respect tonal contrast: avoid warm highlight halation on high-key bright scenes or extra vignettes on dark glass
+            if l_val >= 145.0 and b_val >= 135.0 and "architectural_window_dapple" in client_overlays and m_code in (
+                "passepartout_shadowbox",
+                "kinfolk_linen_folio",
+                "parallax_gallery",
+            ):
+                return "architectural_window_dapple"
             if pref_fx in client_overlays or pref_fx == "none":
                 return pref_fx
             if non_none_overlays:
@@ -617,6 +635,13 @@ class PhotoCuratorAgent(BaseEditingAgent):
         prev_assigned_mode = ""
         mode_usage: dict[str, int] = {}
         for idx_sel, sel_it in enumerate(active_selects):
+            sel_sc = subclip_by_id[sel_it.subclip_id]
+            sel_perc = perception_by_id.get(sel_it.subclip_id) or {}
+            lab_mean = sel_perc.get("lab_mean") or (128.0, 128.0, 128.0)
+            l_val = float(lab_mean[0])
+            b_val = float(lab_mean[2])
+            sel_it.surface_palette = _pick_surface_palette_perceptual(sel_it)  # type: ignore[assignment]
+
             if sel_it.recommended_photo_mode == "diptych_frame":
                 if not allow_overlays:
                     sel_it.overlay_fx = "none"
@@ -624,63 +649,46 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 mode_usage["diptych_frame"] = mode_usage.get("diptych_frame", 0) + 1
                 continue
 
-            blob_low = f"{sel_it.annotation_title} {sel_it.annotation_subtitle} {sel_it.subject_category}".lower()
-            if any(k in blob_low for k in ("mosaic", "sculpture", "relief", "painting", "stained glass", "dome", "carving", "fresco", "detail", "masterpiece")):
-                semantic_prefs = [
-                    "split_diopter_focus",
-                    "curator_loupe",
-                    "glassmorphic_pedestal",
+            # Objective structural/geometric affinity only (zero hardcoded subject keyword traps)
+            if sel_sc.orientation == "portrait":
+                structural_prefs = [
+                    "kinfolk_linen_folio",
+                    "passepartout_shadowbox",
+                    "atelier_layered_duo",
                     "floating_tilt_plate",
-                    "parallax_gallery",
-                ]
-            elif any(k in blob_low for k in ("culinary", "bakery", "cheese", "café", "cafe", "menu", "dining", "food", "pastry", "candid", "smile", "selfie")):
-                semantic_prefs = [
-                    "polaroid_scrapbook",
                     "medium_format_slide",
-                    "contact_sheet_zoom",
-                    "criterion_atelier_split",
-                    "parallax_gallery",
-                    "floating_tilt_plate",
-                ]
-            elif any(k in blob_low for k in ("ruin", "temple", "heritage", "historic", "museum", "ancient", "cathedral", "palace", "arch", "monument")):
-                semantic_prefs = [
-                    "archival_color_bloom",
-                    "editorial_magazine",
-                    "floating_tilt_plate",
-                    "split_diopter_focus",
-                    "parallax_gallery",
-                ]
-            elif sel_it.subject_category == "family_portrait" or sel_it.portrait_warmth_score >= 8.9:
-                semantic_prefs = [
-                    "medium_format_slide",
-                    "floating_tilt_plate",
                     "polaroid_scrapbook",
-                    "glassmorphic_pedestal",
-                    "parallax_gallery",
-                ]
-            elif any(k in blob_low for k in ("panorama", "skyline", "river", "waterfront", "twilight", "horizon", "illuminated", "night", "ocean", "beach", "coast")):
-                semantic_prefs = [
-                    "cinema_anamorphic",
-                    "archival_color_bloom",
-                    "split_diopter_focus",
-                    "floating_tilt_plate",
-                    "editorial_magazine",
-                    "parallax_gallery",
-                ]
-            else:
-                semantic_prefs = [
-                    "criterion_atelier_split",
-                    "contact_sheet_zoom",
-                    "editorial_magazine",
-                    "glassmorphic_pedestal",
-                    "floating_tilt_plate",
                     "triptych_cinematic",
                     "parallax_gallery",
+                ]
+            elif len(active_selects) >= 3 and idx_sel % 3 == 0:
+                structural_prefs = [
+                    "panoramic_frieze_scroll",
+                    "atelier_layered_duo",
+                    "criterion_atelier_split",
+                    "contact_sheet_zoom",
+                    "triptych_cinematic",
+                    "passepartout_shadowbox",
+                    "kinfolk_linen_folio",
+                ]
+            else:
+                structural_prefs = [
+                    "passepartout_shadowbox",
+                    "leica_frame_finder",
+                    "kinfolk_linen_folio",
+                    "atelier_layered_duo",
+                    "panoramic_frieze_scroll",
+                    "split_diopter_focus",
+                    "glassmorphic_pedestal",
+                    "archival_color_bloom",
+                    "editorial_magazine",
                     "curator_loupe",
+                    "cinema_anamorphic",
+                    "parallax_gallery",
                 ]
 
             # Filter by client-enabled modes and balance choreographic variety across chapters
-            valid_prefs = [m for m in semantic_prefs if m in client_modes]
+            valid_prefs = [m for m in structural_prefs if m in client_modes]
             if not valid_prefs:
                 valid_prefs = list(client_modes)
 
@@ -693,12 +701,19 @@ class PhotoCuratorAgent(BaseEditingAgent):
             chosen_mode = min(candidates, key=lambda m: (mode_usage.get(m, 0), rank_map.get(m, 999)))
             mode_usage[chosen_mode] = mode_usage.get(chosen_mode, 0) + 1
 
-            chosen_fx = _pick_overlay_for_mode(chosen_mode, idx_sel, blob_low)
+            chosen_fx = _pick_overlay_for_mode(chosen_mode, idx_sel, l_val, b_val)
             sel_it.recommended_photo_mode = chosen_mode  # type: ignore[assignment]
             sel_it.overlay_fx = chosen_fx  # type: ignore[assignment]
             prev_assigned_mode = chosen_mode
 
-        multi_panel_modes = {"triptych_cinematic", "contact_sheet_zoom", "criterion_atelier_split", "polaroid_scrapbook"}
+        multi_panel_modes = {
+            "triptych_cinematic",
+            "contact_sheet_zoom",
+            "criterion_atelier_split",
+            "polaroid_scrapbook",
+            "panoramic_frieze_scroll",
+            "atelier_layered_duo",
+        }
 
         def _find_companion_sources(anchor_item: Any, primary_src: str) -> list[str]:
             """Pick chromatically & thematically harmonious companion photo paths without cloning identical burst frames."""
@@ -745,6 +760,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
             sc.subject_category = item.subject_category
             sc.recommended_photo_mode = item.recommended_photo_mode
             sc.overlay_fx = item.overlay_fx
+            sc.surface_palette = item.surface_palette
             sc.recommended_transition = (
                 "dissolve"
                 if item.recommended_photo_mode
@@ -757,11 +773,16 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     "split_diopter_focus",
                     "criterion_atelier_split",
                     "floating_tilt_plate",
+                    "passepartout_shadowbox",
+                    "kinfolk_linen_folio",
+                    "panoramic_frieze_scroll",
+                    "atelier_layered_duo",
+                    "leica_frame_finder",
                 )
                 else "crossfade"
             )
             sc.ai_rationale = (
-                f"Semantic Mode='{item.recommended_photo_mode}' + Finisher='{item.overlay_fx}' — {item.curation_rationale}"
+                f"Semantic Mode='{item.recommended_photo_mode}' + Surface='{item.surface_palette}' + Finisher='{item.overlay_fx}' — {item.curation_rationale}"
             )
             sc.summary = f"{item.annotation_title} ({item.annotation_subtitle}) — {item.curation_rationale}"
 
@@ -834,10 +855,13 @@ class PhotoCuratorAgent(BaseEditingAgent):
             prompt=(
                 f"CreativeBrief: {brief.model_dump_json() if brief else blackboard.user_prompt}\n"
                 f"Enabled Photo Modes: {client_modes}\n"
+                f"Enabled Finishers: {sorted(client_overlays)}\n"
+                f"Surface Palettes: {list(VALID_PHOTO_SURFACE_PALETTES)}\n"
                 f"Curated Photo Selects ({len(selected_items)}): "
-                f"{json.dumps([{'subclip_id': it.subclip_id, 'filename': it.filename, 'title': it.annotation_title, 'subtitle': it.annotation_subtitle, 'mode': it.recommended_photo_mode, 'fx': it.overlay_fx} for it in selected_items], ensure_ascii=False)}\n"
-                "Inspect the numbered photo contact sheets. Refine any photo titles/subtitles, recommended_photo_mode, "
-                "overlay_fx, or diptych pairings if helpful. Return JSON compatible with apply_vision_curation_overrides."
+                f"{json.dumps([{'subclip_id': it.subclip_id, 'filename': it.filename, 'title': it.annotation_title, 'subtitle': it.annotation_subtitle, 'mode': it.recommended_photo_mode, 'surface_palette': it.surface_palette, 'fx': it.overlay_fx} for it in selected_items], ensure_ascii=False)}\n"
+                "Inspect the numbered photo contact sheets. Choose the best recommended_photo_mode, surface_palette "
+                "(warm_linen, gallery_white, obsidian_slate, or auto), overlay_fx, titles/subtitles, and diptych/duo/frieze pairings "
+                "based on each scene's composition and chapter mood. Return JSON compatible with apply_vision_curation_overrides."
             ),
             image_paths=cs_info.get("photo_sheets", []),
             decision_key="photo_curator",
@@ -1209,6 +1233,9 @@ def apply_vision_curation_overrides(
         new_fx = ov.get("overlay_fx")
         if new_fx in VALID_PHOTO_OVERLAY_FX:
             target_item.overlay_fx = new_fx
+        new_palette = ov.get("surface_palette")
+        if new_palette in VALID_PHOTO_SURFACE_PALETTES:
+            target_item.surface_palette = new_palette  # type: ignore[assignment]
         if "paired_with_subclip_id" in ov:
             target_item.paired_with_subclip_id = ov["paired_with_subclip_id"]
         if "tertiary_subclip_id" in ov:
@@ -1237,9 +1264,15 @@ def apply_vision_curation_overrides(
         sc_by_id = {s.subclip_id: s for s in mi.subclips}
         absorbed_partners: set[str] = set()
         for it in selected_items:
-            if it.paired_with_subclip_id and it.recommended_photo_mode in ("diptych_frame", "polaroid_scrapbook", "triptych_cinematic"):
+            if it.paired_with_subclip_id and it.recommended_photo_mode in (
+                "diptych_frame",
+                "polaroid_scrapbook",
+                "triptych_cinematic",
+                "panoramic_frieze_scroll",
+                "atelier_layered_duo",
+            ):
                 absorbed_partners.add(it.paired_with_subclip_id)
-            if it.tertiary_subclip_id and it.recommended_photo_mode == "triptych_cinematic":
+            if it.tertiary_subclip_id and it.recommended_photo_mode in ("triptych_cinematic", "panoramic_frieze_scroll"):
                 absorbed_partners.add(it.tertiary_subclip_id)
         for it in report.items:
             sc = sc_by_id.get(it.subclip_id)
@@ -1251,6 +1284,7 @@ def apply_vision_curation_overrides(
             sc.subject_category = it.subject_category
             sc.recommended_photo_mode = it.recommended_photo_mode
             sc.overlay_fx = it.overlay_fx
+            sc.surface_palette = it.surface_palette
             sc.aesthetic_score = it.overall_taste_score
             sc.summary = f"{it.annotation_title} ({it.annotation_subtitle}) — {it.curation_rationale}"
             if it.is_selected and it.subclip_id not in absorbed_partners:
@@ -1288,6 +1322,7 @@ def apply_vision_curation_overrides(
                         clip.ken_burns.camera_badge = matched.camera_badge
                         clip.ken_burns.mode = matched.recommended_photo_mode
                         clip.ken_burns.overlay_fx = matched.overlay_fx
+                        clip.ken_burns.surface_palette = matched.surface_palette
                         clip.narrative_note = f"[STILL · {matched.annotation_title}] {matched.annotation_subtitle}"
                         updated_timeline_cuts += 1
         tl.to_yaml(tl_path)

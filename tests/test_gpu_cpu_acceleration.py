@@ -533,3 +533,57 @@ def test_cuda_photo_compositor_new_depth_and_vfx_modes_parity(tmp_path: Path, mo
                 assert mae < 6.0, f"High CPU/GPU MAE ({mae:.2f}) for mode={mode_name}, fx={fx_name}, t={tn}"
         finally:
             comp.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU not available")
+def test_new_premium_photo_modes_cuda_fp16_parity(tmp_path: Path) -> None:
+    """Verify new exhibition/optical photo modes + palettes + window dapple match CPU within <6.0 MAE on CUDA FP16."""
+    from video_editing_ai.models.schema import KenBurnsConfig
+    from video_editing_ai.renderer import ken_burns
+    from video_editing_ai.renderer.mps_photo_compositor import MPSPhotoCompositor
+
+    p_main = _make_sample_photo(tmp_path / "hero_suite.jpg", width=800, height=533)
+    p_sec = _make_sample_photo(tmp_path / "sec_suite.jpg", width=640, height=480)
+    p_tert = _make_sample_photo(tmp_path / "tert_suite.jpg", width=600, height=750)
+
+    cases: list[tuple[str, str, str]] = [
+        ("passepartout_shadowbox", "architectural_window_dapple", "warm_linen"),
+        ("passepartout_shadowbox", "none", "gallery_white"),
+        ("passepartout_shadowbox", "fine_art_rag_texture", "obsidian_slate"),
+        ("kinfolk_linen_folio", "fine_art_rag_texture", "warm_linen"),
+        ("kinfolk_linen_folio", "none", "obsidian_slate"),
+        ("panoramic_frieze_scroll", "architectural_window_dapple", "gallery_white"),
+        ("atelier_layered_duo", "golden_light_leak", "obsidian_slate"),
+        ("leica_frame_finder", "nostalgic_film_grain", "auto"),
+        ("archival_color_bloom", "architectural_window_dapple", "auto"),
+    ]
+    for mode_name, fx_name, palette_name in cases:
+        kb = KenBurnsConfig(
+            mode=mode_name,  # type: ignore[arg-type]
+            overlay_fx=fx_name,  # type: ignore[arg-type]
+            surface_palette=palette_name,  # type: ignore[arg-type]
+            secondary_source=str(p_sec),
+            tertiary_source=str(p_tert),
+            start_center=(0.48, 0.50),
+            end_center=(0.54, 0.45),
+            caption_title="Coastal Archival Study",
+            caption_subtitle="Museum Cotton-Rag Exhibition Monograph",
+            camera_badge="GALLERY EDITION",
+        )
+        ctx = ken_burns._prepare_photo_scene_context(p_main, width=640, height=360, kb=kb)
+        comp = MPSPhotoCompositor(ctx=ctx, device_override="cuda")
+        try:
+            f_idxs = [0, 15, 30]
+            total_f = 31
+            gpu_batch = comp.render_batch_rgb(frame_indices=f_idxs, total_frames=total_f, duration=2.0, fps=15)
+            assert gpu_batch.shape == (3, 360, 640, 3)
+
+            for i, fi in enumerate(f_idxs):
+                tn = fi / float(total_f - 1)
+                cpu_img = ken_burns._render_photo_frame_from_context(ctx=ctx, t_norm=tn, f_idx=fi, duration=2.0, fps=15)
+                mae = float(np.abs(np.asarray(cpu_img, dtype=np.float32) - gpu_batch[i].numpy().astype(np.float32)).mean())
+                assert mae < 6.0, (
+                    f"High CPU/GPU MAE ({mae:.2f}) for mode={mode_name}, fx={fx_name}, palette={palette_name}, t={tn}"
+                )
+        finally:
+            comp.close()

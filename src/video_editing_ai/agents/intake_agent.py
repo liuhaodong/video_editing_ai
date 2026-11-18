@@ -282,10 +282,15 @@ def generate_intake_questions(
             id="photo_effects_suite",
             question="3. Premium Photo Presentation Effects Suite (Multi-Select — Pick all styles to choreograph across chapters)",
             options=[
+                "passepartout_shadowbox (Recommended) — Museum Cotton-Rag Shadow-Box with 45-Degree Mat Bevel & Recessed Inner Motion",
+                "kinfolk_linen_folio (Recommended) — Kinfolk / Mack Books Asymmetric 58/42 Linen Monograph Spread & Serif Folio",
+                "panoramic_frieze_scroll (Recommended) — Continuous Horizontal Gallery Frieze Glide Across Matted Exhibition Prints",
+                "atelier_layered_duo (Recommended) — Asymmetric Orthogonal Layered Prints with Soft Ambient-Occlusion Parallax",
+                "leica_frame_finder (Recommended) — Rangefinder Brightline Corner Framelines Gently Locking onto the Subject",
                 "parallax_gallery (Recommended) — Calmed 2.5D Museum Float Double Archival Matte Frame",
                 "floating_tilt_plate (Recommended) — True 3D Perspective Homography Orbit Plate with Detached Floor Shadow",
                 "glassmorphic_pedestal (Recommended) — Apple VisionOS / Museum Frosted Acrylic Vitrine Card with Live Backdrop Blur",
-                "archival_color_bloom (Recommended) — Silver-Gelatin Selenium B&W -> Living Color Bloom",
+                "archival_color_bloom (Recommended) — Silver-Gelatin Selenium B&W -> Optical Focal Color Bloom",
                 "split_diopter_focus (Recommended) — A24 Split-Diopter 54/46 Wide Context + 2.2x Optical Macro Detail",
                 "contact_sheet_zoom (Recommended) — Magnum 3x2 Darkroom Contact Sheet Proof -> Eased Push-In onto Hero Frame",
                 "medium_format_slide (Recommended) — Hasselblad 120 Transparency Slide Mount with V-Notches & Archival Rebate Stamp",
@@ -300,12 +305,19 @@ def generate_intake_questions(
                 "full_bleed — Full-Screen 16:9 Crop with Classic Ken Burns Pan/Zoom",
             ],
             default_answer=(
-                "parallax_gallery,floating_tilt_plate,glassmorphic_pedestal,archival_color_bloom,"
-                "split_diopter_focus,contact_sheet_zoom,medium_format_slide,criterion_atelier_split,"
-                "triptych_cinematic,polaroid_scrapbook,curator_loupe,editorial_magazine,cinema_anamorphic,diptych_frame"
+                "passepartout_shadowbox,kinfolk_linen_folio,panoramic_frieze_scroll,"
+                "atelier_layered_duo,leica_frame_finder,parallax_gallery,floating_tilt_plate,"
+                "glassmorphic_pedestal,archival_color_bloom,split_diopter_focus,contact_sheet_zoom,"
+                "medium_format_slide,criterion_atelier_split,triptych_cinematic,polaroid_scrapbook,"
+                "curator_loupe,editorial_magazine,cinema_anamorphic,diptych_frame"
             ),
             is_multi_select=True,
             recommended_options=[
+                "passepartout_shadowbox",
+                "kinfolk_linen_folio",
+                "panoramic_frieze_scroll",
+                "atelier_layered_duo",
+                "leica_frame_finder",
                 "parallax_gallery",
                 "floating_tilt_plate",
                 "glassmorphic_pedestal",
@@ -322,15 +334,16 @@ def generate_intake_questions(
                 "diptych_frame",
             ],
             recommendation_rationale=(
-                "Combining these 14 curated cinema-grade modes lets the Photo Curator & VFX Designer match every photo's geometry "
-                "(2.5D Museum Float, 3D Floating Tilt Plate, Glassmorphic Vitrine, Archival Color Bloom, Split-Diopter macro, "
-                "Contact-Sheet proofs, Medium-Format 120 Slides & Criterion Bento Grids) cleanly without depth-cutout artifacts."
+                "Combining these exhibition and optical craft modes lets the Photo Curator & VFX Designer match every photograph's geometry "
+                "(45-degree beveled museum shadow-boxes, Kinfolk linen monographs, continuous gallery friezes, layered orthogonal duos, "
+                "rangefinder brightlines, and clean optical plates) with zero synthetic neural-depth cutout artifacts."
             ),
         ),
         InterviewQuestion(
             id="photo_overlay_finishers",
             question="4. Composable Atmospheric Light & Film Finishers (Multi-Select — Subtle optical polish over photo plates)",
             options=[
+                "architectural_window_dapple (Recommended) — Soft Architectural Window-Light & Foliage Gobo Drift Across the Print",
                 "golden_light_leak (Recommended) — Warm Amber Optical Sun-Ray Corner Wash (Morning & Golden Hour Shots)",
                 "museum_spotlight (Recommended) — Radial Gallery Track-Light Spotlight on Subject Focal Point (Interiors & Artworks)",
                 "champagne_bokeh (Recommended) — Softly Drifting Golden Bokeh Orbs (River Cruises, Evening & Bistro Finale)",
@@ -344,12 +357,13 @@ def generate_intake_questions(
                 "none — Clean Unfiltered Digital Master Only",
             ],
             default_answer=(
-                "golden_light_leak,museum_spotlight,champagne_bokeh,nostalgic_film_grain,"
-                "anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,fine_art_rag_texture,"
-                "halation_bloom_35mm,caustic_water_shimmer"
+                "architectural_window_dapple,golden_light_leak,museum_spotlight,champagne_bokeh,"
+                "nostalgic_film_grain,anamorphic_streak,prism_chromatic_edge,velvet_vignette_rembrandt,"
+                "fine_art_rag_texture,halation_bloom_35mm,caustic_water_shimmer"
             ),
             is_multi_select=True,
             recommended_options=[
+                "architectural_window_dapple",
                 "golden_light_leak",
                 "museum_spotlight",
                 "champagne_bokeh",
@@ -362,15 +376,21 @@ def generate_intake_questions(
                 "caustic_water_shimmer",
             ],
             recommendation_rationale=(
-                "Blending subtle optical finishers (35mm Vision3 highlight halation, caustic water sun-ripples, Panavision sapphire streaks, "
-                "chiaroscuro Rembrandt key lighting, cotton-rag museum paper relief, warm sun leaks, and champagne bokeh) gives every still frame authentic theatrical depth."
+                "Blending subtle optical finishers (architectural window dapple, 35mm Vision3 highlight halation, caustic water sun-ripples, "
+                "Panavision sapphire streaks, chiaroscuro Rembrandt key lighting, cotton-rag museum paper relief, warm sun leaks, and champagne bokeh) "
+                "gives every still frame authentic physical and theatrical depth."
             ),
         ),
         InterviewQuestion(
             id="photo_mode",
             question="5. Primary Anchor Photo Mode (Default fallback when a single mode is used)",
             options=[
-                "parallax_gallery (Recommended) — Calmed 2.5D Museum Float Matte Frame + Frosted Documentary Card",
+                "passepartout_shadowbox (Recommended) — Museum Cotton-Rag Shadow-Box with 45-Degree Mat Bevel & Recessed Inner Motion",
+                "kinfolk_linen_folio — Kinfolk / Mack Books Asymmetric 58/42 Linen Monograph Spread",
+                "panoramic_frieze_scroll — Continuous Horizontal Gallery Frieze Scroll",
+                "atelier_layered_duo — Asymmetric Orthogonal Layered Prints with 2D Parallax",
+                "leica_frame_finder — Rangefinder Brightline Corner Framelines",
+                "parallax_gallery — Calmed 2.5D Museum Float Matte Frame + Frosted Documentary Card",
                 "floating_tilt_plate — True 3D Perspective Homography Orbit Plate",
                 "glassmorphic_pedestal — VisionOS Frosted Acrylic Vitrine Card",
                 "archival_color_bloom — Silver-Gelatin B&W -> Living Color Bloom",
@@ -486,6 +506,11 @@ def _resolve_photo_suite_answers(
         q_by_id["photo_effects_suite"].recommended_options
         if "photo_effects_suite" in q_by_id
         else [
+            "passepartout_shadowbox",
+            "kinfolk_linen_folio",
+            "panoramic_frieze_scroll",
+            "atelier_layered_duo",
+            "leica_frame_finder",
             "parallax_gallery",
             "floating_tilt_plate",
             "glassmorphic_pedestal",
@@ -518,6 +543,7 @@ def _resolve_photo_suite_answers(
         q_by_id["photo_overlay_finishers"].recommended_options
         if "photo_overlay_finishers" in q_by_id
         else [
+            "architectural_window_dapple",
             "golden_light_leak",
             "champagne_bokeh",
             "museum_spotlight",
@@ -877,7 +903,22 @@ def refine_intake_interactively(
         )
 
     # 3. Primary Photo mode & Multi-Select Photo Effects Suite refinement
-    if "full_bleed" in msg_low or "full screen" in msg_low or "full-bleed" in msg_low:
+    if "passepartout" in msg_low or "shadowbox" in msg_low or "shadow box" in msg_low:
+        answers["photo_mode"] = "passepartout_shadowbox"
+        refinements_applied.append("Primary Photo Mode -> Museum Cotton-Rag Shadow-Box")
+    elif "kinfolk" in msg_low or "linen folio" in msg_low or "monograph" in msg_low:
+        answers["photo_mode"] = "kinfolk_linen_folio"
+        refinements_applied.append("Primary Photo Mode -> Kinfolk / Mack Books Linen Folio Spread")
+    elif "frieze" in msg_low or "panoramic_frieze" in msg_low:
+        answers["photo_mode"] = "panoramic_frieze_scroll"
+        refinements_applied.append("Primary Photo Mode -> Continuous Gallery Frieze Scroll")
+    elif "layered_duo" in msg_low or "atelier_layered" in msg_low or "layered duo" in msg_low:
+        answers["photo_mode"] = "atelier_layered_duo"
+        refinements_applied.append("Primary Photo Mode -> Asymmetric Orthogonal Layered Prints")
+    elif "leica" in msg_low or "frame_finder" in msg_low or "rangefinder" in msg_low:
+        answers["photo_mode"] = "leica_frame_finder"
+        refinements_applied.append("Primary Photo Mode -> Leica Brightline Frame-Finder")
+    elif "full_bleed" in msg_low or "full screen" in msg_low or "full-bleed" in msg_low:
         answers["photo_mode"] = "full_bleed"
         refinements_applied.append("Primary Photo Mode -> Full-Bleed 16:9 Ken Burns")
     elif "split_diopter" in msg_low or "split diopter" in msg_low or "diopter" in msg_low:

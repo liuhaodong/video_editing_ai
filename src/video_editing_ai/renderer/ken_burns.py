@@ -1,4 +1,4 @@
-"""Sub-pixel 19-Mode Cinema & Exhibition Photo Animator + 10-Finisher Optical Pipeline."""
+"""Sub-pixel Cinema & Exhibition Photo Animator + Composable Optical Finisher Pipeline."""
 
 from __future__ import annotations
 
@@ -33,7 +33,12 @@ from ..hardware import (
     probe_hw_encoder as _hw_probe_hw_encoder,
     supports_videotoolbox_qscale as _hw_supports_videotoolbox_qscale,
 )
-from ..models.schema import DISABLED_PHOTO_MODE_FALLBACKS, EffectTrackItem, KenBurnsConfig, TransitionConfig
+from ..models.schema import (
+    DISABLED_PHOTO_MODE_FALLBACKS,
+    EffectTrackItem,
+    KenBurnsConfig,
+    TransitionConfig,
+)
 from .color_grading import apply_color_grade_to_pil_image
 from .depth_parallax import (
     build_mpi_depth_layers,
@@ -591,13 +596,13 @@ def build_hdr_color_filters(
     src_primaries: str = "bt709",
     src_space: str = "bt709",
     is_log: bool = False,
-    diffuse_white_nits: float = 880.0,
+    diffuse_white_nits: float = 380.0,
     use_zscale: Optional[bool] = None,
 ) -> list[str]:
     """
     Build 10-bit BT.2020 HLG HDR color-space filters:
     - Native HLG (arib-std-b67): passthrough to p010le with BT.2020 HLG VUI tags.
-    - SDR / sRGB / Log -> HLG with zscale: maps SDR peak white to HLG diffuse white (~880 nits / ~98% HLG signal).
+    - SDR / sRGB / Log -> HLG with zscale: maps SDR peak white to HLG diffuse white (~380 nits / ~85% HLG signal).
     - Fallback without zscale: scales SDR signal ceiling cleanly prior to setparams.
     """
     filters: list[str] = []
@@ -662,7 +667,7 @@ def build_rgba_hdr_overlay_filter(
     tag: str,
     fade_chain: str = "",
     pts_chain: str = "",
-    diffuse_white_nits: float = 880.0,
+    diffuse_white_nits: float = 420.0,
 ) -> str:
     """
     Convert an sRGB RGBA overlay stream to 10-bit BT.2020 HLG (yuva444p10le) while preserving straight alpha.
@@ -1596,6 +1601,484 @@ def _build_criterion_atelier_assets(
     }
 
 
+_SURFACE_PALETTE_SPECS: dict[str, dict[str, Any]] = {
+    "warm_linen": {
+        "name": "warm_linen",
+        "bg": (234, 229, 220),
+        "mat": (238, 234, 226),
+        "ink_primary": (34, 32, 30),
+        "ink_secondary": (92, 88, 80),
+        "ink_muted": (132, 126, 118),
+        "rule": (172, 166, 156),
+        "bevel_hi": (246, 243, 237),
+        "bevel_lo": (184, 178, 168),
+        "is_light": True,
+    },
+    "gallery_white": {
+        "name": "gallery_white",
+        "bg": (242, 241, 238),
+        "mat": (245, 244, 241),
+        "ink_primary": (26, 28, 32),
+        "ink_secondary": (84, 88, 96),
+        "ink_muted": (128, 132, 140),
+        "rule": (186, 186, 182),
+        "bevel_hi": (248, 248, 246),
+        "bevel_lo": (194, 193, 188),
+        "is_light": True,
+    },
+    "obsidian_slate": {
+        "name": "obsidian_slate",
+        "bg": (14, 16, 21),
+        "mat": (20, 23, 30),
+        "ink_primary": (238, 234, 226),
+        "ink_secondary": (182, 186, 196),
+        "ink_muted": (124, 130, 142),
+        "rule": (64, 68, 78),
+        "bevel_hi": (56, 60, 70),
+        "bevel_lo": (8, 10, 14),
+        "is_light": False,
+    },
+}
+
+
+def _resolve_surface_palette(raw_primary: Image.Image, kb: KenBurnsConfig) -> dict[str, Any]:
+    """Select an HDR-safe museum paper or obsidian surface palette suited to the photograph."""
+    req = str(getattr(kb, "surface_palette", "auto") or "auto")
+    if req in _SURFACE_PALETTE_SPECS:
+        return dict(_SURFACE_PALETTE_SPECS[req])
+
+    sample = raw_primary.resize((64, 64), Image.Resampling.BILINEAR)
+    arr = np.asarray(sample, dtype=np.float32)
+    mean_luma = float((0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]).mean())
+    warmth = float((arr[:, :, 0] - arr[:, :, 2]).mean())
+    if mean_luma < 90.0:
+        return dict(_SURFACE_PALETTE_SPECS["obsidian_slate"])
+    if warmth >= 10.0:
+        return dict(_SURFACE_PALETTE_SPECS["warm_linen"])
+    return dict(_SURFACE_PALETTE_SPECS["gallery_white"])
+
+
+def _wrap_editorial_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_px_w: int,
+    max_lines: int = 4,
+) -> list[str]:
+    """Wrap Latin and CJK strings cleanly by measured pixel width."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    lines: list[str] = []
+    for para in cleaned.splitlines():
+        para = para.strip()
+        if not para:
+            continue
+        cur = ""
+        tokens = para.split(" ") if (" " in para and not _contains_cjk(para)) else list(para)
+        joiner = " " if (" " in para and not _contains_cjk(para)) else ""
+        for tok in tokens:
+            cand = f"{cur}{joiner}{tok}" if cur else tok
+            bw = draw.textbbox((0, 0), cand, font=font)[2]
+            if bw <= max_px_w or not cur:
+                cur = cand
+            else:
+                lines.append(cur)
+                cur = tok
+                if len(lines) >= max_lines:
+                    return lines[:max_lines]
+        if cur:
+            lines.append(cur)
+        if len(lines) >= max_lines:
+            break
+    return lines[:max_lines]
+
+
+def _make_textured_surface_rgb(
+    width: int,
+    height: int,
+    base_rgb: tuple[int, int, int],
+    seed: int = 301,
+    grad_top: float = 4.0,
+    grad_bot: float = -5.0,
+    grain_std: float = 1.8,
+) -> Image.Image:
+    """Create a deterministic cotton-rag or obsidian surface board with gentle vertical gallery wash."""
+    sw, sh = max(32, width // 3), max(32, height // 3)
+    ny = np.linspace(0.0, 1.0, sh, dtype=np.float32).reshape(sh, 1, 1)
+    rng = np.random.default_rng(seed=seed)
+    grain = rng.normal(loc=0.0, scale=grain_std, size=(sh, sw, 1)).astype(np.float32)
+    wash = grad_top * (1.0 - ny) + grad_bot * ny
+    arr = np.empty((sh, sw, 3), dtype=np.float32)
+    arr[:, :, 0] = base_rgb[0] + wash[:, :, 0] + grain[:, :, 0]
+    arr[:, :, 1] = base_rgb[1] + wash[:, :, 0] + grain[:, :, 0]
+    arr[:, :, 2] = base_rgb[2] + wash[:, :, 0] + grain[:, :, 0]
+    u8 = np.clip(arr, 4.0, 248.0).astype(np.uint8)
+    return Image.fromarray(u8, mode="RGB").resize((width, height), Image.Resampling.BILINEAR)
+
+
+def _build_passepartout_shadowbox_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    pal: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Build cotton-rag/obsidian museum passe-partout board with a 45-degree mat bevel,
+    soft recessed inner shadow, and clean margin typography (zero blurry photo backdrop).
+    """
+    ow = int(round(width * 1.03))
+    ow -= ow % 2
+    oh = int(round(height * 1.03))
+    oh -= oh % 2
+
+    board = _make_textured_surface_rgb(ow, oh, pal["mat"], seed=301, grad_top=4.0, grad_bot=-5.0, grain_std=1.8)
+    draw = ImageDraw.Draw(board)
+
+    has_cap = bool(kb.caption_title and kb.caption_title.strip())
+    aspect = raw_primary.width / max(1, raw_primary.height)
+    max_ww = int(ow * 0.74)
+    max_wh = int(oh * (0.67 if has_cap else 0.75))
+    if max_ww / max(1.0, float(max_wh)) >= aspect:
+        wh = max_wh
+        ww = int(round(wh * aspect))
+    else:
+        ww = max_ww
+        wh = int(round(ww / max(0.25, aspect)))
+    ww = max(int(ow * 0.34), min(max_ww, ww))
+    wh = max(int(oh * 0.44), min(max_wh, wh))
+
+    wx = (ow - ww) // 2
+    wy = max(int(oh * 0.08), int(oh * (0.445 if has_cap else 0.50)) - wh // 2)
+    bev = max(4, int(round(6 * scale_factor)))
+
+    bevel_left = tuple((a + b) // 2 for a, b in zip(pal["bevel_lo"], pal["mat"]))
+    bevel_right = tuple((a + b) // 2 for a, b in zip(pal["bevel_hi"], pal["mat"]))
+    # 4-edge 45-degree beveled mat aperture lit softly from upper-left
+    draw.polygon([(wx - bev, wy - bev), (wx + ww + bev, wy - bev), (wx + ww, wy), (wx, wy)], fill=pal["bevel_lo"])
+    draw.polygon([(wx - bev, wy - bev), (wx, wy), (wx, wy + wh), (wx - bev, wy + wh + bev)], fill=bevel_left)
+    draw.polygon([(wx, wy + wh), (wx + ww, wy + wh), (wx + ww + bev, wy + wh + bev), (wx - bev, wy + wh + bev)], fill=pal["bevel_hi"])
+    draw.polygon([(wx + ww, wy), (wx + ww + bev, wy - bev), (wx + ww + bev, wy + wh + bev), (wx + ww, wy + wh)], fill=bevel_right)
+    draw.rectangle([wx - bev, wy - bev, wx + ww + bev, wy + wh + bev], outline=pal["rule"], width=max(1, int(round(scale_factor))))
+
+    if has_cap:
+        title_str = (kb.caption_title or "").strip()
+        sub_str = (kb.caption_subtitle or "").strip()
+        f_title = _load_editorial_font(max(12, int(round(19 * scale_factor))), bold=True, serif=True, text=title_str)
+        f_sub = _load_editorial_font(max(10, int(round(13 * scale_factor))), bold=False, serif=False, text=sub_str)
+        margin_top = wy + wh + bev + max(10, int(round(16 * scale_factor)))
+        max_cap_y = int(oh * 0.94)
+        tb = draw.textbbox((0, 0), title_str, font=f_title)
+        tw = tb[2] - tb[0]
+        th = tb[3] - tb[1]
+        if margin_top + th <= max_cap_y:
+            draw.text(((ow - tw) // 2, margin_top), title_str, font=f_title, fill=pal["ink_primary"])
+        if sub_str:
+            sub_y = margin_top + th + max(5, int(round(8 * scale_factor)))
+            sb_box = draw.textbbox((0, 0), sub_str, font=f_sub)
+            sw_t = sb_box[2] - sb_box[0]
+            sh_t = sb_box[3] - sb_box[1]
+            if sub_y + sh_t <= max_cap_y:
+                # Truncate gracefully if excessively long on a small matte
+                disp_sub = sub_str if sw_t <= int(ow * 0.78) else (sub_str[:74].rstrip() + "...")
+                sb_box2 = draw.textbbox((0, 0), disp_sub, font=f_sub)
+                draw.text(((ow - (sb_box2[2] - sb_box2[0])) // 2, sub_y), disp_sub, font=f_sub, fill=pal["ink_secondary"])
+
+    photo_over = ImageOps.fit(
+        raw_primary,
+        (max(32, int(round(ww * 1.09))), max(32, int(round(wh * 1.09)))),
+        method=Image.Resampling.LANCZOS,
+    )
+    recess_mask = Image.new("L", (ww, wh), 0)
+    rm_draw = ImageDraw.Draw(recess_mask)
+    thick = max(4, int(round(7 * scale_factor)))
+    rm_draw.rectangle([0, 0, ww - 1, thick], fill=82)
+    rm_draw.rectangle([0, 0, thick, wh - 1], fill=72)
+    rm_draw.rectangle([0, wh - max(2, thick // 2), ww - 1, wh - 1], fill=28)
+    rm_draw.rectangle([ww - max(2, thick // 2), 0, ww - 1, wh - 1], fill=28)
+    recess_mask = recess_mask.filter(ImageFilter.GaussianBlur(radius=max(3, int(round(5 * scale_factor)))))
+    recess_dark = Image.new("RGB", (ww, wh), (6, 8, 12))
+
+    return {
+        "board_rgb": board,
+        "photo_over": photo_over,
+        "recess_mask": recess_mask,
+        "recess_dark": recess_dark,
+        "wx": wx,
+        "wy": wy,
+        "ww": ww,
+        "wh": wh,
+    }
+
+
+def _build_kinfolk_linen_folio_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    pal: dict[str, Any],
+) -> dict[str, Any]:
+    """Build asymmetric 58/42 Kinfolk / Mack Books archival monograph spread with hairline rules & folio typography."""
+    page = _make_textured_surface_rgb(width, height, pal["bg"], seed=404, grad_top=3.0, grad_bot=-4.0, grain_std=1.5)
+    draw = ImageDraw.Draw(page)
+
+    left_zone_w = int(round(width * 0.58))
+    left_zone_w -= left_zone_w % 2
+    max_pw = int(left_zone_w * 0.80)
+    max_ph = int(height * 0.78)
+    aspect = raw_primary.width / max(1, raw_primary.height)
+    if max_pw / max(1.0, float(max_ph)) >= aspect:
+        ph = max_ph
+        pw = int(round(ph * aspect))
+    else:
+        pw = max_pw
+        ph = int(round(pw / max(0.25, aspect)))
+    pw = max(int(left_zone_w * 0.44), min(max_pw, pw))
+    ph = max(int(height * 0.44), min(max_ph, ph))
+
+    px = (left_zone_w - pw) // 2
+    py = (height - ph) // 2
+
+    pad_f = max(5, int(round(8 * scale_factor)))
+    rule_w = max(1, int(round(1.2 * scale_factor)))
+    draw.rectangle([px - pad_f, py - pad_f, px + pw + pad_f, py + ph + pad_f], outline=pal["rule"], width=rule_w)
+    draw.line([(left_zone_w, int(height * 0.12)), (left_zone_w, int(height * 0.88))], fill=pal["rule"], width=rule_w)
+
+    tx = left_zone_w + int(round(46 * scale_factor))
+    max_tw = max(80, width - tx - int(round(42 * scale_factor)))
+    cur_y = int(height * 0.23)
+
+    badge_str = _clean_editorial_badge(kb.camera_badge or "") or "ARCHIVAL FOLIO"
+    f_badge = _load_editorial_font(max(10, int(round(13 * scale_factor))), bold=True, serif=False, text=badge_str)
+    draw.text((tx, cur_y), badge_str, font=f_badge, fill=pal["ink_muted"])
+    cur_y += max(12, int(round(26 * scale_factor)))
+
+    rule_len = min(max_tw, int(round(46 * scale_factor)))
+    draw.rectangle([tx, cur_y, tx + rule_len, cur_y + max(1, int(round(1.5 * scale_factor)))], fill=pal["rule"])
+    cur_y += max(10, int(round(24 * scale_factor)))
+
+    title_str = (kb.caption_title or "Curated Exhibition Study").strip()
+    f_title = _load_editorial_font(max(14, int(round(30 * scale_factor))), bold=True, serif=True, text=title_str)
+    for ln in _wrap_editorial_text(draw, title_str, f_title, max_tw, max_lines=4):
+        draw.text((tx, cur_y), ln, font=f_title, fill=pal["ink_primary"])
+        cur_y += max(16, int(round(40 * scale_factor)))
+
+    sub_str = (kb.caption_subtitle or "").strip()
+    if sub_str:
+        cur_y += max(6, int(round(12 * scale_factor)))
+        f_sub = _load_editorial_font(max(11, int(round(18 * scale_factor))), bold=False, serif=False, text=sub_str)
+        for ln in _wrap_editorial_text(draw, sub_str, f_sub, max_tw, max_lines=5):
+            if cur_y > int(height * 0.80):
+                break
+            draw.text((tx, cur_y), ln, font=f_sub, fill=pal["ink_secondary"])
+            cur_y += max(12, int(round(27 * scale_factor)))
+
+    folio_mark = "EDITION PLATE"
+    f_folio = _load_editorial_font(max(9, int(round(12 * scale_factor))), bold=False, serif=True, text=folio_mark)
+    fy_rule = int(height * 0.84)
+    draw.line([(tx, fy_rule), (tx + min(max_tw, int(round(140 * scale_factor))), fy_rule)], fill=pal["rule"], width=1)
+    draw.text((tx, fy_rule + max(6, int(round(10 * scale_factor)))), folio_mark, font=f_folio, fill=pal["ink_muted"])
+
+    photo_over = ImageOps.fit(
+        raw_primary,
+        (max(32, int(round(pw * 1.10))), max(32, int(round(ph * 1.10)))),
+        method=Image.Resampling.LANCZOS,
+    )
+    return {
+        "page_rgb": page,
+        "photo_over": photo_over,
+        "px": px,
+        "py": py,
+        "pw": pw,
+        "ph": ph,
+    }
+
+
+def _build_panoramic_frieze_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    has_card: bool,
+    scale_factor: float,
+    pal: dict[str, Any],
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build a wide 1.85x exhibition frieze hanging 3 matted prints across generous architectural gutters."""
+    fw = int(round(width * 1.85))
+    fw -= fw % 2
+    fh = int(round(height * 1.04))
+    fh -= fh % 2
+
+    canvas = _make_textured_surface_rgb(fw, fh, pal["bg"], seed=505, grad_top=5.0, grad_bot=-6.0, grain_std=1.5)
+
+    sec_img = (
+        _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+        if (kb.secondary_source and Path(kb.secondary_source).exists())
+        else None
+    )
+    tert_img = (
+        _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
+        if (kb.tertiary_source and Path(kb.tertiary_source).exists())
+        else None
+    )
+
+    sw, sh = raw_primary.size
+    if sec_img is not None and tert_img is not None:
+        imgs = [raw_primary, sec_img, tert_img]
+    elif sec_img is not None:
+        cw_d, ch_d = max(48, int(sw * 0.62)), max(48, int(sh * 0.62))
+        ex, ey = kb.end_center
+        dx0 = int(round(min(max(0.0, ex * sw - cw_d * 0.5), max(0.0, float(sw - cw_d)))))
+        dy0 = int(round(min(max(0.0, ey * sh - ch_d * 0.5), max(0.0, float(sh - ch_d)))))
+        imgs = [raw_primary, sec_img, raw_primary.crop((dx0, dy0, dx0 + cw_d, dy0 + ch_d))]
+    else:
+        cw_s, ch_s = max(48, int(sw * 0.68)), max(48, int(sh * 0.68))
+        fx, fy = kb.start_center
+        centers = [(0.24, 0.50), (fx, fy), (0.76, 0.46)]
+        imgs = []
+        for cx_p, cy_p in centers:
+            x0 = int(round(min(max(0.0, cx_p * sw - cw_s * 0.5), max(0.0, float(sw - cw_s)))))
+            y0 = int(round(min(max(0.0, cy_p * sh - ch_s * 0.5), max(0.0, float(sh - ch_s)))))
+            imgs.append(raw_primary.crop((x0, y0, x0 + cw_s, y0 + ch_s)))
+
+    slot_w = int(width * 0.44)
+    slot_h = int(height * (0.68 if has_card else 0.76))
+    border_px = max(10, int(round(13 * scale_factor)))
+    cy = int(fh * (0.435 if has_card else 0.49))
+    centers_x = [int(fw * 0.21), int(fw * 0.50), int(fw * 0.79)]
+    for cx_slot, im in zip(centers_x, imgs):
+        card = _build_double_matte_card(im, max_w=slot_w, max_h=slot_h, scale_factor=scale_factor, border_px=border_px)
+        px = max(8, min(fw - card.width - 8, cx_slot - card.width // 2))
+        py = max(8, min(fh - card.height - 8, cy - card.height // 2))
+        canvas.paste(card, (px, py), card)
+
+    return {"canvas_rgb": canvas}
+
+
+def _build_atelier_layered_duo_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    has_card: bool,
+    scale_factor: float,
+    pal: dict[str, Any],
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build two strictly orthogonal (0-deg) layered archival prints with soft ambient-occlusion shadow."""
+    bw = int(round(width * 1.05))
+    bh = int(round(height * 1.05))
+    bg_rgb = _make_textured_surface_rgb(bw, bh, pal["bg"], seed=606, grad_top=4.0, grad_bot=-5.0, grain_std=1.5)
+    b_draw = ImageDraw.Draw(bg_rgb)
+    inset_x = max(16, int(round(44 * scale_factor)))
+    inset_y = max(14, int(round(36 * scale_factor)))
+    b_draw.rectangle([inset_x, inset_y, bw - inset_x, bh - inset_y], outline=pal["rule"], width=1)
+
+    anc_border = max(10, int(round(13 * scale_factor)))
+    anchor_rgba = _build_double_matte_card(
+        raw_primary,
+        max_w=int(width * 0.54),
+        max_h=int(height * (0.68 if has_card else 0.75)),
+        scale_factor=scale_factor,
+        border_px=anc_border,
+    )
+
+    if kb.secondary_source and Path(kb.secondary_source).exists():
+        fg_src = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+    else:
+        sw, sh = raw_primary.size
+        cw_d = max(48, int(round(sw * 0.56)))
+        ch_d = max(48, int(round(sh * 0.56)))
+        ex, ey = kb.end_center
+        dx0 = int(round(min(max(0.0, ex * sw - cw_d * 0.5), max(0.0, float(sw - cw_d)))))
+        dy0 = int(round(min(max(0.0, ey * sh - ch_d * 0.5), max(0.0, float(sh - ch_d)))))
+        fg_src = raw_primary.crop((dx0, dy0, dx0 + cw_d, dy0 + ch_d))
+
+    fg_border = max(8, int(round(10 * scale_factor)))
+    fg_rgba = _build_double_matte_card(
+        fg_src,
+        max_w=int(width * 0.35),
+        max_h=int(height * (0.47 if has_card else 0.53)),
+        scale_factor=scale_factor,
+        border_px=fg_border,
+    )
+    return {
+        "bg_rgb": bg_rgb,
+        "anchor_rgba": anchor_rgba,
+        "fg_rgba": fg_rgba,
+    }
+
+
+def _build_leica_frame_finder_assets(
+    raw_primary: Image.Image,
+    width: int,
+    height: int,
+    has_card: bool,
+    scale_factor: float,
+) -> dict[str, Any]:
+    """Build crisp rangefinder brightline corner framelines with subtle outer surround calming."""
+    sharp_over = ImageOps.fit(
+        raw_primary,
+        (max(32, int(round(width * 1.10))), max(32, int(round(height * 1.10)))),
+        method=Image.Resampling.LANCZOS,
+    )
+    rx0 = int(round(width * 0.09))
+    rx1 = width - rx0
+    ry0 = int(round(height * 0.09))
+    ry1 = int(round(height * (0.83 if has_card else 0.91)))
+
+    surround_mask = Image.new("L", (width, height), 58)
+    sm_draw = ImageDraw.Draw(surround_mask)
+    sm_draw.rectangle([rx0, ry0, rx1, ry1], fill=0)
+    surround_mask = surround_mask.filter(ImageFilter.GaussianBlur(radius=2))
+
+    # Pre-seed transparent RGB to platinum-white so bilinear resampling never bleeds black fringes
+    reticle = Image.new("RGBA", (width, height), (232, 236, 242, 0))
+    r_draw = ImageDraw.Draw(reticle)
+    lw = max(1, int(round(2.0 * scale_factor)))
+    corner_len = max(16, int(round(36 * scale_factor)))
+    tick_len = max(4, int(round(9 * scale_factor)))
+    col = (232, 236, 242, 215)
+
+    # Top-left brightline corner
+    r_draw.line([(rx0, ry0), (rx0 + corner_len, ry0)], fill=col, width=lw)
+    r_draw.line([(rx0, ry0), (rx0, ry0 + corner_len)], fill=col, width=lw)
+    # Top-right brightline corner
+    r_draw.line([(rx1 - corner_len, ry0), (rx1, ry0)], fill=col, width=lw)
+    r_draw.line([(rx1, ry0), (rx1, ry0 + corner_len)], fill=col, width=lw)
+    # Bottom-left brightline corner
+    r_draw.line([(rx0, ry1), (rx0 + corner_len, ry1)], fill=col, width=lw)
+    r_draw.line([(rx0, ry1 - corner_len), (rx0, ry1)], fill=col, width=lw)
+    # Bottom-right brightline corner
+    r_draw.line([(rx1 - corner_len, ry1), (rx1, ry1)], fill=col, width=lw)
+    r_draw.line([(rx1, ry1 - corner_len), (rx1, ry1)], fill=col, width=lw)
+
+    # Edge midpoint registration ticks
+    mx = (rx0 + rx1) // 2
+    my = (ry0 + ry1) // 2
+    tick_col = (232, 236, 242, 165)
+    r_draw.line([(mx, ry0), (mx, ry0 + tick_len)], fill=tick_col, width=lw)
+    r_draw.line([(mx, ry1 - tick_len), (mx, ry1)], fill=tick_col, width=lw)
+    r_draw.line([(rx0, my), (rx0 + tick_len, my)], fill=tick_col, width=lw)
+    r_draw.line([(rx1 - tick_len, my), (rx1, my)], fill=tick_col, width=lw)
+
+    # Subtle optical rangefinder center coincidence patch
+    pw_r = max(12, int(round(22 * scale_factor)))
+    ph_r = max(8, int(round(15 * scale_factor)))
+    r_draw.rectangle([mx - pw_r, my - ph_r, mx + pw_r, my + ph_r], outline=(232, 236, 242, 110), width=max(1, int(round(1.2 * scale_factor))))
+
+    return {
+        "sharp_over": sharp_over,
+        "surround_mask": surround_mask,
+        "dim_rgb": Image.new("RGB", (width, height), (8, 10, 14)),
+        "reticle_rgba": reticle,
+    }
+
+
 def _prepare_overlay_fx_assets(
     overlay_fx: str,
     width: int,
@@ -1778,6 +2261,37 @@ def _prepare_overlay_fx_assets(
         )
         return {"type": "caustic_water_shimmer", "shimmer_img": shimmer_img}
 
+    if overlay_fx == "architectural_window_dapple":
+        dw = int(round(width * 1.20))
+        dsw = max(64, dw // 6)
+        dsh = max(36, height // 6)
+        yy_d, xx_d = np.mgrid[0:dsh, 0:dsw]
+        nx_d = xx_d / max(1.0, float(dsw - 1))
+        ny_d = yy_d / max(1.0, float(dsh - 1))
+        u = nx_d * 0.76 + ny_d * 0.65
+        louvers = 0.5 + 0.5 * np.cos(u * math.pi * 5.2 - 0.8)
+        foliage = 0.78 + 0.22 * np.sin(nx_d * math.pi * 4.5 + ny_d * 2.1) * np.cos(ny_d * math.pi * 3.8)
+        sun_field = np.clip(louvers * foliage, 0.0, 1.0)
+        shade_field = np.clip((1.0 - louvers) * (0.72 + 0.28 * ny_d), 0.0, 1.0)
+        sun_mask_over = (
+            Image.fromarray((sun_field * 22.0).astype(np.uint8), mode="L")
+            .filter(ImageFilter.GaussianBlur(radius=6))
+            .resize((dw, height), Image.Resampling.BILINEAR)
+        )
+        shade_mask_over = (
+            Image.fromarray((shade_field * 24.0).astype(np.uint8), mode="L")
+            .filter(ImageFilter.GaussianBlur(radius=6))
+            .resize((dw, height), Image.Resampling.BILINEAR)
+        )
+        return {
+            "type": "architectural_window_dapple",
+            "dw": dw,
+            "sun_mask_over": sun_mask_over,
+            "shade_mask_over": shade_mask_over,
+            "warm_rgb": Image.new("RGB", (width, height), (244, 232, 206)),
+            "shade_rgb": Image.new("RGB", (width, height), (14, 16, 22)),
+        }
+
     return {"type": "none"}
 
 
@@ -1890,6 +2404,26 @@ def _apply_overlay_fx(
         weight = 0.09 + 0.045 * math.sin(math.pi * t_norm)
         return Image.blend(frame_rgb, screened, weight)
 
+    if fx_type == "architectural_window_dapple":
+        w, h = frame_rgb.size
+        dw = int(fx_assets["dw"])
+        x0 = (dw - w) * (1.0 - _ease_in_out_cubic(t_norm))
+        sun_m = fx_assets["sun_mask_over"].transform(
+            (w, h),
+            Image.Transform.EXTENT,
+            (x0, 0.0, x0 + float(w), float(h)),
+            resample=Image.Resampling.BILINEAR,
+        )
+        shade_m = fx_assets["shade_mask_over"].transform(
+            (w, h),
+            Image.Transform.EXTENT,
+            (x0, 0.0, x0 + float(w), float(h)),
+            resample=Image.Resampling.BILINEAR,
+        )
+        frame_rgb.paste(fx_assets["warm_rgb"], (0, 0), sun_m)
+        frame_rgb.paste(fx_assets["shade_rgb"], (0, 0), shade_m)
+        return frame_rgb
+
     return frame_rgb
 
 
@@ -1913,9 +2447,9 @@ def _prepare_photo_scene_context(
         s_zoom = 1.0
         e_zoom = min(1.018, max(1.0, e_zoom))
         sx, sy, ex, ey = 0.5, 0.5, 0.5, 0.5
-    # editorial_magazine and links_white_matte never overlay dark bottom lower-third cards
+    # editorial_magazine, links_white_matte, kinfolk_linen_folio, and passepartout_shadowbox never overlay floating dark lower-third cards
     has_card = bool(kb.caption_title and kb.caption_title.strip()) and (
-        mode not in ("editorial_magazine", "links_white_matte")
+        mode not in ("editorial_magazine", "links_white_matte", "kinfolk_linen_folio", "passepartout_shadowbox")
     )
     card_fg: Optional[Image.Image] = None
     card_mask: Optional[Image.Image] = None
@@ -2056,9 +2590,28 @@ def _prepare_photo_scene_context(
             axis=-1,
         )
         bw_img = Image.fromarray(bw_rgb, mode="RGB")
-        depth_full = estimate_depth_map(color_base, focal_point=kb.start_center, target_size=(work_w, work_h))
+        # Depth-free optical focal + smoothed luminance tonal reveal map (zero silhouette halos)
         qw, qh = max(48, work_w // 4), max(27, work_h // 4)
-        depth_q = cv2.resize(depth_full, (qw, qh), interpolation=cv2.INTER_AREA).astype(np.float32)
+        luma_q = (
+            np.asarray(
+                color_base.convert("L")
+                .resize((qw, qh), Image.Resampling.BILINEAR)
+                .filter(ImageFilter.GaussianBlur(radius=4)),
+                dtype=np.float32,
+            )
+            / 255.0
+        )
+        yy_b, xx_b = np.mgrid[0:qh, 0:qw].astype(np.float32)
+        nx_q = xx_b / max(1.0, float(qw - 1))
+        ny_q = yy_b / max(1.0, float(qh - 1))
+        fx_c = max(0.20, min(0.80, float(kb.start_center[0])))
+        fy_c = max(0.20, min(0.80, float(kb.start_center[1])))
+        dist_norm = np.sqrt(((nx_q - fx_c) / 0.62) ** 2 + ((ny_q - fy_c) / 0.62) ** 2)
+        radial_prox = np.clip(1.0 - 0.72 * dist_norm, 0.0, 1.0)
+        raw_field = 0.72 * radial_prox + 0.28 * luma_q
+        f_min, f_max = float(raw_field.min()), float(raw_field.max())
+        norm_field = (raw_field - f_min) / max(1e-5, f_max - f_min)
+        depth_q = (0.16 + 0.84 * norm_field).astype(np.float32)
         ctx["bloom_color"] = color_base
         ctx["bloom_bw"] = bw_img
         ctx["bloom_depth_q"] = depth_q
@@ -2169,6 +2722,67 @@ def _prepare_photo_scene_context(
             height=height,
             scale_factor=scale_factor,
             color_grade_fx=color_grade_fx,
+        )
+
+    elif mode == "passepartout_shadowbox":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        ctx["shadowbox"] = _build_passepartout_shadowbox_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            pal=pal,
+        )
+
+    elif mode == "kinfolk_linen_folio":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        ctx["kinfolk_folio"] = _build_kinfolk_linen_folio_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            pal=pal,
+        )
+
+    elif mode == "panoramic_frieze_scroll":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        ctx["frieze"] = _build_panoramic_frieze_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            has_card=has_card,
+            scale_factor=scale_factor,
+            pal=pal,
+            color_grade_fx=color_grade_fx,
+        )
+
+    elif mode == "atelier_layered_duo":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        ctx["layered_duo"] = _build_atelier_layered_duo_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            has_card=has_card,
+            scale_factor=scale_factor,
+            pal=pal,
+            color_grade_fx=color_grade_fx,
+        )
+
+    elif mode == "leica_frame_finder":
+        ctx["leica_finder"] = _build_leica_frame_finder_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+            has_card=has_card,
+            scale_factor=scale_factor,
         )
 
     else:
@@ -2699,6 +3313,98 @@ def _render_photo_frame_from_context(
         draw = ImageDraw.Draw(frame)
         draw.line([(lw + seam_px // 2, 0), (lw + seam_px // 2, height)], fill=(122, 118, 110), width=1)
         draw.line([(lw + seam_px, th + seam_px // 2), (width, th + seam_px // 2)], fill=(122, 118, 110), width=1)
+
+    elif mode == "passepartout_shadowbox":
+        sb = ctx["shadowbox"]
+        wx, wy, ww, wh = int(sb["wx"]), int(sb["wy"]), int(sb["ww"]), int(sb["wh"])
+        win_crop = _crop_plane_clamped(
+            sb["photo_over"],
+            (ww, wh),
+            1.00 + 0.055 * eased,
+            sx + (ex - sx) * eased * 0.65,
+            sy + (ey - sy) * eased * 0.65,
+            resample_mode,
+        )
+        win_crop.paste(sb["recess_dark"], (0, 0), sb["recess_mask"])
+        board = sb["board_rgb"].copy()
+        board.paste(win_crop, (wx, wy))
+        frame = _crop_plane_clamped(
+            board,
+            (width, height),
+            1.00 + 0.020 * eased,
+            0.50 + (ex - sx) * 0.12 * (eased - 0.5),
+            0.50 + (ey - sy) * 0.10 * (eased - 0.5),
+            resample_mode,
+        )
+
+    elif mode == "kinfolk_linen_folio":
+        kf = ctx["kinfolk_folio"]
+        px, py, pw, ph = int(kf["px"]), int(kf["py"]), int(kf["pw"]), int(kf["ph"])
+        win_crop = _crop_plane_clamped(
+            kf["photo_over"],
+            (pw, ph),
+            1.00 + 0.060 * eased,
+            sx + (ex - sx) * eased * 0.70,
+            sy + (ey - sy) * eased * 0.70,
+            resample_mode,
+        )
+        frame = kf["page_rgb"].copy()
+        frame.paste(win_crop, (px, py))
+
+    elif mode == "panoramic_frieze_scroll":
+        fr = ctx["frieze"]
+        kb_cfg = ctx.get("kb")
+        preset_val = getattr(kb_cfg, "preset", "pan_left_to_right") if kb_cfg is not None else "pan_left_to_right"
+        pan_cx = (0.72 - 0.44 * eased) if preset_val == "pan_right_to_left" else (0.28 + 0.44 * eased)
+        pan_z = 1.005 + 0.018 * math.sin(math.pi * eased)
+        frame = _crop_plane_clamped(fr["canvas_rgb"], (width, height), pan_z, pan_cx, 0.50, resample_mode)
+
+    elif mode == "atelier_layered_duo":
+        ld = ctx["layered_duo"]
+        frame = _crop_plane_clamped(ld["bg_rgb"], (width, height), 1.03 - 0.02 * eased, 0.50, 0.50, resample_mode)
+        anc: Image.Image = ld["anchor_rgba"]
+        fg_c: Image.Image = ld["fg_rgba"]
+        has_card_f = bool(ctx.get("has_card"))
+
+        s1 = 0.990 + 0.020 * eased
+        w1 = max(1, int(round(anc.width * s1)))
+        h1 = max(1, int(round(anc.height * s1)))
+        anc_scaled = anc.resize((w1, h1), resample=resample_mode)
+        x1 = int(width * 0.39) - w1 // 2 + int(round((0.5 - eased) * 18.0 * scale_factor))
+        y1 = max(8, int(height * (0.42 if has_card_f else 0.46)) - h1 // 2)
+        frame.paste(anc_scaled, (x1, y1), anc_scaled)
+
+        s2 = 0.975 + 0.038 * eased
+        w2 = max(1, int(round(fg_c.width * s2)))
+        h2 = max(1, int(round(fg_c.height * s2)))
+        fg_scaled = fg_c.resize((w2, h2), resample=resample_mode)
+        x2 = int(width * 0.68) - w2 // 2 + int(round((eased - 0.5) * 32.0 * scale_factor))
+        y2 = max(12, int(height * (0.53 if has_card_f else 0.58)) - h2 // 2 + int(round((0.5 - eased) * 12.0 * scale_factor)))
+        frame.paste(fg_scaled, (x2, y2), fg_scaled)
+
+    elif mode == "leica_frame_finder":
+        lf = ctx["leica_finder"]
+        frame = _crop_plane_clamped(
+            lf["sharp_over"],
+            (width, height),
+            1.00 + 0.050 * eased,
+            sx + (ex - sx) * eased * 0.55,
+            sy + (ey - sy) * eased * 0.55,
+            resample_mode,
+        )
+        frame.paste(lf["dim_rgb"], (0, 0), lf["surround_mask"])
+        lock_p = _ease_out_cubic(min(1.0, t_norm / 0.32))
+        reticle: Image.Image = lf["reticle_rgba"]
+        if lock_p >= 0.999:
+            frame.paste(reticle, (0, 0), reticle)
+        else:
+            ret_scale = 1.0 + 0.028 * (1.0 - lock_p)
+            rw = max(1, int(round(width * ret_scale)))
+            rh = max(1, int(round(height * ret_scale)))
+            scaled_ret = reticle.resize((rw, rh), resample=Image.Resampling.BILINEAR)
+            px = (width - rw) // 2
+            py = (height - rh) // 2
+            frame.paste(scaled_ret, (px, py), scaled_ret)
 
     else:
         base_static_img: Image.Image = ctx["base_static_img"]
@@ -3393,14 +4099,14 @@ def render_photo_effects_showcase_sheet(
     secondary_path: Optional[str | Path] = None,
     tertiary_path: Optional[str | Path] = None,
     caption_title: str = "Curated Architectural & Fine Art Showcase",
-    caption_subtitle: str = "19-Mode Cinema & Exhibition Suite + 10 Optical Finishers · 4K HDR",
+    caption_subtitle: str = "22 Active Exhibition & Cinema Modes + 11 Optical Finishers · 4K HDR",
     camera_badge: str = "",
     tile_width: int = 960,
     tile_height: int = 540,
 ) -> Path:
     """
-    Mechanically render a 4x5 (20-tile) high-resolution visual comparison showcase sheet
-    covering all 19 Photo Presentation Modes and all 10 Atmospheric Finishers.
+    Mechanically render a 4x6 (24-tile) high-resolution visual comparison showcase sheet
+    covering all 22 active Photo Presentation Modes and all 11 Atmospheric Finishers.
     """
     out_path = Path(output_jpg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3408,27 +4114,34 @@ def render_photo_effects_showcase_sheet(
     sec_str = str(secondary_path) if (secondary_path and Path(secondary_path).exists()) else None
     tert_str = str(tertiary_path) if (tertiary_path and Path(tertiary_path).exists()) else None
 
-    showcase_specs: list[tuple[str, str, str]] = [
-        ("parallax_gallery", "golden_light_leak", "1. Calmed Museum Parallax + Light Leak"),
-        ("floating_tilt_plate", "fine_art_rag_texture", "2. 3D Floating Tilt Plate + Rag Paper"),
-        ("glassmorphic_pedestal", "none", "3. Frosted Glassmorphic Vitrine"),
-        ("archival_color_bloom", "caustic_water_shimmer", "4. Silver-Gelatin Color Bloom + Caustics"),
-        ("contact_sheet_zoom", "none", "5. Darkroom Contact Sheet Push-In"),
-        ("split_diopter_focus", "prism_chromatic_edge", "6. Optical Split Diopter + Prism Edge"),
-        ("medium_format_slide", "velvet_vignette_rembrandt", "7. 120 Medium-Format Lightbox Slide"),
-        ("criterion_atelier_split", "none", "8. Criterion 3-Viewport Atelier Grid"),
-        ("triptych_cinematic", "none", "9. 3-Panel Staggered Triptych"),
-        ("polaroid_scrapbook", "nostalgic_film_grain", "10. Vintage Polaroid + 35mm Grain"),
-        ("curator_loupe", "museum_spotlight", "11. 1.65x Optical Curator Loupe"),
-        ("editorial_magazine", "none", "12. 62/38 Editorial Magazine Spread"),
-        ("cinema_anamorphic", "anamorphic_streak", "13. 2.39:1 Anamorphic + Flare Streak"),
-        ("diptych_frame", "golden_light_leak", "14. Side-by-Side Diptych Split-Screen"),
-        ("gallery_frame", "champagne_bokeh", "15. Classic Gallery Frame + Bokeh"),
-        ("full_bleed", "velvet_vignette_rembrandt", "16. Full-Bleed Ken Burns + Chiaroscuro"),
-        ("links_white_matte", "none", "17. Links Pure-White Exhibition Matte"),
+    showcase_specs: list[tuple[str, str, str, str]] = [
+        ("passepartout_shadowbox", "architectural_window_dapple", "1. Museum Shadow-Box + Window Dapple", "warm_linen"),
+        ("kinfolk_linen_folio", "fine_art_rag_texture", "2. Kinfolk Monograph Folio Spread", "warm_linen"),
+        ("panoramic_frieze_scroll", "none", "3. Continuous Gallery Frieze Glide", "gallery_white"),
+        ("atelier_layered_duo", "golden_light_leak", "4. Atelier Orthogonal Layered Duo", "obsidian_slate"),
+        ("leica_frame_finder", "nostalgic_film_grain", "5. Leica Rangefinder Brightline", "auto"),
+        ("archival_color_bloom", "caustic_water_shimmer", "6. Depth-Free Color Bloom + Caustics", "auto"),
+        ("parallax_gallery", "golden_light_leak", "7. Calmed Museum Parallax + Light Leak", "auto"),
+        ("floating_tilt_plate", "fine_art_rag_texture", "8. 3D Floating Tilt Plate + Rag Paper", "auto"),
+        ("glassmorphic_pedestal", "none", "9. Frosted Glassmorphic Vitrine", "auto"),
+        ("contact_sheet_zoom", "none", "10. Darkroom Contact Sheet Push-In", "auto"),
+        ("split_diopter_focus", "prism_chromatic_edge", "11. Optical Split Diopter + Prism Edge", "auto"),
+        ("medium_format_slide", "velvet_vignette_rembrandt", "12. 120 Medium-Format Lightbox Slide", "auto"),
+        ("criterion_atelier_split", "none", "13. Criterion 3-Viewport Atelier Grid", "auto"),
+        ("triptych_cinematic", "none", "14. 3-Panel Staggered Triptych", "auto"),
+        ("polaroid_scrapbook", "nostalgic_film_grain", "15. Vintage Polaroid + 35mm Grain", "auto"),
+        ("curator_loupe", "museum_spotlight", "16. 1.65x Optical Curator Loupe", "auto"),
+        ("editorial_magazine", "none", "17. 62/38 Editorial Magazine Spread", "auto"),
+        ("cinema_anamorphic", "anamorphic_streak", "18. 2.39:1 Anamorphic + Flare Streak", "auto"),
+        ("diptych_frame", "golden_light_leak", "19. Side-by-Side Diptych Split-Screen", "auto"),
+        ("gallery_frame", "champagne_bokeh", "20. Classic Gallery Frame + Bokeh", "auto"),
+        ("full_bleed", "halation_bloom_35mm", "21. Full-Bleed Ken Burns + Halation", "auto"),
+        ("links_white_matte", "none", "22. Links Pure-White Exhibition Matte", "gallery_white"),
+        ("passepartout_shadowbox", "none", "23. Shadow-Box (Gallery White Surface)", "gallery_white"),
+        ("kinfolk_linen_folio", "velvet_vignette_rembrandt", "24. Kinfolk Folio (Obsidian Slate)", "obsidian_slate"),
     ]
 
-    cols, rows = 4, 5
+    cols, rows = 4, 6
     pad = 18
     header_h = 68
     label_h = 36
@@ -3442,12 +4155,12 @@ def render_photo_effects_showcase_sheet(
 
     draw.text(
         (pad, 20),
-        "PREMIUM PHOTO EFFECTS SHOWCASE — 19 PRESENTATION MODES & 10 OPTICAL FINISHERS",
+        "PREMIUM PHOTO EFFECTS SHOWCASE — 22 EXHIBITION & CINEMA MODES & 11 OPTICAL FINISHERS",
         font=f_hdr,
         fill=(242, 238, 230),
     )
 
-    for idx, (mode_name, fx_name, label_text) in enumerate(showcase_specs):
+    for idx, (mode_name, fx_name, label_text, pal_name) in enumerate(showcase_specs):
         r = idx // cols
         c = idx % cols
         x0 = pad + c * (tile_width + pad)
@@ -3456,6 +4169,7 @@ def render_photo_effects_showcase_sheet(
         kb = KenBurnsConfig(
             mode=mode_name,  # type: ignore[arg-type]
             overlay_fx=fx_name,  # type: ignore[arg-type]
+            surface_palette=pal_name,  # type: ignore[arg-type]
             preset="zoom_in",
             start_zoom=1.0,
             end_zoom=1.08,

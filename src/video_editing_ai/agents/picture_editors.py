@@ -212,6 +212,7 @@ def _build_ken_burns_for_subclip(
     return KenBurnsConfig(
         mode=resolved_mode,  # type: ignore[arg-type]
         overlay_fx=sc.overlay_fx,
+        surface_palette=sc.surface_palette,
         preset=preset,  # type: ignore[arg-type]
         start_zoom=start_zoom,
         end_zoom=end_zoom,

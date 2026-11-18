@@ -228,6 +228,33 @@ class MPSPhotoCompositor:
             t["at_left"] = self._up(at["left_over"], "RGB")
             t["at_rtop"] = self._up(at["right_top_over"], "RGB")
             t["at_rbot"] = self._up(at["right_bot_over"], "RGB")
+        elif mode == "passepartout_shadowbox":
+            sb = ctx["shadowbox"]
+            t["sb_board_rgb"] = self._up(sb["board_rgb"], "RGB")
+            t["sb_photo_over"] = self._up(sb["photo_over"], "RGB")
+            t["sb_recess_mask"] = self._up(sb["recess_mask"], "L") / 255.0
+            t["sb_recess_dark"] = torch.tensor(
+                [6.0, 8.0, 12.0], device=self.device, dtype=self.work_dtype
+            ).view(1, 3, 1, 1)
+        elif mode == "kinfolk_linen_folio":
+            kf = ctx["kinfolk_folio"]
+            t["folio_page_rgb"] = self._up(kf["page_rgb"], "RGB")
+            t["folio_photo_over"] = self._up(kf["photo_over"], "RGB")
+        elif mode == "panoramic_frieze_scroll":
+            t["frieze_canvas_rgb"] = self._up(ctx["frieze"]["canvas_rgb"], "RGB")
+        elif mode == "atelier_layered_duo":
+            ld = ctx["layered_duo"]
+            t["duo_bg_rgb"] = self._up(ld["bg_rgb"], "RGB")
+            t["duo_anchor_rgba"] = self._up(ld["anchor_rgba"], "RGBA")
+            t["duo_fg_rgba"] = self._up(ld["fg_rgba"], "RGBA")
+        elif mode == "leica_frame_finder":
+            lf = ctx["leica_finder"]
+            t["leica_sharp_over"] = self._up(lf["sharp_over"], "RGB")
+            t["leica_surround_mask"] = self._up(lf["surround_mask"], "L") / 255.0
+            t["leica_dim_rgb"] = torch.tensor(
+                [8.0, 10.0, 14.0], device=self.device, dtype=self.work_dtype
+            ).view(1, 3, 1, 1)
+            t["leica_reticle_rgba"] = self._up(lf["reticle_rgba"], "RGBA")
         else:
             t["base_static_img"] = self._up(ctx["base_static_img"], "RGB")
 
@@ -255,6 +282,15 @@ class MPSPhotoCompositor:
             t["fx_rag"] = self._up(fx["rag_img"], "RGB")
         elif fx_type == "caustic_water_shimmer":
             t["fx_shimmer"] = self._up(fx["shimmer_img"], "RGB")
+        elif fx_type == "architectural_window_dapple":
+            t["fx_dapple_sun_over"] = self._up(fx["sun_mask_over"], "L") / 255.0
+            t["fx_dapple_shade_over"] = self._up(fx["shade_mask_over"], "L") / 255.0
+            t["fx_dapple_warm"] = torch.tensor(
+                [244.0, 232.0, 206.0], device=self.device, dtype=self.work_dtype
+            ).view(1, 3, 1, 1)
+            t["fx_dapple_shade"] = torch.tensor(
+                [14.0, 16.0, 22.0], device=self.device, dtype=self.work_dtype
+            ).view(1, 3, 1, 1)
 
         # Plane 3 Frosted documentary lower-third card
         if ctx.get("has_card") and ctx.get("card_fg") is not None:
@@ -956,6 +992,97 @@ class MPSPhotoCompositor:
                 canvas[:, :, hy, lw + seam_px : w] = hair
             return canvas
 
+        if mode == "passepartout_shadowbox":
+            sb = ctx["shadowbox"]
+            wx, wy, ww, wh = int(sb["wx"]), int(sb["wy"]), int(sb["ww"]), int(sb["wh"])
+            z_ins = [1.00 + 0.055 * e for e in eased_list]
+            cx_ins = [sx + (ex - sx) * e * 0.65 for e in eased_list]
+            cy_ins = [sy + (ey - sy) * e * 0.65 for e in eased_list]
+            win_crops = self._crop_plane_batch(tex["sb_photo_over"], (ww, wh), z_ins, cx_ins, cy_ins)
+            rm = tex["sb_recess_mask"]
+            win_crops = win_crops * (1.0 - rm) + tex["sb_recess_dark"] * rm
+
+            z_outs = [1.00 + 0.020 * e for e in eased_list]
+            cx_outs = [0.50 + (ex - sx) * 0.12 * (e - 0.5) for e in eased_list]
+            cy_outs = [0.50 + (ey - sy) * 0.10 * (e - 0.5) for e in eased_list]
+            board_work = tex["sb_board_rgb"].clone()
+            out_frames: list[torch.Tensor] = []
+            for b in range(batch_n):
+                board_work[0, :, wy : wy + wh, wx : wx + ww] = win_crops[b]
+                out_frames.append(
+                    self._crop_plane_batch(board_work, (w, h), [z_outs[b]], [cx_outs[b]], [cy_outs[b]])
+                )
+            return torch.cat(out_frames, dim=0)
+
+        if mode == "kinfolk_linen_folio":
+            kf = ctx["kinfolk_folio"]
+            px, py, pw, ph = int(kf["px"]), int(kf["py"]), int(kf["pw"]), int(kf["ph"])
+            z_ins = [1.00 + 0.060 * e for e in eased_list]
+            cx_ins = [sx + (ex - sx) * e * 0.70 for e in eased_list]
+            cy_ins = [sy + (ey - sy) * e * 0.70 for e in eased_list]
+            win_crops = self._crop_plane_batch(tex["folio_photo_over"], (pw, ph), z_ins, cx_ins, cy_ins)
+            canvas = tex["folio_page_rgb"].expand(batch_n, -1, -1, -1).clone()
+            canvas[:, :, py : py + ph, px : px + pw] = win_crops
+            return canvas
+
+        if mode == "panoramic_frieze_scroll":
+            kb_cfg = ctx.get("kb")
+            preset_val = getattr(kb_cfg, "preset", "pan_left_to_right") if kb_cfg is not None else "pan_left_to_right"
+            pan_cxs = [
+                (0.72 - 0.44 * e) if preset_val == "pan_right_to_left" else (0.28 + 0.44 * e)
+                for e in eased_list
+            ]
+            pan_zs = [1.005 + 0.018 * math.sin(math.pi * e) for e in eased_list]
+            return self._crop_plane_batch(tex["frieze_canvas_rgb"], (w, h), pan_zs, pan_cxs, [0.50] * batch_n)
+
+        if mode == "atelier_layered_duo":
+            zooms = [1.03 - 0.02 * e for e in eased_list]
+            canvas = self._crop_plane_batch(tex["duo_bg_rgb"], (w, h), zooms, [0.50] * batch_n, [0.50] * batch_n)
+            anc = tex["duo_anchor_rgba"]
+            fg_c = tex["duo_fg_rgba"]
+            anc_h, anc_w = int(anc.shape[2]), int(anc.shape[3])
+            fg_h, fg_w = int(fg_c.shape[2]), int(fg_c.shape[3])
+            has_card_f = bool(ctx.get("has_card"))
+            for b, eased in enumerate(eased_list):
+                s1 = 0.990 + 0.020 * eased
+                w1 = max(1, int(round(anc_w * s1)))
+                h1 = max(1, int(round(anc_h * s1)))
+                x1 = int(w * 0.39) - w1 // 2 + int(round((0.5 - eased) * 18.0 * sf))
+                y1 = max(8, int(h * (0.42 if has_card_f else 0.46)) - h1 // 2)
+                self._paste_rgba_single(canvas[b : b + 1], anc, x1, y1, dst_w=w1, dst_h=h1)
+
+                s2 = 0.975 + 0.038 * eased
+                w2 = max(1, int(round(fg_w * s2)))
+                h2 = max(1, int(round(fg_h * s2)))
+                x2 = int(w * 0.68) - w2 // 2 + int(round((eased - 0.5) * 32.0 * sf))
+                y2 = max(
+                    12,
+                    int(h * (0.53 if has_card_f else 0.58)) - h2 // 2 + int(round((0.5 - eased) * 12.0 * sf)),
+                )
+                self._paste_rgba_single(canvas[b : b + 1], fg_c, x2, y2, dst_w=w2, dst_h=h2)
+            return canvas
+
+        if mode == "leica_frame_finder":
+            zooms = [1.00 + 0.050 * e for e in eased_list]
+            cxs = [sx + (ex - sx) * e * 0.55 for e in eased_list]
+            cys = [sy + (ey - sy) * e * 0.55 for e in eased_list]
+            canvas = self._crop_plane_batch(tex["leica_sharp_over"], (w, h), zooms, cxs, cys)
+            sm = tex["leica_surround_mask"]
+            canvas = canvas * (1.0 - sm) + tex["leica_dim_rgb"] * sm
+            reticle = tex["leica_reticle_rgba"]
+            for b, t_norm in enumerate(t_norms):
+                lock_p = _ease_out_cubic(min(1.0, t_norm / 0.32))
+                if lock_p >= 0.999:
+                    self._paste_rgba_single(canvas[b : b + 1], reticle, 0, 0)
+                else:
+                    ret_scale = 1.0 + 0.028 * (1.0 - lock_p)
+                    rw = max(1, int(round(w * ret_scale)))
+                    rh = max(1, int(round(h * ret_scale)))
+                    px = (w - rw) // 2
+                    py = (h - rh) // 2
+                    self._paste_rgba_single(canvas[b : b + 1], reticle, px, py, dst_w=rw, dst_h=rh)
+            return canvas
+
         # gallery_frame & full_bleed (and any default)
         zooms = [s_zoom + (e_zoom - s_zoom) * e for e in eased_list]
         cxs = [sx + (ex - sx) * e for e in eased_list]
@@ -1104,6 +1231,19 @@ class MPSPhotoCompositor:
                 [0.09 + 0.045 * math.sin(math.pi * t) for t in t_norms], device=self.device, dtype=self.work_dtype
             ).view(batch_n, 1, 1, 1)
             return canvas * (1.0 - weights) + screened * weights
+
+        if fx_type == "architectural_window_dapple":
+            fx = self.ctx.get("fx_assets") or {}
+            dw = float(fx.get("dw", w))
+            boxes = []
+            for t_norm in t_norms:
+                x0 = (dw - w) * (1.0 - _ease_in_out_cubic(t_norm))
+                boxes.append((x0, 0.0, x0 + float(w), float(h)))
+            sun_m = self._warp_extents_batch(tex["fx_dapple_sun_over"], (w, h), boxes)
+            shade_m = self._warp_extents_batch(tex["fx_dapple_shade_over"], (w, h), boxes)
+            canvas = canvas * (1.0 - sun_m) + tex["fx_dapple_warm"] * sun_m
+            canvas = canvas * (1.0 - shade_m) + tex["fx_dapple_shade"] * shade_m
+            return canvas
 
         return canvas
 
