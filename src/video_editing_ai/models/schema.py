@@ -1789,14 +1789,14 @@ class ClipColorTransform(BaseModel):
         "sdr_bt709_8bit",
         "srgb_still",
     ] = "sdr_bt709_8bit"
-    transform_mode: str = "zscale_sdr_to_hlg_880nits"
+    transform_mode: str = "zscale_sdr_to_hlg_203nits"
     color_primaries: str = "bt709"
     color_trc: str = "bt709"
     color_space: str = "bt709"
     pix_fmt: str = "yuv420p"
     target_trc: str = "arib-std-b67"
-    target_diffuse_white_nits: float = 880.0
-    hdr_diffuse_white_nits: float = 880.0
+    target_diffuse_white_nits: float = 203.0
+    hdr_diffuse_white_nits: float = 203.0
     hdr_signal_ceiling: float = 0.98
     chapter_look: str = "archival_kodak_2383"
     wb_red_shift: float = 0.0
@@ -1829,7 +1829,7 @@ class ColorTransformManifest(BaseModel):
     hdr_delivery: bool = True
     target_transfer: str = "arib-std-b67"
     target_primaries: str = "bt2020"
-    diffuse_white_nits: float = 880.0
+    diffuse_white_nits: float = 203.0
     primary_film_stock_look: str = "archival_kodak_2383"
     zscale_available: bool = True
     shots_classified_count: int = 0
