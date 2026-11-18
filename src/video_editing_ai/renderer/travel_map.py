@@ -1849,6 +1849,34 @@ def _draw_boat_kelvin_wake(
     canvas.alpha_composite(Image.fromarray(overlay))
 
 
+def _draw_glow_beacon_dot(
+    canvas: Image.Image,
+    cx: float,
+    cy: float,
+    glow_rgb: tuple[int, int, int],
+    core_rgb: tuple[int, int, int],
+    stroke_rgb: tuple[int, int, int],
+    scale: float,
+) -> None:
+    """Render a sleek 4x-supersampled glowing beacon dot (replaces clunky multi-car sprites on map arcs)."""
+    box = max(44, int(round(64 * scale)))
+    ss = box * 4
+    sub = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(sub, "RGBA")
+    m = ss * 0.5
+    for mul, a_val in ((0.38, 42), (0.28, 78)):
+        r_g = ss * mul
+        d.ellipse([m - r_g, m - r_g, m + r_g, m + r_g], fill=(*glow_rgb, a_val))
+    r_out = ss * 0.175
+    d.ellipse([m - r_out, m - r_out, m + r_out, m + r_out], fill=(*stroke_rgb, 245))
+    r_in = ss * 0.125
+    d.ellipse([m - r_in, m - r_in, m + r_in, m + r_in], fill=(*core_rgb, 255))
+    r_spec = ss * 0.048
+    d.ellipse([m - r_spec, m - r_spec, m + r_spec, m + r_spec], fill=(255, 252, 244, 248))
+    tile = sub.resize((box, box), Image.Resampling.LANCZOS)
+    canvas.alpha_composite(tile, dest=(int(round(cx - box * 0.5)), int(round(cy - box * 0.5))))
+
+
 def _draw_articulated_train(
     canvas: Image.Image,
     arc_path: _ArcLengthPath,
@@ -3520,8 +3548,9 @@ def prefetch_google_earth_tiles(
         layers.append(("world_hillshade", spec["hillshade_url"], "RGB"))
     if spec.get("roads_overlay_url"):
         layers.append(("world_transportation", spec["roads_overlay_url"], "RGBA"))
+    lbl_cache_tag = f"labels_{use_style}"
     if spec.get("labels_overlay_url"):
-        layers.append(("world_places", spec["labels_overlay_url"], "RGBA"))
+        layers.append((lbl_cache_tag, spec["labels_overlay_url"], "RGBA"))
 
     seen: set[tuple[str, int, int, int]] = set()
     jobs: list[tuple[str, str, int, int, int, str]] = []
@@ -3540,7 +3569,14 @@ def prefetch_google_earth_tiles(
         for ltag, utpl, mode in layers:
             if ltag == "world_transportation" and z_tile < 8:
                 continue
-            zt = min(14, z_tile) if ltag in ("world_hillshade", "world_places") else (min(16 if use_style == "satellite_hybrid_4k" else 15, z_tile) if ltag == "world_transportation" else z_tile)
+            if ltag == "world_hillshade":
+                zt = min(14, z_tile)
+            elif ltag == lbl_cache_tag:
+                zt = min(16, z_tile)
+            elif ltag == "world_transportation":
+                zt = min(16 if use_style == "satellite_hybrid_4k" else 15, z_tile)
+            else:
+                zt = z_tile
             sc = 2.0 ** (zt - z_tile)
             n = 1 << zt
             tx0 = int(math.floor((cx_w - span_x * 0.52) * sc / 256.0))
@@ -3644,25 +3680,26 @@ def render_google_earth_flyover_frame(
 
     hs_url = spec.get("hillshade_url")
     hs_str = float(spec.get("hillshade_strength", 0.0) or 0.0)
-    if hs_url and hs_str > 0.01:
+    if hs_url and hs_str > 0.01 and not (use_style == "midnight_vox_atlas" and z_tile >= 11):
         z_hs = min(14, z_tile)
         hs_sc = 2.0 ** (z_hs - z_tile)
         hs_arr = _sample_pyramid_mosaic(
             "world_hillshade", hs_url, z_hs, wx0 * hs_sc, wy0 * hs_sc, wx1 * hs_sc, wy1 * hs_sc,
             ww, wh, mode="RGB", fill_val=(180, 180, 180), cache_dir=c_dir_p, allow_fetch=fetch_ok,
         )
-        eff_hs = hs_str * (0.45 if z_tile >= 11 else 0.90)
+        eff_hs = hs_str * (0.38 if z_tile >= 11 else 0.85)
         hs_luma = (0.299 * hs_arr[:, :, 0] + 0.587 * hs_arr[:, :, 1] + 0.114 * hs_arr[:, :, 2]) / 255.0
-        relief = np.clip(1.0 + eff_hs * ((hs_luma - 0.706) * 2.2), 0.74, 1.16)[..., None]
+        relief = np.clip(1.0 + eff_hs * ((hs_luma - 0.706) * 2.2), 0.74, 1.14)[..., None]
         base_rgb = np.clip(base_rgb * relief, 0, 255)
 
     if use_style in ("satellite_hybrid_4k", "aerial_relief_hybrid"):
         rgb_u8 = np.clip(base_rgb, 0, 255).astype(np.uint8)
         lab = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2LAB)
         l_ch, a_ch, b_ch = cv2.split(lab)
-        l_mix = cv2.addWeighted(l_ch, 0.80, cv2.createCLAHE(clipLimit=1.3, tileGridSize=(12, 12)).apply(l_ch), 0.20, 0)
+        l_mix = cv2.addWeighted(l_ch, 0.90, cv2.createCLAHE(clipLimit=1.05, tileGridSize=(12, 12)).apply(l_ch), 0.10, 0)
         hsv = cv2.cvtColor(cv2.cvtColor(cv2.merge((l_mix, a_ch, b_ch)), cv2.COLOR_LAB2RGB), cv2.COLOR_RGB2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.16, 0, 255)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.10, 0, 255)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 0.92, 0, 255)
         base_rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32)
 
     world_rgba = Image.fromarray(np.clip(base_rgb, 0, 255).astype(np.uint8)).convert("RGBA")
@@ -3704,10 +3741,10 @@ def render_google_earth_flyover_frame(
     world_rgba = Image.alpha_composite(world_rgba, Image.fromarray(route_arr))
 
     if spec.get("labels_overlay_url"):
-        z_lb = min(14, z_tile)
+        z_lb = min(16, z_tile)
         lb_sc = 2.0 ** (z_lb - z_tile)
         lb_arr = _sample_pyramid_mosaic(
-            "world_places", spec["labels_overlay_url"], z_lb,
+            f"labels_{use_style}", spec["labels_overlay_url"], z_lb,
             wx0 * lb_sc, wy0 * lb_sc, wx1 * lb_sc, wy1 * lb_sc, ww, wh,
             mode="RGBA", fill_val=(0, 0, 0, 0), cache_dir=c_dir_p, allow_fetch=fetch_ok,
         )
@@ -3742,8 +3779,16 @@ def render_google_earth_flyover_frame(
         alt_sin = math.sin(math.pi * leg_u)
         g_heading, _ = ground_arc_path.tangent_and_curvature(leg_u, window_px=24.0 * s_w)
         _draw_aircraft_ground_shadow(world_rgba, ground_head_pt[0] + 10.0 * s_w * alt_sin, ground_head_pt[1] + 12.0 * s_w * alt_sin, g_heading, veh_scale_w * (0.92 - 0.28 * alt_sin), int(round(125 - 65 * alt_sin)))
-    elif cur_mode == "train":
-        _draw_articulated_train(world_rgba, arc_path=ground_arc_path, u=leg_u, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w)
+    elif cur_mode in ("train", "walk"):
+        _draw_glow_beacon_dot(
+            world_rgba,
+            cx=head_pt[0],
+            cy=head_pt[1],
+            glow_rgb=spec["route_glow"],
+            core_rgb=spec["accent"],
+            stroke_rgb=stroke_col,
+            scale=veh_scale_w,
+        )
     elif cur_mode == "boat":
         _draw_boat_kelvin_wake(world_rgba, arc_path=ground_arc_path, u=leg_u, scale=veh_scale_w)
         _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode="boat", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=0.0)
