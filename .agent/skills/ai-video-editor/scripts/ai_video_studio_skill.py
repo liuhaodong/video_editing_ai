@@ -1435,6 +1435,23 @@ def cmd_apply_color_grade(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_apply_links_style(args: argparse.Namespace) -> int:
+    """Transform a project into Links pure-white exhibition stills, 880-nit HLG Nordic Clean color & ambient piano BGM."""
+    from video_editing_ai.planner.links_style import apply_links_cinema_style
+
+    proj = Path(args.project_dir).resolve()
+    res = apply_links_cinema_style(
+        project_dir=proj,
+        target_bgm_lufs=float(getattr(args, "bgm_lufs", -15.5)),
+        bgm_volume=float(getattr(args, "bgm_volume", 0.24)),
+        max_diptychs=int(getattr(args, "max_diptychs", 2)),
+        max_shutter_cues=int(getattr(args, "max_shutters", 18)),
+        offline_bgm_only=bool(getattr(args, "offline_bgm", False)),
+    )
+    print(json.dumps(res, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_recommend_color_grade(args: argparse.Namespace) -> int:
     """Analyze photometry + 8-stock lookbook via AI VLM/ranker and recommend optimal film stock & chapter looks."""
     from video_editing_ai.agents.plugins.color_grading_agent import CinemaColorGradingAgent
@@ -1667,9 +1684,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--photo-mode",
         default=None,
         help=(
-            "Primary photo mode (cinematic_depth_3d | split_diopter_focus | contact_sheet_zoom | "
-            "glassmorphic_pedestal | medium_format_slide | floating_tilt_plate | criterion_atelier_split | "
-            "parallax_gallery | editorial_magazine | curator_loupe | polaroid_scrapbook | "
+            "Primary photo mode (parallax_gallery | floating_tilt_plate | glassmorphic_pedestal | split_diopter_focus | "
+            "contact_sheet_zoom | medium_format_slide | criterion_atelier_split | "
+            "editorial_magazine | curator_loupe | polaroid_scrapbook | "
             "triptych_cinematic | cinema_anamorphic | diptych_frame | gallery_frame | full_bleed)"
         ),
     )
@@ -1838,10 +1855,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         default=None,
         help=(
-            "Updated photo mode (cinematic_depth_3d | split_diopter_focus | contact_sheet_zoom | "
-            "glassmorphic_pedestal | medium_format_slide | floating_tilt_plate | criterion_atelier_split | "
+            "Updated photo mode (parallax_gallery | floating_tilt_plate | glassmorphic_pedestal | split_diopter_focus | "
+            "contact_sheet_zoom | medium_format_slide | criterion_atelier_split | "
             "triptych_cinematic | polaroid_scrapbook | curator_loupe | editorial_magazine | cinema_anamorphic | "
-            "parallax_gallery | diptych_frame | gallery_frame | full_bleed)"
+            "diptych_frame | gallery_frame | full_bleed)"
         ),
     )
     p_ec.add_argument(
@@ -2140,6 +2157,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_rcg.add_argument("--apply", action="store_true", default=False, help="Also execute Stage 42 color_grader immediately with the recommendation")
     p_rcg.add_argument("--output", default=None, help="Optional output recommendation JSON path")
     p_rcg.set_defaults(func=cmd_recommend_color_grade)
+
+    # 29. apply-links-style
+    p_als = sub.add_parser(
+        "apply-links-style",
+        help="Transform timeline into Links cinema style (pure-white exhibition stills, 880-nit HLG Nordic Clean color & ambient piano/shutter soundscape)",
+    )
+    p_als.add_argument("--project-dir", required=True, help="Project workspace directory containing timeline.yaml")
+    p_als.add_argument("--bgm-lufs", type=float, default=-15.5, help="Target mastered ambient BGM LUFS (default -15.5)")
+    p_als.add_argument("--bgm-volume", type=float, default=0.24, help="Linear BGM mix volume (default 0.24)")
+    p_als.add_argument("--max-diptychs", type=int, default=2, help="Max 2-photo diptychs to retain before converting stills to pure-white exhibition plates")
+    p_als.add_argument("--max-shutters", type=int, default=18, help="Max mechanical camera shutter click SFX cues on still cuts")
+    p_als.add_argument("--offline-bgm", action="store_true", default=False, help="Skip network BGM downloads and master from local library/synthesis only")
+    p_als.set_defaults(func=cmd_apply_links_style)
 
     return parser
 

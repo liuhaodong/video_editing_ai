@@ -33,7 +33,7 @@ from ..hardware import (
     probe_hw_encoder as _hw_probe_hw_encoder,
     supports_videotoolbox_qscale as _hw_supports_videotoolbox_qscale,
 )
-from ..models.schema import EffectTrackItem, KenBurnsConfig, TransitionConfig
+from ..models.schema import DISABLED_PHOTO_MODE_FALLBACKS, EffectTrackItem, KenBurnsConfig, TransitionConfig
 from .color_grading import apply_color_grade_to_pil_image
 from .depth_parallax import (
     build_mpi_depth_layers,
@@ -153,11 +153,11 @@ def _build_matte_framed_rgba(
     fw = fg.width + (b_px + bevel_pad) * 2
     fh = fg.height + (b_px + bevel_pad) * 2
 
-    framed = Image.new("RGBA", (fw, fh), (247, 245, 240, 255))
+    framed = Image.new("RGBA", (fw, fh), (252, 252, 250, 255))
     f_draw = ImageDraw.Draw(framed)
     f_draw.rectangle(
         [b_px - 2, b_px - 2, fw - b_px + 1, fh - b_px + 1],
-        outline=(212, 208, 198, 230),
+        outline=(224, 222, 216, 220),
         width=max(1, int(round(1.5 * scale_factor))),
     )
     framed.paste(fg, (b_px + bevel_pad, b_px + bevel_pad))
@@ -490,6 +490,48 @@ def build_gallery_frame_image(
     return bg
 
 
+def build_links_white_matte_image(
+    src_path: str | Path,
+    width: int = 1920,
+    height: int = 1080,
+    border_px: Optional[int] = None,
+    raw_img: Optional[Image.Image] = None,
+) -> Image.Image:
+    """Create a pure #FFFFFF full-frame gallery exhibition plate with crisp symmetrical margins and subtle hairline."""
+    img = raw_img.convert("RGB") if raw_img is not None else _load_graded_photo_rgb(src_path)
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
+
+    scale_factor = width / 1920.0
+    margin_ratio = (
+        max(0.04, min(0.14, float(border_px) / 100.0))
+        if (border_px is not None and 4 <= border_px <= 14)
+        else 0.0
+    )
+    aspect = img.width / max(1, img.height)
+    if margin_ratio > 0.0:
+        max_w = int(round(width * (1.0 - 2.0 * margin_ratio)))
+        max_h = int(round(height * (1.0 - 2.0 * margin_ratio)))
+    elif aspect < 1.0:
+        max_w, max_h = int(round(width * 0.72)), int(round(height * 0.84))
+    else:
+        max_w, max_h = int(round(width * 0.84)), int(round(height * 0.82))
+
+    fg = img.copy()
+    fg.thumbnail((max(32, max_w), max(32, max_h)), Image.Resampling.LANCZOS)
+    px = (width - fg.width) // 2
+    py = (height - fg.height) // 2
+    canvas.paste(fg, (px, py))
+
+    draw = ImageDraw.Draw(canvas)
+    hair_w = max(1, int(round(1.0 * scale_factor)))
+    draw.rectangle(
+        [max(0, px - hair_w), max(0, py - hair_w), min(width - 1, px + fg.width), min(height - 1, py + fg.height)],
+        outline=(230, 232, 236),
+        width=hair_w,
+    )
+    return canvas
+
+
 def _resolve_kb_endpoints(
     kb: KenBurnsConfig,
 ) -> tuple[float, float, tuple[float, float], tuple[float, float]]:
@@ -549,15 +591,14 @@ def build_hdr_color_filters(
     src_primaries: str = "bt709",
     src_space: str = "bt709",
     is_log: bool = False,
-    diffuse_white_nits: float = 203.0,
+    diffuse_white_nits: float = 880.0,
     use_zscale: Optional[bool] = None,
 ) -> list[str]:
     """
     Build 10-bit BT.2020 HLG HDR color-space filters:
     - Native HLG (arib-std-b67): passthrough to p010le with BT.2020 HLG VUI tags.
-    - SDR / sRGB / Log -> HLG with zscale: maps SDR peak white to HLG diffuse white (~203 nits / ~75% HLG signal).
-    - Fallback without zscale: applies calibrated diffuse-white exposure/gamma curve prior to setparams so
-      8-bit SDR highlights and Gallery Frame borders never clip harshly at 1000 nits.
+    - SDR / sRGB / Log -> HLG with zscale: maps SDR peak white to HLG diffuse white (~880 nits / ~98% HLG signal).
+    - Fallback without zscale: scales SDR signal ceiling cleanly prior to setparams.
     """
     filters: list[str] = []
     trc_norm = (src_trc or "709").strip().lower()
@@ -584,7 +625,7 @@ def build_hdr_color_filters(
 
     z_prim_in = "2020" if "2020" in (src_primaries or "").lower() else "709"
     z_mat_in = "2020_ncl" if "2020" in (src_space or "").lower() else "709"
-    npl_val = max(100, min(400, int(round(diffuse_white_nits))))
+    npl_val = max(100, min(1000, int(round(diffuse_white_nits))))
 
     if zscale_ok:
         if z_trc_in == "smpte2084":
@@ -598,11 +639,11 @@ def build_hdr_color_filters(
                 f"primaries=2020:transfer=arib-std-b67:matrix=2020_ncl:range=limited:npl={npl_val}"
             )
     else:
-        # Calibrated SDR -> HLG diffuse-white (~75% signal / ~203 nits) curve prior to setparams fallback
+        romax = 0.75 if npl_val <= 220 else min(0.98, round(0.75 + (npl_val - 203.0) / 677.0 * 0.23, 2))
         filters.extend(
             [
-                "colorlevels=romax=0.75:gomax=0.75:bomax=0.75",
-                "eq=gamma=1.14:contrast=0.96",
+                f"colorlevels=romax={romax:.2f}:gomax={romax:.2f}:bomax={romax:.2f}",
+                "eq=gamma=1.08:contrast=0.98" if romax > 0.85 else "eq=gamma=1.14:contrast=0.96",
             ]
         )
 
@@ -613,6 +654,37 @@ def build_hdr_color_filters(
         ]
     )
     return filters
+
+
+def build_rgba_hdr_overlay_filter(
+    in_label: str,
+    out_label: str,
+    tag: str,
+    fade_chain: str = "",
+    pts_chain: str = "",
+    diffuse_white_nits: float = 880.0,
+) -> str:
+    """
+    Convert an sRGB RGBA overlay stream to 10-bit BT.2020 HLG (yuva444p10le) while preserving straight alpha.
+    Prevents white titles, badges, and paired-photo frames from dimming when composited onto HLG base timelines.
+    """
+    npl_val = max(100, min(1000, int(round(diffuse_white_nits))))
+    head_parts = ["format=rgba"]
+    if fade_chain:
+        head_parts.append(fade_chain)
+    head = ",".join(head_parts)
+    if not has_ffmpeg_filter("zscale"):
+        tail = f",{pts_chain}" if pts_chain else ""
+        return f"{in_label}{head}{tail}{out_label}"
+
+    tail = f",{pts_chain}" if pts_chain else ""
+    return (
+        f"{in_label}{head},split=2[{tag}_rgb][{tag}_a];"
+        f"[{tag}_rgb]zscale=primariesin=709:transferin=iec61966-2-1:matrixin=709:"
+        f"primaries=2020:transfer=arib-std-b67:matrix=2020_ncl:range=limited:npl={npl_val},format=yuv444p10le[{tag}_hlg];"
+        f"[{tag}_a]alphaextract,format=gray10le[{tag}_a10];"
+        f"[{tag}_hlg][{tag}_a10]alphamerge{tail}{out_label}"
+    )
 
 
 def get_video_encoder_args(hdr: bool = True, force_software: bool = False) -> list[str]:
@@ -1835,9 +1907,16 @@ def _prepare_photo_scene_context(
     s_zoom, e_zoom, (sx, sy), (ex, ey) = _resolve_kb_endpoints(kb)
     resample_mode = Image.Resampling.BILINEAR if width >= 3840 else Image.Resampling.BICUBIC
 
-    mode = kb.mode
-    # editorial_magazine renders its own right-hand monograph column so suppress the bottom lower-third card
-    has_card = bool(kb.caption_title and kb.caption_title.strip()) and (mode != "editorial_magazine")
+    # Route disabled neural-depth modes cleanly to crisp parallax/perspective alternatives
+    mode = DISABLED_PHOTO_MODE_FALLBACKS.get(kb.mode, kb.mode)
+    if mode == "links_white_matte":
+        s_zoom = 1.0
+        e_zoom = min(1.018, max(1.0, e_zoom))
+        sx, sy, ex, ey = 0.5, 0.5, 0.5, 0.5
+    # editorial_magazine and links_white_matte never overlay dark bottom lower-third cards
+    has_card = bool(kb.caption_title and kb.caption_title.strip()) and (
+        mode not in ("editorial_magazine", "links_white_matte")
+    )
     card_fg: Optional[Image.Image] = None
     card_mask: Optional[Image.Image] = None
     card_tint: Optional[Image.Image] = None
@@ -2093,10 +2172,14 @@ def _prepare_photo_scene_context(
         )
 
     else:
-        oversample = 1.10 if width >= 3840 else 1.20
+        oversample = 1.02 if mode == "links_white_matte" else (1.10 if width >= 3840 else 1.20)
         work_w = int(round(width * oversample))
         work_h = int(round(height * oversample))
-        if mode == "gallery_frame":
+        if mode == "links_white_matte":
+            ctx["base_static_img"] = build_links_white_matte_image(
+                photo_path, width=work_w, height=work_h, border_px=kb.border_px, raw_img=raw_primary
+            )
+        elif mode == "gallery_frame":
             ctx["base_static_img"] = build_gallery_frame_image(
                 photo_path, width=work_w, height=work_h, border_px=kb.border_px, raw_img=raw_primary
             )
@@ -2763,15 +2846,24 @@ def build_segment_overlay_filtergraph(
             next_v = f"[svt{t_idx + 1}]"
             if t_ent.get("kind") == "static_png":
                 extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(ov_path)])
-                filter_parts.append(
-                    f"[{in_idx}:v]format=rgba,"
-                    f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
-                    f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
-                    f"setpts=PTS+{local_st:.3f}/TB{ov_label}"
-                )
+                fade_chain = f"fade=t=in:st=0:d={fi:.3f}:alpha=1,fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1"
             else:
                 extra_inputs.extend(["-i", str(ov_path)])
-                filter_parts.append(f"[{in_idx}:v]format=rgba,setpts=PTS+{local_st:.3f}/TB{ov_label}")
+                fade_chain = ""
+            pts_chain = f"setpts=PTS+{local_st:.3f}/TB"
+            if hdr:
+                filter_parts.append(
+                    build_rgba_hdr_overlay_filter(
+                        f"[{in_idx}:v]",
+                        ov_label,
+                        tag=f"sgov{t_idx}",
+                        fade_chain=fade_chain,
+                        pts_chain=pts_chain,
+                    )
+                )
+            else:
+                chain = f"format=rgba,{fade_chain},{pts_chain}" if fade_chain else f"format=rgba,{pts_chain}"
+                filter_parts.append(f"[{in_idx}:v]{chain}{ov_label}")
             filter_parts.append(
                 f"{cur_v}{ov_label}overlay=x={rx}:y={ry}:format={ov_fmt}:eof_action=pass:"
                 f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
@@ -2787,12 +2879,20 @@ def build_segment_overlay_filtergraph(
             fo_st = max(0.0, t_dur - fo)
             ov_label = f"[sov{t_idx}]"
             next_v = f"[svt{t_idx + 1}]"
-            filter_parts.append(
-                f"[{in_idx}:v]format=rgba,"
-                f"fade=t=in:st=0:d={fi:.3f}:alpha=1,"
-                f"fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1,"
-                f"setpts=PTS+{local_st:.3f}/TB{ov_label}"
-            )
+            fade_chain = f"fade=t=in:st=0:d={fi:.3f}:alpha=1,fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1"
+            pts_chain = f"setpts=PTS+{local_st:.3f}/TB"
+            if hdr:
+                filter_parts.append(
+                    build_rgba_hdr_overlay_filter(
+                        f"[{in_idx}:v]",
+                        ov_label,
+                        tag=f"sgov{t_idx}",
+                        fade_chain=fade_chain,
+                        pts_chain=pts_chain,
+                    )
+                )
+            else:
+                filter_parts.append(f"[{in_idx}:v]format=rgba,{fade_chain},{pts_chain}{ov_label}")
             filter_parts.append(
                 f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:"
                 f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
@@ -3309,26 +3409,23 @@ def render_photo_effects_showcase_sheet(
     tert_str = str(tertiary_path) if (tertiary_path and Path(tertiary_path).exists()) else None
 
     showcase_specs: list[tuple[str, str, str]] = [
-        ("cinematic_depth_3d", "halation_bloom_35mm", "1. Neural 4-Layer MPI Depth + 35mm Halation"),
-        ("aperture_rack_focus", "museum_spotlight", "2. Continuous Depth Rack Focus + Spotlight"),
-        ("dolly_zoom_vertigo", "anamorphic_streak", "3. Optical Vertigo Counter-Dolly + Streak"),
+        ("parallax_gallery", "golden_light_leak", "1. Calmed Museum Parallax + Light Leak"),
+        ("floating_tilt_plate", "fine_art_rag_texture", "2. 3D Floating Tilt Plate + Rag Paper"),
+        ("glassmorphic_pedestal", "none", "3. Frosted Glassmorphic Vitrine"),
         ("archival_color_bloom", "caustic_water_shimmer", "4. Silver-Gelatin Color Bloom + Caustics"),
         ("contact_sheet_zoom", "none", "5. Darkroom Contact Sheet Push-In"),
         ("split_diopter_focus", "prism_chromatic_edge", "6. Optical Split Diopter + Prism Edge"),
-        ("glassmorphic_pedestal", "none", "7. Frosted Glassmorphic Vitrine"),
-        ("medium_format_slide", "velvet_vignette_rembrandt", "8. 120 Medium-Format Lightbox Slide"),
-        ("floating_tilt_plate", "fine_art_rag_texture", "9. 3D Floating Tilt Plate + Rag Paper"),
-        ("criterion_atelier_split", "none", "10. Criterion 3-Viewport Atelier Grid"),
-        ("triptych_cinematic", "none", "11. 3-Panel Staggered Triptych"),
-        ("polaroid_scrapbook", "nostalgic_film_grain", "12. Vintage Polaroid + 35mm Grain"),
-        ("curator_loupe", "museum_spotlight", "13. 1.65x Optical Curator Loupe"),
-        ("editorial_magazine", "none", "14. 62/38 Editorial Magazine Spread"),
-        ("cinema_anamorphic", "anamorphic_streak", "15. 2.39:1 Anamorphic + Flare Streak"),
-        ("parallax_gallery", "golden_light_leak", "16. Calmed Museum Parallax + Light Leak"),
-        ("diptych_frame", "golden_light_leak", "17. Side-by-Side Diptych Split-Screen"),
-        ("gallery_frame", "champagne_bokeh", "18. Classic Gallery Frame + Bokeh"),
-        ("full_bleed", "velvet_vignette_rembrandt", "19. Full-Bleed Ken Burns + Chiaroscuro"),
-        ("cinematic_depth_3d", "caustic_water_shimmer", "20. Neural Depth Parallax + Aqua Caustics"),
+        ("medium_format_slide", "velvet_vignette_rembrandt", "7. 120 Medium-Format Lightbox Slide"),
+        ("criterion_atelier_split", "none", "8. Criterion 3-Viewport Atelier Grid"),
+        ("triptych_cinematic", "none", "9. 3-Panel Staggered Triptych"),
+        ("polaroid_scrapbook", "nostalgic_film_grain", "10. Vintage Polaroid + 35mm Grain"),
+        ("curator_loupe", "museum_spotlight", "11. 1.65x Optical Curator Loupe"),
+        ("editorial_magazine", "none", "12. 62/38 Editorial Magazine Spread"),
+        ("cinema_anamorphic", "anamorphic_streak", "13. 2.39:1 Anamorphic + Flare Streak"),
+        ("diptych_frame", "golden_light_leak", "14. Side-by-Side Diptych Split-Screen"),
+        ("gallery_frame", "champagne_bokeh", "15. Classic Gallery Frame + Bokeh"),
+        ("full_bleed", "velvet_vignette_rembrandt", "16. Full-Bleed Ken Burns + Chiaroscuro"),
+        ("links_white_matte", "none", "17. Links Pure-White Exhibition Matte"),
     ]
 
     cols, rows = 4, 5

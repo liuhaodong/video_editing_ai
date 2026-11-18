@@ -282,56 +282,49 @@ def generate_intake_questions(
             id="photo_effects_suite",
             question="3. Premium Photo Presentation Effects Suite (Multi-Select — Pick all styles to choreograph across chapters)",
             options=[
-                "cinematic_depth_3d (Recommended) — Neural 4-Layer MPI Depth Parallax with Disocclusion Fill & Restrained Stereo Drift",
-                "aperture_rack_focus (Recommended) — Continuous Depth-Guided Optical Aperture Focus Pull",
-                "dolly_zoom_vertigo (Recommended) — Optical Hitchcock Counter-Dolly Neural Depth Reveal for Landmarks",
-                "archival_color_bloom (Recommended) — Silver-Gelatin Selenium B&W -> Depth-Driven Living Color Bloom",
+                "parallax_gallery (Recommended) — Calmed 2.5D Museum Float Double Archival Matte Frame",
+                "floating_tilt_plate (Recommended) — True 3D Perspective Homography Orbit Plate with Detached Floor Shadow",
+                "glassmorphic_pedestal (Recommended) — Apple VisionOS / Museum Frosted Acrylic Vitrine Card with Live Backdrop Blur",
+                "archival_color_bloom (Recommended) — Silver-Gelatin Selenium B&W -> Living Color Bloom",
                 "split_diopter_focus (Recommended) — A24 Split-Diopter 54/46 Wide Context + 2.2x Optical Macro Detail",
                 "contact_sheet_zoom (Recommended) — Magnum 3x2 Darkroom Contact Sheet Proof -> Eased Push-In onto Hero Frame",
-                "glassmorphic_pedestal (Recommended) — Apple VisionOS / Museum Frosted Acrylic Vitrine Card with Live Backdrop Blur",
                 "medium_format_slide (Recommended) — Hasselblad 120 Transparency Slide Mount with V-Notches & Archival Rebate Stamp",
-                "floating_tilt_plate (Recommended) — True 3D Perspective Homography Orbit Plate with Detached Floor Shadow",
                 "criterion_atelier_split (Recommended) — Criterion / Kinfolk 3-Viewport Asymmetric Bento Exhibition Grid",
                 "triptych_cinematic (Recommended) — 3-Panel Staggered Storyboard Triptych (Culinary Courses & Architectural Sequences)",
                 "polaroid_scrapbook (Recommended) — Tilted Vintage Instant-Film Polaroid Stack (Candid Selfies, Café & Keepsakes)",
                 "curator_loupe (Recommended) — 1.65x Optical Magnifying Glass Spotlight (Architectural Carvings, Menus & Artworks)",
                 "editorial_magazine (Recommended) — Asymmetric 62/38 Luxury Architectural Monograph Spread (Chapter Openers)",
                 "cinema_anamorphic (Recommended) — 2.39:1 CinemaScope Widescreen Letterbox with 35mm Highlight Halation",
-                "parallax_gallery (Recommended) — Calmed 2.5D Museum Float Double Archival Matte Frame",
                 "diptych_frame (Recommended) — Side-by-Side Vertical Portrait Diptych Split-Screen",
                 "gallery_frame — Classic Static Floating Gallery Frame",
                 "full_bleed — Full-Screen 16:9 Crop with Classic Ken Burns Pan/Zoom",
             ],
             default_answer=(
-                "cinematic_depth_3d,aperture_rack_focus,dolly_zoom_vertigo,archival_color_bloom,"
-                "split_diopter_focus,contact_sheet_zoom,glassmorphic_pedestal,"
-                "medium_format_slide,floating_tilt_plate,criterion_atelier_split,triptych_cinematic,"
-                "polaroid_scrapbook,curator_loupe,editorial_magazine,cinema_anamorphic,parallax_gallery,diptych_frame"
+                "parallax_gallery,floating_tilt_plate,glassmorphic_pedestal,archival_color_bloom,"
+                "split_diopter_focus,contact_sheet_zoom,medium_format_slide,criterion_atelier_split,"
+                "triptych_cinematic,polaroid_scrapbook,curator_loupe,editorial_magazine,cinema_anamorphic,diptych_frame"
             ),
             is_multi_select=True,
             recommended_options=[
-                "cinematic_depth_3d",
-                "aperture_rack_focus",
-                "dolly_zoom_vertigo",
+                "parallax_gallery",
+                "floating_tilt_plate",
+                "glassmorphic_pedestal",
                 "archival_color_bloom",
                 "split_diopter_focus",
                 "contact_sheet_zoom",
-                "glassmorphic_pedestal",
                 "medium_format_slide",
-                "floating_tilt_plate",
                 "criterion_atelier_split",
                 "triptych_cinematic",
                 "polaroid_scrapbook",
                 "curator_loupe",
                 "editorial_magazine",
                 "cinema_anamorphic",
-                "parallax_gallery",
                 "diptych_frame",
             ],
             recommendation_rationale=(
-                "Combining all 17 curated cinema-grade modes lets the Photo Curator & VFX Designer match every photo's geometry "
-                "(Neural 4-layer MPI Depth Parallax, Continuous Aperture Rack-Focus, Vertigo Counter-Dolly, Archival Color Bloom, "
-                "Split-Diopter macro, Contact-Sheet proofs, Glassmorphic Vitrine, Medium-Format 120 Slides & Criterion Bento Grids) cleanly."
+                "Combining these 14 curated cinema-grade modes lets the Photo Curator & VFX Designer match every photo's geometry "
+                "(2.5D Museum Float, 3D Floating Tilt Plate, Glassmorphic Vitrine, Archival Color Bloom, Split-Diopter macro, "
+                "Contact-Sheet proofs, Medium-Format 120 Slides & Criterion Bento Grids) cleanly without depth-cutout artifacts."
             ),
         ),
         InterviewQuestion(
@@ -377,28 +370,25 @@ def generate_intake_questions(
             id="photo_mode",
             question="5. Primary Anchor Photo Mode (Default fallback when a single mode is used)",
             options=[
-                "cinematic_depth_3d (Recommended) — Neural 4-Layer MPI Depth Parallax with Disocclusion Fill + Frosted Documentary Card",
-                "aperture_rack_focus — Continuous Depth-Guided Optical Aperture Focus Pull",
-                "dolly_zoom_vertigo — Optical Hitchcock Counter-Dolly Neural Depth Reveal",
-                "archival_color_bloom — Silver-Gelatin B&W -> Living Color Depth Bloom",
+                "parallax_gallery (Recommended) — Calmed 2.5D Museum Float Matte Frame + Frosted Documentary Card",
+                "floating_tilt_plate — True 3D Perspective Homography Orbit Plate",
+                "glassmorphic_pedestal — VisionOS Frosted Acrylic Vitrine Card",
+                "archival_color_bloom — Silver-Gelatin B&W -> Living Color Bloom",
                 "split_diopter_focus — A24 Split-Diopter 54/46 Wide Context + 2.2x Macro Detail",
                 "contact_sheet_zoom — Magnum 3x2 Darkroom Contact Sheet Proof Push-In",
-                "glassmorphic_pedestal — VisionOS Frosted Acrylic Vitrine Card",
                 "medium_format_slide — Hasselblad 120 Transparency Slide Mount",
-                "floating_tilt_plate — True 3D Perspective Homography Orbit Plate",
                 "criterion_atelier_split — Criterion 3-Viewport Asymmetric Bento Grid",
-                "parallax_gallery — Calmed 2.5D Museum Float Matte Frame",
                 "editorial_magazine — Asymmetric 62/38 Luxury Magazine Monograph Spread",
                 "polaroid_scrapbook — Vintage Instant-Film Polaroid Scrapbook",
                 "cinema_anamorphic — 2.39:1 CinemaScope Widescreen Letterbox",
                 "gallery_frame — Classic Floating Gallery Frame",
                 "full_bleed — Full-Screen 16:9 Ken Burns",
             ],
-            default_answer="cinematic_depth_3d",
+            default_answer="parallax_gallery",
             is_multi_select=False,
-            recommended_options=["cinematic_depth_3d"],
+            recommended_options=["parallax_gallery"],
             recommendation_rationale=(
-                "Uses 3-plane depth parallax as the primary anchor while rotating through your multi-selected effects suite."
+                "Uses calm 2.5D Museum Parallax as the primary anchor while rotating through your multi-selected effects suite."
             ),
         ),
         InterviewQuestion(
@@ -496,17 +486,14 @@ def _resolve_photo_suite_answers(
         q_by_id["photo_effects_suite"].recommended_options
         if "photo_effects_suite" in q_by_id
         else [
-            "cinematic_depth_3d",
-            "aperture_rack_focus",
-            "dolly_zoom_vertigo",
+            "parallax_gallery",
+            "floating_tilt_plate",
+            "glassmorphic_pedestal",
             "archival_color_bloom",
             "split_diopter_focus",
             "contact_sheet_zoom",
-            "glassmorphic_pedestal",
             "medium_format_slide",
-            "floating_tilt_plate",
             "criterion_atelier_split",
-            "parallax_gallery",
             "editorial_magazine",
             "diptych_frame",
             "triptych_cinematic",
@@ -515,11 +502,18 @@ def _resolve_photo_suite_answers(
             "cinema_anamorphic",
         ]
     )
-    enabled_modes = _extract_multi_codes(
+    from ..models.schema import DISABLED_PHOTO_MODE_FALLBACKS
+
+    raw_modes = _extract_multi_codes(
         answers.get("photo_effects_suite", ""),
         VALID_PHOTO_MODES,
         default_fx_suite,
     )
+    enabled_modes: list[str] = []
+    for m_c in raw_modes:
+        mapped = DISABLED_PHOTO_MODE_FALLBACKS.get(m_c, m_c)
+        if mapped not in enabled_modes:
+            enabled_modes.append(mapped)
     default_finishers = (
         q_by_id["photo_overlay_finishers"].recommended_options
         if "photo_overlay_finishers" in q_by_id
@@ -905,8 +899,8 @@ def refine_intake_interactively(
         answers["photo_mode"] = "criterion_atelier_split"
         refinements_applied.append("Primary Photo Mode -> Criterion 3-Viewport Bento Exhibition Grid")
     elif "3d depth" in msg_low or "cinematic_depth_3d" in msg_low:
-        answers["photo_mode"] = "cinematic_depth_3d"
-        refinements_applied.append("Primary Photo Mode -> 3D Depth-Map Parallax + Bokeh")
+        answers["photo_mode"] = "floating_tilt_plate"
+        refinements_applied.append("Primary Photo Mode -> 3D Projective Perspective Orbit Plate")
     elif "editorial_magazine" in msg_low or "editorial magazine" in msg_low:
         answers["photo_mode"] = "editorial_magazine"
         refinements_applied.append("Primary Photo Mode -> Vogue/Kinfolk Editorial Spread")

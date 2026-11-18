@@ -41,7 +41,6 @@ class VFXAgent(BaseEditingAgent):
                 and item.ken_burns.mode
                 in (
                     "curator_loupe",
-                    "cinematic_depth_3d",
                     "split_diopter_focus",
                     "glassmorphic_pedestal",
                     "floating_tilt_plate",

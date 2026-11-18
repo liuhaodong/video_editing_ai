@@ -546,9 +546,6 @@ class PhotoCuratorAgent(BaseEditingAgent):
         # and the client's multi-select photo_effects_suite & photo_overlay_finishers from CreativeBrief
         active_selects = [it for it in selected_items if it.subclip_id not in absorbed_partner_ids]
         default_fx_map: dict[str, str] = {
-            "cinematic_depth_3d": "halation_bloom_35mm",
-            "aperture_rack_focus": "museum_spotlight",
-            "dolly_zoom_vertigo": "anamorphic_streak",
             "archival_color_bloom": "nostalgic_film_grain",
             "parallax_gallery": "museum_spotlight",
             "editorial_magazine": "fine_art_rag_texture",
@@ -565,17 +562,22 @@ class PhotoCuratorAgent(BaseEditingAgent):
             "gallery_frame": "museum_spotlight",
             "full_bleed": "golden_light_leak",
         }
+        from ..models.schema import DISABLED_PHOTO_MODE_FALLBACKS, DISABLED_PHOTO_MODES
+
+        disabled_set = set(DISABLED_PHOTO_MODES)
         client_modes = [
-            m for m in (brief.enabled_photo_modes if brief and brief.enabled_photo_modes else [])
+            DISABLED_PHOTO_MODE_FALLBACKS.get(m, m)
+            for m in (brief.enabled_photo_modes if brief and brief.enabled_photo_modes else [])
             if m != "diptych_frame"
         ]
+        # Preserve order and deduplicate after fallback mapping
+        client_modes = list(dict.fromkeys(m for m in client_modes if m not in disabled_set))
         if not client_modes:
             client_modes = [
-                "cinematic_depth_3d",
-                "aperture_rack_focus",
-                "dolly_zoom_vertigo",
-                "archival_color_bloom",
                 "parallax_gallery",
+                "floating_tilt_plate",
+                "glassmorphic_pedestal",
+                "archival_color_bloom",
                 "editorial_magazine",
                 "curator_loupe",
                 "polaroid_scrapbook",
@@ -583,9 +585,7 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 "cinema_anamorphic",
                 "contact_sheet_zoom",
                 "split_diopter_focus",
-                "glassmorphic_pedestal",
                 "medium_format_slide",
-                "floating_tilt_plate",
                 "criterion_atelier_split",
             ]
         client_overlays = set(brief.enabled_overlay_fx if brief and brief.enabled_overlay_fx else default_fx_map.values())
@@ -627,37 +627,31 @@ class PhotoCuratorAgent(BaseEditingAgent):
             blob_low = f"{sel_it.annotation_title} {sel_it.annotation_subtitle} {sel_it.subject_category}".lower()
             if any(k in blob_low for k in ("mosaic", "sculpture", "relief", "painting", "stained glass", "dome", "carving", "fresco", "detail", "masterpiece")):
                 semantic_prefs = [
-                    "aperture_rack_focus",
                     "split_diopter_focus",
                     "curator_loupe",
                     "glassmorphic_pedestal",
                     "floating_tilt_plate",
-                    "cinematic_depth_3d",
                     "parallax_gallery",
                 ]
             elif any(k in blob_low for k in ("culinary", "bakery", "cheese", "café", "cafe", "menu", "dining", "food", "pastry", "candid", "smile", "selfie")):
                 semantic_prefs = [
                     "polaroid_scrapbook",
                     "medium_format_slide",
-                    "aperture_rack_focus",
                     "contact_sheet_zoom",
-                    "cinematic_depth_3d",
                     "criterion_atelier_split",
                     "parallax_gallery",
+                    "floating_tilt_plate",
                 ]
             elif any(k in blob_low for k in ("ruin", "temple", "heritage", "historic", "museum", "ancient", "cathedral", "palace", "arch", "monument")):
                 semantic_prefs = [
                     "archival_color_bloom",
-                    "dolly_zoom_vertigo",
                     "editorial_magazine",
-                    "cinematic_depth_3d",
                     "floating_tilt_plate",
                     "split_diopter_focus",
+                    "parallax_gallery",
                 ]
             elif sel_it.subject_category == "family_portrait" or sel_it.portrait_warmth_score >= 8.9:
                 semantic_prefs = [
-                    "cinematic_depth_3d",
-                    "aperture_rack_focus",
                     "medium_format_slide",
                     "floating_tilt_plate",
                     "polaroid_scrapbook",
@@ -666,18 +660,16 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 ]
             elif any(k in blob_low for k in ("panorama", "skyline", "river", "waterfront", "twilight", "horizon", "illuminated", "night", "ocean", "beach", "coast")):
                 semantic_prefs = [
-                    "dolly_zoom_vertigo",
                     "cinema_anamorphic",
-                    "cinematic_depth_3d",
                     "archival_color_bloom",
                     "split_diopter_focus",
                     "floating_tilt_plate",
                     "editorial_magazine",
+                    "parallax_gallery",
                 ]
             else:
                 semantic_prefs = [
                     "criterion_atelier_split",
-                    "aperture_rack_focus",
                     "contact_sheet_zoom",
                     "editorial_magazine",
                     "glassmorphic_pedestal",

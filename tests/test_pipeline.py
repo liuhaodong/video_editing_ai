@@ -757,6 +757,7 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
         ("parallax_gallery", "golden_light_leak"),
         ("gallery_frame", "prism_chromatic_edge"),
         ("full_bleed", "caustic_water_shimmer"),
+        ("links_white_matte", "none"),
     ]
     assert {m for m, _ in modes_and_finishers} == set(VALID_PHOTO_MODES)
     covered_fx = {fx for _, fx in modes_and_finishers}
@@ -847,14 +848,15 @@ def test_ai_creative_intelligence_and_interactive_multi_choice_intake(
     # 2. Interactive Refinement with Multi-Select Photo Effects & Finishers
     ref = refine_intake_interactively(
         media_dir=sample_media_dir,
-        user_message="Apply all Director recommendations with 3D depth parallax and curator loupe",
+        user_message="Apply all Director recommendations with parallax gallery and curator loupe",
         interview_answers={
-            "photo_effects_suite": "cinematic_depth_3d, curator_loupe, polaroid_scrapbook",
+            "photo_effects_suite": "parallax_gallery, floating_tilt_plate, curator_loupe, polaroid_scrapbook",
             "photo_overlay_finishers": "golden_light_leak, museum_spotlight",
         },
     )
     draft = ref["draft_brief"]
-    assert "cinematic_depth_3d" in draft["enabled_photo_modes"]
+    assert "parallax_gallery" in draft["enabled_photo_modes"]
+    assert "floating_tilt_plate" in draft["enabled_photo_modes"]
     assert "curator_loupe" in draft["enabled_photo_modes"]
     assert "golden_light_leak" in draft["enabled_overlay_fx"]
     assert "recommended_duration_sec" in draft["director_recommendations"]
@@ -867,7 +869,7 @@ def test_ai_creative_intelligence_and_interactive_multi_choice_intake(
         project_dir=proj_dir,
         user_prompt="Paris family adventure with rich captions and transitions",
         interview_answers={
-            "photo_effects_suite": "cinematic_depth_3d, curator_loupe, polaroid_scrapbook, editorial_magazine",
+            "photo_effects_suite": "parallax_gallery, curator_loupe, polaroid_scrapbook, editorial_magazine",
             "photo_overlay_finishers": "golden_light_leak, museum_spotlight",
         },
         width=640,

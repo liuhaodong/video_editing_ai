@@ -68,6 +68,18 @@ VALID_PHOTO_MODES: tuple[str, ...] = (
     "links_white_matte",
 )
 
+# Depth-warp photo modes disabled due to unnatural neural-depth cutout/bokeh artifacts
+DISABLED_PHOTO_MODES: tuple[str, ...] = (
+    "cinematic_depth_3d",
+    "aperture_rack_focus",
+    "dolly_zoom_vertigo",
+)
+DISABLED_PHOTO_MODE_FALLBACKS: dict[str, str] = {
+    "cinematic_depth_3d": "parallax_gallery",
+    "aperture_rack_focus": "floating_tilt_plate",
+    "dolly_zoom_vertigo": "cinema_anamorphic",
+}
+
 FilmStockLookType = Literal[
     "archival_kodak_2383",
     "fuji_eterna_soft",
@@ -455,9 +467,6 @@ class CreativeBrief(BaseModel):
     )
     enabled_photo_modes: list[PhotoModeType] = Field(
         default_factory=lambda: [
-            "cinematic_depth_3d",
-            "aperture_rack_focus",
-            "dolly_zoom_vertigo",
             "archival_color_bloom",
             "triptych_cinematic",
             "polaroid_scrapbook",
@@ -1410,6 +1419,7 @@ class ClipColorGrade(BaseModel):
     gain_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0)
     exposure_ev: float = 0.0
     black_lift: float = 0.0
+    white_point: float = Field(default=1.0, ge=0.50, le=1.0)
     contrast: float = 1.04
     saturation: float = 1.04
     vibrance: float = 0.0
