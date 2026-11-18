@@ -18,6 +18,7 @@ from .titles import (
 
 FULL_CANVAS_STYLES: tuple[str, ...] = (
     "opening_card",
+    "hero_opening_card",
     "closing_card",
     "knockout_stencil_opening",
     "credits_colophon_card",

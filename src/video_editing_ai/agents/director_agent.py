@@ -932,7 +932,10 @@ class ProductionDirectorAgent(BaseEditingAgent):
         pacing_clean = True if pa is None else bool(pa.passed_brief_compliance)
         qc_clean = True if qc is None else bool(qc.passed_qc)
 
-        has_opening = any(t.style in ("opening_card", "knockout_stencil_opening") for t in tl.title_track)
+        has_opening = any(
+            t.style in ("opening_card", "hero_opening_card", "knockout_stencil_opening")
+            for t in tl.title_track
+        )
         has_closing = any(t.style in ("closing_card", "credits_colophon_card") for t in tl.title_track)
         has_v2_cutaways = len(tl.broll_track) > 0
         has_subtitles = len(tl.subtitles.items) > 0

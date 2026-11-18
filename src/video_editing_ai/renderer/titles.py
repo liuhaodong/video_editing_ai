@@ -10,12 +10,12 @@ import textwrap
 from typing import Any, Optional
 
 import numpy as np
-from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 from ..models.schema import TitleOverlayItem
 
-# ~75% HLG signal (~203 nits diffuse white) prevents painful 1000-nit text bloom on HDR displays
-HDR_DIFFUSE_WHITE_PEAK_RGB = 192
+# Near-peak HLG diffuse white (242/255) preserves crisp whites after sRGB->BT.2020 HLG scaling without hard clipping
+HDR_DIFFUSE_WHITE_PEAK_RGB = 242
 HDR_MAX_SHADOW_ALPHA = 152
 
 LOCALIZED_CARD_STYLES: tuple[str, ...] = (
@@ -133,6 +133,23 @@ THEME_SPECS: dict[str, dict[str, Any]] = {
         "glass_default": True,
         "fcpxml_font": "Avenir Next",
     },
+    "links_minimal": {
+        "primary_tier": "sans",
+        "primary_bold": False,
+        "secondary_tier": "sans",
+        "overline_tier": "sans",
+        "default_tracking_px": 11.0,
+        "overline_tracking_px": 12.5,
+        "accent_hex": "#F4F7FA",
+        "title_rgb": (252, 253, 255),
+        "sub_rgb": (220, 228, 236),
+        "card_fill": (8, 10, 14, 96),
+        "glass_tint": (8, 10, 14, 92),
+        "border_rgba": (255, 255, 255, 0),
+        "stencil_matte": (36, 42, 50, 224),
+        "glass_default": False,
+        "fcpxml_font": "Avenir Next",
+    },
 }
 
 
@@ -210,6 +227,8 @@ def _load_font_tier(
                 "/System/Library/Fonts/STHeiti Medium.ttc",
                 "/System/Library/Fonts/Hiragino Sans GB.ttc",
                 "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                "C:/Windows/Fonts/yumindb.ttf" if bold else "C:/Windows/Fonts/yumin.ttf",
+                "C:/Windows/Fonts/BIZ-UDMinchoM.ttc",
                 "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
                 "C:/Windows/Fonts/simsun.ttc",
                 "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
@@ -758,6 +777,8 @@ def compute_overlay_bbox_norm(style: str) -> list[float]:
     """Return canonical normalized 2D screen bounding box [x1, y1, x2, y2] for Stage-55 overlap QC."""
     if style == "closing_card":
         return [0.16, 0.34, 0.84, 0.66]
+    if style == "hero_opening_card":
+        return [0.14, 0.30, 0.86, 0.70]
     if style == "credits_colophon_card":
         return [0.16, 0.28, 0.84, 0.74]
     if style == "knockout_stencil_opening":
@@ -1142,9 +1163,24 @@ def render_title_frame(
     # ------------------------------------------------------------------
     # Archetype 2: Editorial Opening, Closing, Act Banner & Colophon Card
     # ------------------------------------------------------------------
-    elif item.style in ("opening_card", "closing_card", "act_banner", "credits_colophon_card"):
+    elif item.style in ("opening_card", "hero_opening_card", "closing_card", "act_banner", "credits_colophon_card"):
+        is_hero_opening = item.style == "hero_opening_card"
         is_closing = item.style in ("closing_card", "credits_colophon_card")
-        if is_closing:
+        if is_hero_opening:
+            # Radial cinema veil + soft perimeter vignette keeps surrounding highlights luminous while anchoring center typography
+            veil_cap = min(136, HDR_MAX_SHADOW_ALPHA) if use_hdr_safe else 136
+            yy_g, xx_g = np.mgrid[0:height, 0:width]
+            nx = (xx_g - (width * 0.5)) / max(1.0, width * 0.5)
+            ny = (yy_g - (height * 0.48)) / max(1.0, height * 0.5)
+            dist2 = (nx * nx * 0.68) + (ny * ny * 1.18)
+            rad_alpha = np.clip(48.0 + 78.0 * np.exp(-dist2 * 1.65) + 72.0 * np.clip(dist2 - 0.35, 0.0, 1.4), 0.0, float(veil_cap))
+            rad_alpha = np.clip(rad_alpha * master_alpha, 0.0, float(veil_cap)).astype(np.uint8)
+            scrim_img = Image.new("RGBA", (width, height), (10, 12, 18, 255))
+            scrim_img.putalpha(Image.fromarray(rad_alpha, mode="L"))
+            img = Image.alpha_composite(img, scrim_img)
+            cy = int(round(height * 0.465))
+            title_pt = 66 if len(item.text) <= 14 else 54
+        elif is_closing:
             veil_a = min(108, HDR_MAX_SHADOW_ALPHA) if use_hdr_safe else 108
             veil_a = int(round(veil_a * master_alpha))
             img = Image.alpha_composite(img, Image.new("RGBA", (width, height), (10, 12, 16, veil_a)))
@@ -1156,55 +1192,92 @@ def render_title_frame(
             title_pt = 46 if item.style == "opening_card" else 36
 
         draw = ImageDraw.Draw(img)
-        f_over = _load_font_tier(int(round(15 * s)), tier=spec["overline_tier"], bold=True)
-        f_title = _load_font_tier(int(round(title_pt * s)), tier=spec["primary_tier"], bold=spec["primary_bold"])
-        f_sub = _load_font_tier(int(round(20 * s)), tier=spec["secondary_tier"], bold=False)
+        f_over = _load_font_tier(int(round((17 if is_hero_opening else 15) * s)), tier=spec["overline_tier"], bold=True, text=overline_text)
+        f_title = _load_font_tier(int(round(title_pt * s)), tier=spec["primary_tier"], bold=spec["primary_bold"], text=item.text)
+        sub_tier_use = "serif" if (is_hero_opening and _contains_cjk(sub_text)) else spec["secondary_tier"]
+        f_sub = _load_font_tier(int(round((22 if is_hero_opening else 20) * s)), tier=sub_tier_use, bold=False, text=sub_text)
 
         cx = width // 2
         if overline_text:
-            otw, _ = measure_tracked_text(draw, overline_text.upper(), f_over, letter_spacing_px=spec["overline_tracking_px"] * s)
+            over_track = (6.5 if (is_hero_opening and _contains_cjk(overline_text)) else spec["overline_tracking_px"]) * s
+            over_y = cy - int(round((92 if is_hero_opening else 68) * s))
+            otw, _ = measure_tracked_text(draw, overline_text.upper(), f_over, letter_spacing_px=over_track, cjk_font=f_over)
             draw_tracked_text(
                 img,
-                (cx - otw // 2, cy - int(round(68 * s))),
+                (cx - otw // 2, over_y),
                 overline_text.upper(),
                 font=f_over,
                 fill=_scale_rgba_alpha(accent_rgba, sub_e),
-                letter_spacing_px=spec["overline_tracking_px"] * s,
+                letter_spacing_px=over_track,
                 scale=s,
                 hdr_safe=use_hdr_safe,
+                cjk_font=f_over,
             )
 
-        half_rule = int(round(max(24.0, 74.0 * s) * rule_e))
-        rule_y = cy - int(round((40 if sub_text else 24) * s))
-        draw.line([(cx - half_rule, rule_y), (cx + half_rule, rule_y)], fill=accent_rgba, width=max(1, int(round(1.6 * s))))
+        half_rule = int(round(max(24.0, (148.0 if is_hero_opening else 74.0) * s) * rule_e))
+        rule_y = cy - int(round(((50 if is_hero_opening else 40) if sub_text else 24) * s))
+        if is_hero_opening and half_rule > int(round(14 * s)):
+            gap_d = int(round(11 * s))
+            pip_r = max(2, int(round(3.6 * s)))
+            rule_col = _scale_rgba_alpha(accent_rgba, 0.78)
+            draw.line([(cx - half_rule, rule_y), (cx - gap_d, rule_y)], fill=rule_col, width=max(1, int(round(1.4 * s))))
+            draw.line([(cx + gap_d, rule_y), (cx + half_rule, rule_y)], fill=rule_col, width=max(1, int(round(1.4 * s))))
+            draw.polygon([(cx, rule_y - pip_r), (cx + pip_r, rule_y), (cx, rule_y + pip_r), (cx - pip_r, rule_y)], fill=accent_rgba)
+        else:
+            draw.line([(cx - half_rule, rule_y), (cx + half_rule, rule_y)], fill=accent_rgba, width=max(1, int(round(1.6 * s))))
 
-        tw, th = measure_tracked_text(draw, item.text, f_title, letter_spacing_px=dyn_track)
+        hero_track = dyn_track
+        if is_hero_opening and abs(hero_track) < 0.05:
+            hero_track = (11.0 if _contains_cjk(item.text) else 5.0) * s
+        tw, th = measure_tracked_text(draw, item.text, f_title, letter_spacing_px=hero_track, cjk_font=f_title)
         base_ty = cy - int(round((24 if sub_text else 10) * s))
-        clip_h = max(th + int(round(28 * s)), int(round(title_pt * 1.60 * s)))
+        clip_h = max(th + int(round(34 * s)), int(round(title_pt * 1.65 * s)))
+        if is_hero_opening:
+            # Feathered dark ambient backing behind hero title strokes so highlights never wash out legibility
+            halo = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            draw_tracked_text(
+                halo,
+                (cx - tw // 2, base_ty + max(1, int(round(2 * s)))),
+                item.text,
+                font=f_title,
+                fill=(0, 0, 0, int(round(135 * master_alpha * title_alpha_e))),
+                letter_spacing_px=hero_track,
+                shadow=False,
+                scale=s,
+                hdr_safe=use_hdr_safe,
+                cjk_font=f_title,
+            )
+            halo = halo.filter(ImageFilter.GaussianBlur(radius=max(2.0, 5.5 * s)))
+            img = Image.alpha_composite(img, halo)
+            draw = ImageDraw.Draw(img)
         draw_tracked_text(
             img,
             (cx - tw // 2, base_ty),
             item.text,
             font=f_title,
             fill=title_fill,
-            letter_spacing_px=dyn_track,
+            letter_spacing_px=hero_track,
+            shadow=not is_hero_opening,
             scale=s,
             hdr_safe=use_hdr_safe,
+            cjk_font=f_title,
             clip_box=(0, base_ty - int(round(6 * s)), width, base_ty + clip_h),
         )
 
-        cur_y = base_ty + int(round((title_pt + 14) * s))
+        cur_y = base_ty + int(round((title_pt + (22 if is_hero_opening else 14)) * s))
         if sub_text:
-            sw, _ = measure_tracked_text(draw, sub_text, f_sub, letter_spacing_px=1.0 * s)
+            sub_track = (4.5 if (is_hero_opening and _contains_cjk(sub_text)) else 1.0) * s
+            sw, _ = measure_tracked_text(draw, sub_text, f_sub, letter_spacing_px=sub_track, cjk_font=f_sub)
             draw_tracked_text(
                 img,
                 (cx - sw // 2, cur_y),
                 sub_text,
                 font=f_sub,
                 fill=sub_fill,
-                letter_spacing_px=1.0 * s,
+                letter_spacing_px=sub_track,
                 scale=s,
                 hdr_safe=use_hdr_safe,
+                cjk_font=f_sub,
             )
             cur_y += int(round(36 * s))
 
