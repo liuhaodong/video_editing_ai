@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
+import io
 import math
 import os
 from pathlib import Path
@@ -25,7 +26,7 @@ import urllib.request
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageCms, ImageDraw, ImageFilter, ImageOps
 
 from ..models.schema import (
     ChapterPlan,
@@ -904,14 +905,19 @@ def _fetch_tile_mosaic_pil(
     cache_dir: Optional[Path] = None,
     retina_boost: bool = True,
 ) -> Optional[Image.Image]:
-    """Fetch parallel disk-cached slippy tiles at Retina (z+1) density with automatic tile-cap fallback."""
-    use_retina = retina_boost and viewport.zoom < 13
-    z_fetch = min(14, viewport.zoom + (1 if use_retina else 0))
+    """Fetch parallel disk-cached slippy tiles up to high-DPI (z+3) density within tile budget."""
+    max_zoom = 14 if "labels" in layer_tag or "places" in layer_tag else 15
+    max_tiles = 420 if viewport.width >= 3000 else 324
+    z_fetch = viewport.zoom
     n_tiles, tx_min, tx_max, ty_min, ty_max, total_tiles, scale_f = _compute_tile_grid_for_zoom(viewport, z_fetch)
-    if total_tiles > 324 and z_fetch > viewport.zoom:
-        z_fetch = viewport.zoom
-        n_tiles, tx_min, tx_max, ty_min, ty_max, total_tiles, scale_f = _compute_tile_grid_for_zoom(viewport, z_fetch)
-    if total_tiles > 324:
+    if retina_boost and viewport.zoom < max_zoom:
+        for z_cand in range(min(max_zoom, viewport.zoom + 3), viewport.zoom - 1, -1):
+            cand = _compute_tile_grid_for_zoom(viewport, z_cand)
+            if cand[5] <= max_tiles:
+                z_fetch = z_cand
+                n_tiles, tx_min, tx_max, ty_min, ty_max, total_tiles, scale_f = cand
+                break
+    if total_tiles > max_tiles:
         return None
 
     tile_root = (cache_dir or Path("cache")) / "map_tiles" / layer_tag / str(z_fetch)
@@ -966,7 +972,7 @@ def _fetch_tile_mosaic_pil(
     crop = mosaic.crop((ox, oy, ox + max(8, ow), oy + max(8, oh)))
     crop = crop.resize((viewport.width, viewport.height), Image.Resampling.LANCZOS)
     if mode == "RGB":
-        crop = crop.filter(ImageFilter.UnsharpMask(radius=0.9, percent=28, threshold=2))
+        crop = crop.filter(ImageFilter.UnsharpMask(radius=0.85, percent=36, threshold=2))
     return crop
 
 
@@ -1545,14 +1551,20 @@ def _ease_in_out_cubic(u: float) -> float:
     return 4.0 * x * x * x if x < 0.5 else 1.0 - ((-2.0 * x + 2.0) ** 3) * 0.5
 
 
+def _ease_in_out_quintic(u: float) -> float:
+    """C2-continuous quintic smootherstep (zero initial/final velocity & acceleration) for serene camera motion."""
+    x = max(0.0, min(1.0, float(u)))
+    return x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
+
+
 def _cartography_travel_progress(t_norm: float) -> float:
-    """Departure anchor (0..6%) -> smooth cubic travel (6..82%) -> arrival dwell (82..100%)."""
+    """Calm departure dwell (0..10%) -> fluid quintic glide (10..86%) -> serene arrival settle (86..100%)."""
     t = max(0.0, min(1.0, float(t_norm)))
-    if t <= 0.06:
+    if t <= 0.10:
         return 0.0
-    if t >= 0.82:
+    if t >= 0.86:
         return 1.0
-    return _ease_in_out_cubic((t - 0.06) / (0.82 - 0.06))
+    return _ease_in_out_quintic((t - 0.10) / (0.86 - 0.10))
 
 
 def _catmull_rom_xy(pts: list[tuple[float, float]], samples_per_seg: int = 120) -> list[tuple[float, float]]:
@@ -2175,6 +2187,32 @@ def nav_r_t(ss: int) -> float:
     return max(2.0, ss * 0.015)
 
 
+def _load_clean_callout_rgb(path: Path) -> Image.Image:
+    """Load an inset map photo with HEIC support, Display-P3->sRGB ICC conversion, and gentle highlight knee."""
+    if path.suffix.lower() in (".heic", ".heif"):
+        try:
+            import pillow_heif
+            pillow_heif.register_heif_opener()
+        except Exception:
+            pass
+    with Image.open(path) as raw:
+        im = ImageOps.exif_transpose(raw)
+        icc = im.info.get("icc_profile")
+        if icc:
+            try:
+                src_prof = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+                dst_prof = ImageCms.createProfile("sRGB")
+                im = ImageCms.profileToProfile(im.convert("RGB"), src_prof, dst_prof, outputMode="RGB")
+            except Exception:
+                im = im.convert("RGB")
+        else:
+            im = im.convert("RGB")
+    arr = np.asarray(im, dtype=np.float32)
+    # Soft photographic shoulder above 208 so inset photos never clip white highlights when composited onto HDR timelines
+    arr = np.where(arr > 208.0, 208.0 + (arr - 208.0) * 0.48, arr)
+    return Image.fromarray(np.clip(np.round(arr), 0, 232).astype(np.uint8), mode="RGB")
+
+
 def _paste_hero_photo_callout(
     world_rgba: Image.Image,
     dest_px: tuple[float, float],
@@ -2197,8 +2235,7 @@ def _paste_hero_photo_callout(
     if not p.exists():
         return None
     try:
-        with Image.open(p) as raw:
-            im = ImageOps.exif_transpose(raw).convert("RGB")
+        im = _load_clean_callout_rgb(p)
     except Exception:
         return None
 
@@ -2752,10 +2789,10 @@ def render_travel_map_frame(
     use_style = style if style in CART_THEME_SPECS else "midnight_vox_atlas"
     spec = CART_THEME_SPECS[use_style]
 
-    # Oversample world canvas up to 4608x2592 (1.60x at 1080p for zero camera-tilt edge pinching)
+    # Oversample world canvas up to 5184x2916 (1.30x at full 4K 3840x2160) for crisp perspective projection
     oversample = 1.30 if width > 2000 else 1.60
-    world_w = max(640, min(4608, int(round(width * oversample))))
-    world_h = max(360, min(2592, int(round(height * oversample))))
+    world_w = max(640, min(5184, int(round(width * oversample))))
+    world_h = max(360, min(2916, int(round(height * oversample))))
     wp_sig = tuple((round(w.lat, 5), round(w.lon, 5), round(w.alt_m, 1), w.label) for w in norm_wps)
 
     focus_leg = max(0, min(len(norm_wps) - 2, leg_index)) if len(norm_wps) >= 2 else -1
@@ -2951,7 +2988,8 @@ def render_travel_map_frame(
         bank_deg=bank_deg,
         globe_strength=1.0 if use_globe else 0.0,
     )
-    out_rgba = Image.fromarray(warped_rgb).convert("RGBA")
+    warped_im = Image.fromarray(warped_rgb).filter(ImageFilter.UnsharpMask(radius=0.7, percent=24, threshold=2))
+    out_rgba = warped_im.convert("RGBA")
     s_out = width / 1920.0
     screen_stops = [proj_fn(wx, wy) for wx, wy in px_stops]
 
@@ -3381,13 +3419,26 @@ def _compute_google_earth_camera(
         zoom_float = (8.8 * (1.0 - leg_u) + 9.6 * leg_u) * (1.0 - cruise_dip) + z_cruise * cruise_dip
         globe_strength = float(np.clip((6.8 - zoom_float) / 2.6, 0.0, 1.0))
         pitch_deg = 16.0 + 10.0 * globe_strength
-    elif focused and cur_mode == "walk" and leg_span_km < 5.0:
-        # High-detail street-layout walk zoom (z=15.25 -> 15.55) so street blocks & corners read clearly
-        e = _ease_in_out_cubic(leg_u)
-        center_lat = norm_wps[active_leg].lat + (norm_wps[active_leg + 1].lat - norm_wps[active_leg].lat) * e
-        center_lon = norm_wps[active_leg].lon + (norm_wps[active_leg + 1].lon - norm_wps[active_leg].lon) * e
-        zoom_float = 15.25 + 0.30 * e
-        pitch_deg = 3.5
+    elif focused and leg_span_km < 8.0:
+        # Serene urban walk/transit glide: keep both origin & destination gracefully composed with quintic easing
+        fit_vp = _compute_viewport(
+            [norm_wps[active_leg], norm_wps[active_leg + 1]],
+            int(round(width * 1.35)),
+            int(round(height * 1.35)),
+            focus_leg_index=0,
+        )
+        start_z = float(min(15.2, max(13.85, fit_vp.zoom + 0.25)))
+        e = _ease_in_out_quintic(leg_u)
+        mid_lat = 0.5 * (norm_wps[active_leg].lat + norm_wps[active_leg + 1].lat)
+        mid_lon = 0.5 * (norm_wps[active_leg].lon + norm_wps[active_leg + 1].lon)
+        c_start_lat = 0.62 * norm_wps[active_leg].lat + 0.38 * mid_lat
+        c_start_lon = 0.62 * norm_wps[active_leg].lon + 0.38 * mid_lon
+        c_end_lat = 0.20 * mid_lat + 0.80 * norm_wps[active_leg + 1].lat
+        c_end_lon = 0.20 * mid_lon + 0.80 * norm_wps[active_leg + 1].lon
+        center_lat = c_start_lat + (c_end_lat - c_start_lat) * e
+        center_lon = c_start_lon + (c_end_lon - c_start_lon) * e
+        zoom_float = start_z + 0.55 * e
+        pitch_deg = 6.5 + 5.0 * e
         globe_strength = 0.0
     elif focused and leg_span_km >= 8.0:
         # Regional rail/drive/boat corridor + Google Earth destination zoom-in over the final 28%
@@ -3480,7 +3531,8 @@ def prefetch_google_earth_tiles(
         _, _, clat, clon, z_f, _, _ = _compute_google_earth_camera(
             norm_wps, leg_splines_ll, resolved_modes, gt, width, height, leg_index=leg_index
         )
-        z_tile = max(3, min(16, int(math.floor(z_f)) + 1))
+        z_max_prefetch = 17 if use_style == "satellite_hybrid_4k" else 16
+        z_tile = max(3, min(z_max_prefetch, int(math.floor(z_f)) + 1))
         w_scale = 2.0 ** (z_tile - z_f)
         span_x = ww * w_scale * 0.72
         span_y = wh * w_scale * 0.72
@@ -3488,7 +3540,7 @@ def prefetch_google_earth_tiles(
         for ltag, utpl, mode in layers:
             if ltag == "world_transportation" and z_tile < 8:
                 continue
-            zt = min(14, z_tile) if ltag in ("world_hillshade", "world_places") else (min(15, z_tile) if ltag == "world_transportation" else z_tile)
+            zt = min(14, z_tile) if ltag in ("world_hillshade", "world_places") else (min(16 if use_style == "satellite_hybrid_4k" else 15, z_tile) if ltag == "world_transportation" else z_tile)
             sc = 2.0 ** (zt - z_tile)
             n = 1 << zt
             tx0 = int(math.floor((cx_w - span_x * 0.52) * sc / 256.0))
@@ -3567,7 +3619,8 @@ def render_google_earth_flyover_frame(
 
     ww = int(round(width * 1.35))
     wh = int(round(height * 1.35))
-    z_tile = max(3, min(16, int(math.floor(zoom_float)) + 1))
+    z_max_frame = 17 if use_style == "satellite_hybrid_4k" else 16
+    z_tile = max(3, min(z_max_frame, int(math.floor(zoom_float)) + 1))
     world_px_scale = 2.0 ** (z_tile - zoom_float)
     span_x = ww * world_px_scale * 0.72
     span_y = wh * world_px_scale * 0.72
@@ -3614,7 +3667,7 @@ def render_google_earth_flyover_frame(
 
     world_rgba = Image.fromarray(np.clip(base_rgb, 0, 255).astype(np.uint8)).convert("RGBA")
     if spec.get("roads_overlay_url") and z_tile >= 8:
-        z_rd = min(15, z_tile)
+        z_rd = min(16 if use_style == "satellite_hybrid_4k" else 15, z_tile)
         rd_sc = 2.0 ** (z_rd - z_tile)
         rd_arr = _sample_pyramid_mosaic(
             "world_transportation", spec["roads_overlay_url"], z_rd,
@@ -3701,7 +3754,8 @@ def render_google_earth_flyover_frame(
         world_rgba.convert("RGB"), out_w=width, out_h=height,
         center_xy=(ww * 0.5, wh * 0.5), zoom=1.02, pitch_deg=pitch_deg, bank_deg=0.0, globe_strength=globe_strength,
     )
-    out_rgba = Image.fromarray(warped_rgb).convert("RGBA")
+    warped_im = Image.fromarray(warped_rgb).filter(ImageFilter.UnsharpMask(radius=0.7, percent=24, threshold=2))
+    out_rgba = warped_im.convert("RGBA")
     s_out = width / 1920.0
     screen_stops = [proj_fn(wx, wy) for wx, wy in px_stops]
 
@@ -3788,8 +3842,7 @@ def render_google_earth_flyover_frame(
 
     if has_card and active_card_wp.hero_thumbnail_path:
         try:
-            with Image.open(active_card_wp.hero_thumbnail_path) as raw_im:
-                pim = ImageOps.exif_transpose(raw_im).convert("RGB")
+            pim = _load_clean_callout_rgb(Path(active_card_wp.hero_thumbnail_path))
             cw, ch_img, cap_h, pad_c = int(round(360 * s_out)), int(round(215 * s_out)), int(round(34 * s_out)), int(round(10 * s_out))
             pim = ImageOps.fit(pim, (cw - 2 * pad_c, ch_img), method=Image.Resampling.LANCZOS)
             card_im = Image.new("RGBA", (cw, ch_img + cap_h + 2 * pad_c), (0, 0, 0, 0))
@@ -3860,10 +3913,13 @@ def render_travel_map_clip(
     best_sdr = detect_best_video_encoder(hdr=False)
 
     def _build_map_cmd(force_sw: bool) -> list[str]:
+        cq_val = "14" if w_even >= 3000 else "17"
+        vb_val = "35M" if w_even >= 3000 else "18M"
+        crf_val = "15" if w_even >= 3000 else "17"
         enc_args = (
-            ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19", "-b:v", "14M"]
+            ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", cq_val, "-b:v", vb_val]
             if (best_sdr == "h264_nvenc" and not force_sw)
-            else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+            else ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf_val]
         )
         c = [
             "ffmpeg",
@@ -3995,6 +4051,14 @@ def render_travel_map_clip(
                             for fb in pool.map(_render_frame_bytes, range(c_start, c_end)):
                                 proc.stdin.write(fb)
             proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            err_b = proc.stderr.read()
+            rc_val = proc.wait()
+            return (rc_val if rc_val != 0 else 1), err_b
         except Exception:
             try:
                 proc.kill()
