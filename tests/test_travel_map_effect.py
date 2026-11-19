@@ -543,3 +543,32 @@ def test_google_earth_dynamic_zoom_and_multimodal_leg_modes(tmp_path: Path, monk
     assert abs(tl_after.visual_track[1].timeline_start - 2.0) < 0.05
 
 
+def test_cuda_travel_map_warp_parity_and_ssl_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify CUDA-accelerated flat & 3D curved globe warps match CPU Lanczos4 (<1.5 MAE) and SSL context is cached."""
+    import torch
+    from video_editing_ai.renderer import travel_map as tm
+
+    assert tm._build_ssl_ctx() is tm._build_ssl_ctx()
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA GPU not available")
+
+    arr = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    arr[:, :, 0] = np.linspace(20, 220, 1920, dtype=np.uint8)[None, :]
+    arr[:, :, 1] = np.linspace(30, 190, 1080, dtype=np.uint8)[:, None]
+    arr[:, :, 2] = 110
+    im = Image.fromarray(arr)
+
+    for g_str in (0.0, 0.85):
+        monkeypatch.setenv("AI_EDITOR_ACCEL", "cuda")
+        gpu_out, _, _ = tm._apply_camera_homography(
+            im, 1280, 720, (960.0, 540.0), zoom=1.15, pitch_deg=22.0, bank_deg=0.0, globe_strength=g_str
+        )
+        monkeypatch.setenv("AI_EDITOR_ACCEL", "cpu")
+        cpu_out, _, _ = tm._apply_camera_homography(
+            im, 1280, 720, (960.0, 540.0), zoom=1.15, pitch_deg=22.0, bank_deg=0.0, globe_strength=g_str
+        )
+        mae = float(np.abs(gpu_out.astype(np.float32) - cpu_out.astype(np.float32)).mean())
+        assert mae < 1.5, f"CUDA/CPU map warp parity drift for g_str={g_str}: MAE={mae:.3f}"
+
+
+

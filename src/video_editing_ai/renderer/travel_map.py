@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import ssl
 import subprocess
+import threading
 from typing import Any, Optional
 import urllib.request
 
@@ -869,13 +870,56 @@ def _format_coord_dms(val: float, is_lat: bool) -> str:
     return f"{deg}\u00b0{mins:02d}'{hemi}"
 
 
-def _build_ssl_ctx() -> ssl.SSLContext:
-    try:
-        import certifi
+_SSL_CTX_CACHE: Optional[ssl.SSLContext] = None
+_SSL_CTX_LOCK = threading.Lock()
+_HTTP_TLS = threading.local()
+_OSRM_ROUTE_MEM: dict[tuple[str, str, str], list[tuple[float, float]]] = {}
 
-        return ssl.create_default_context(cafile=certifi.where())
+
+def _build_ssl_ctx() -> ssl.SSLContext:
+    global _SSL_CTX_CACHE
+    if _SSL_CTX_CACHE is not None:
+        return _SSL_CTX_CACHE
+    with _SSL_CTX_LOCK:
+        if _SSL_CTX_CACHE is not None:
+            return _SSL_CTX_CACHE
+        try:
+            import certifi
+
+            _SSL_CTX_CACHE = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _SSL_CTX_CACHE = ssl.create_default_context()
+        return _SSL_CTX_CACHE
+
+
+def _http_fetch_bytes(url: str, timeout: float = 3.5) -> Optional[bytes]:
+    """Fetch URL bytes using a thread-local HTTP/1.1 Keep-Alive connection pool."""
+    try:
+        sess = getattr(_HTTP_TLS, "session", None)
+        if sess is None:
+            import requests
+            from requests.adapters import HTTPAdapter
+
+            sess = requests.Session()
+            adapter = HTTPAdapter(pool_connections=32, pool_maxsize=32)
+            sess.mount("https://", adapter)
+            sess.mount("http://", adapter)
+            sess.headers.update({"User-Agent": "video_editing_ai/1.0"})
+            _HTTP_TLS.session = sess
+        resp = sess.get(url, timeout=timeout)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+        return None
+    except ImportError:
+        pass
     except Exception:
-        return ssl.create_default_context()
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_build_ssl_ctx()) as resp:
+            return resp.read()
+    except Exception:
+        return None
 
 
 def _compute_tile_grid_for_zoom(
@@ -934,19 +978,19 @@ def _fetch_tile_mosaic_pil(
         local_png = tile_root / f"{tx_wrap}_{ty}.png"
         if not local_png.exists():
             url = url_tpl.format(z=z_fetch, x=tx_wrap, y=ty)
-            req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
-            try:
-                with urllib.request.urlopen(req, timeout=2.8, context=ctx) as resp:
-                    data = resp.read()
-                if len(data) > 160:
+            data = _http_fetch_bytes(url, timeout=2.8)
+            if data is not None and len(data) > 160:
+                try:
                     local_png.write_bytes(data)
-            except Exception:
+                except Exception:
+                    return tx_raw, ty, None
+            else:
                 return tx_raw, ty, None
         return tx_raw, ty, local_png if local_png.exists() else None
 
     coords = [(tx_raw, ty) for tx_raw in range(tx_min, tx_max + 1) for ty in range(ty_min, ty_max + 1)]
     results: list[tuple[int, int, Optional[Path]]] = []
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=24) as pool:
         futs = [pool.submit(_fetch_one, tx_r, ty_v) for tx_r, ty_v in coords]
         for fut in as_completed(futs):
             results.append(fut.result())
@@ -1086,6 +1130,10 @@ def _fetch_osrm_route_latlon(
     clean_prof = "foot" if str(profile).lower() in ("walk", "foot", "pedestrian") else "driving"
     key = f"{orig.lat:.4f}_{orig.lon:.4f}_{dest.lat:.4f}_{dest.lon:.4f}"
     r_dir = (cache_dir or Path("cache")) / "map_routes"
+    mem_key = (clean_prof, key, str(r_dir))
+    cached_pts = _OSRM_ROUTE_MEM.get(mem_key)
+    if cached_pts is not None:
+        return cached_pts
     r_dir.mkdir(parents=True, exist_ok=True)
     # Prefer profile-specific cache when present, falling back to legacy coordinate key
     r_file_prof = r_dir / f"{clean_prof}_{key}.json"
@@ -1095,7 +1143,9 @@ def _fetch_osrm_route_latlon(
             try:
                 pts = _json.loads(candidate.read_text(encoding="utf-8"))
                 if isinstance(pts, list) and len(pts) >= 2:
-                    return [(float(p[0]), float(p[1])) for p in pts]
+                    res = [(float(p[0]), float(p[1])) for p in pts]
+                    _OSRM_ROUTE_MEM[mem_key] = res
+                    return res
             except Exception:
                 pass
     url = (
@@ -1104,9 +1154,10 @@ def _fetch_osrm_route_latlon(
         "?overview=full&geometries=geojson"
     )
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
-        with urllib.request.urlopen(req, timeout=2.2, context=_build_ssl_ctx()) as resp:
-            payload = _json.loads(resp.read().decode("utf-8"))
+        raw_bytes = _http_fetch_bytes(url, timeout=2.2)
+        if not raw_bytes:
+            return None
+        payload = _json.loads(raw_bytes.decode("utf-8"))
         routes = payload.get("routes") or []
         coords = routes[0].get("geometry", {}).get("coordinates", []) if routes else []
         if len(coords) >= 2:
@@ -1116,6 +1167,7 @@ def _fetch_osrm_route_latlon(
             if latlons[-1] != (float(coords[-1][1]), float(coords[-1][0])):
                 latlons.append((float(coords[-1][1]), float(coords[-1][0])))
             r_file_prof.write_text(_json.dumps(latlons), encoding="utf-8")
+            _OSRM_ROUTE_MEM[mem_key] = latlons
             return latlons
     except Exception:
         return None
@@ -2397,6 +2449,200 @@ def _draw_route_annotations(
             wd.text((tx + int(round(10 * s)), ty + int(round(6 * s)) + ht + int(round(7 * s))), sub, font=f_s, fill=(*spec["hud_metric"], int(round(235 * fade))))
 
 
+_CPU_GLOBE_GRID_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+_CPU_GLOBE_GRID_LOCK = threading.Lock()
+_CUDA_MAP_LOCK = threading.Lock()
+_CUDA_MAP_GRID_CACHE: dict[tuple[int, int], tuple[Any, Any, Any, Any, Any, Any]] = {}
+
+
+def _get_cpu_globe_grid(
+    out_w: int,
+    out_h: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    key = (out_w, out_h)
+    cached = _CPU_GLOBE_GRID_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _CPU_GLOBE_GRID_LOCK:
+        cached = _CPU_GLOBE_GRID_CACHE.get(key)
+        if cached is not None:
+            return cached
+        gx_grid = np.arange(out_w, dtype=np.float32)[None, :].repeat(out_h, axis=0)
+        gy_grid = np.arange(out_h, dtype=np.float32)[:, None].repeat(out_w, axis=1)
+        nx_norm = (2.0 * gx_grid / max(1.0, float(out_w - 1))) - 1.0
+        scale_h = max(0.5, out_h / 1080.0)
+        rng = np.random.default_rng(1972)
+        n_stars = max(80, int(140 * scale_h))
+        star_xs = rng.integers(4, max(5, out_w - 4), size=n_stars)
+        star_ys = rng.integers(2, max(4, int(out_h * 0.24)), size=n_stars)
+        star_b = rng.uniform(95.0, 205.0, size=n_stars).astype(np.float32)
+        val = (gx_grid, gy_grid, nx_norm, star_xs, star_ys, star_b)
+        if len(_CPU_GLOBE_GRID_CACHE) >= 3:
+            _CPU_GLOBE_GRID_CACHE.clear()
+        _CPU_GLOBE_GRID_CACHE[key] = val
+        return val
+
+
+def _cuda_map_enabled() -> bool:
+    try:
+        from ..hardware import select_torch_device
+
+        return select_torch_device() == "cuda"
+    except Exception:
+        return False
+
+
+def _get_cuda_map_grid(out_w: int, out_h: int) -> tuple[Any, Any, Any, Any, Any, Any]:
+    import torch
+
+    key = (out_w, out_h)
+    cached = _CUDA_MAP_GRID_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if len(_CUDA_MAP_GRID_CACHE) >= 2:
+        _CUDA_MAP_GRID_CACHE.clear()
+    gx_1d = torch.arange(out_w, device="cuda", dtype=torch.float32).view(1, out_w)
+    gy_1d = torch.arange(out_h, device="cuda", dtype=torch.float32).view(out_h, 1)
+    gx_g = gx_1d.expand(out_h, out_w)
+    gy_g = gy_1d.expand(out_h, out_w)
+    nx_g = (2.0 * gx_g / max(1.0, float(out_w - 1))) - 1.0
+    _, _, _, s_xs, s_ys, s_b = _get_cpu_globe_grid(out_w, out_h)
+    val = (
+        gx_g,
+        gy_g,
+        nx_g,
+        torch.from_numpy(np.ascontiguousarray(s_xs, dtype=np.int64)).to("cuda"),
+        torch.from_numpy(np.ascontiguousarray(s_ys, dtype=np.int64)).to("cuda"),
+        torch.from_numpy(np.ascontiguousarray(s_b, dtype=np.float32)).to("cuda"),
+    )
+    _CUDA_MAP_GRID_CACHE[key] = val
+    return val
+
+
+def _cuda_warp_flat(
+    arr: np.ndarray,
+    h_inv: np.ndarray,
+    out_w: int,
+    out_h: int,
+) -> Optional[np.ndarray]:
+    if not _cuda_map_enabled() or (out_w * out_h) < 400_000:
+        return None
+    try:
+        import torch
+        import torch.nn.functional as F
+
+        wh, ww = int(arr.shape[0]), int(arr.shape[1])
+        with _CUDA_MAP_LOCK, torch.no_grad():
+            gx_g, gy_g, _, _, _, _ = _get_cuda_map_grid(out_w, out_h)
+            h00, h01, h02 = float(h_inv[0, 0]), float(h_inv[0, 1]), float(h_inv[0, 2])
+            h10, h11, h12 = float(h_inv[1, 0]), float(h_inv[1, 1]), float(h_inv[1, 2])
+            h20, h21, h22 = float(h_inv[2, 0]), float(h_inv[2, 1]), float(h_inv[2, 2])
+
+            denom = h20 * gx_g + h21 * gy_g + h22
+            denom = torch.where(denom.abs() < 1e-6, torch.full_like(denom, 1e-6), denom)
+            map_x = (h00 * gx_g + h01 * gy_g + h02) / denom
+            map_y = (h10 * gx_g + h11 * gy_g + h12) / denom
+            norm_x = (2.0 * map_x / max(1.0, float(ww - 1))) - 1.0
+            norm_y = (2.0 * map_y / max(1.0, float(wh - 1))) - 1.0
+            grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0)
+
+            src_t = (
+                torch.from_numpy(np.array(arr, dtype=np.uint8, copy=True))
+                .to("cuda", dtype=torch.float32)
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+            )
+            warped = F.grid_sample(src_t, grid, mode="bicubic", padding_mode="border", align_corners=True)
+            out_u8 = warped.squeeze(0).permute(1, 2, 0).clamp_(0.0, 255.0).round().to(torch.uint8).cpu().numpy()
+            del denom, map_x, map_y, norm_x, norm_y, grid, src_t, warped
+            return out_u8
+    except Exception:
+        return None
+
+
+def _cuda_warp_globe(
+    arr: np.ndarray,
+    h_inv: np.ndarray,
+    out_w: int,
+    out_h: int,
+    g_str: float,
+    y_h0: float,
+    curve_drop: float,
+    bank_slope: float,
+) -> Optional[np.ndarray]:
+    if not _cuda_map_enabled() or (out_w * out_h) < 400_000:
+        return None
+    try:
+        import torch
+        import torch.nn.functional as F
+
+        wh, ww = int(arr.shape[0]), int(arr.shape[1])
+        scale_h = max(0.5, out_h / 1080.0)
+        with _CUDA_MAP_LOCK, torch.no_grad():
+            gx_g, gy_g, nx_g, star_xs, star_ys, star_b = _get_cuda_map_grid(out_w, out_h)
+            y_limb = y_h0 + curve_drop * (nx_g * nx_g) + bank_slope * nx_g
+            span_h = torch.clamp(float(out_h) - y_limb, min=1.0)
+            t_y = torch.clamp((gy_g - y_limb) / span_h, 0.0, 1.0)
+            sy_planar = t_y * float(out_h)
+            sx_planar = out_w * 0.5 + (gx_g - out_w * 0.5) * (1.0 + 0.08 * g_str * torch.pow(1.0 - t_y, 1.4))
+
+            h00, h01, h02 = float(h_inv[0, 0]), float(h_inv[0, 1]), float(h_inv[0, 2])
+            h10, h11, h12 = float(h_inv[1, 0]), float(h_inv[1, 1]), float(h_inv[1, 2])
+            h20, h21, h22 = float(h_inv[2, 0]), float(h_inv[2, 1]), float(h_inv[2, 2])
+            denom = h20 * sx_planar + h21 * sy_planar + h22
+            denom = torch.where(denom.abs() < 1e-6, torch.full_like(denom, 1e-6), denom)
+            map_x = (h00 * sx_planar + h01 * sy_planar + h02) / denom
+            map_y = (h10 * sx_planar + h11 * sy_planar + h12) / denom
+            norm_x = (2.0 * map_x / max(1.0, float(ww - 1))) - 1.0
+            norm_y = (2.0 * map_y / max(1.0, float(wh - 1))) - 1.0
+            grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0)
+
+            src_t = (
+                torch.from_numpy(np.array(arr, dtype=np.uint8, copy=True))
+                .to("cuda", dtype=torch.float32)
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+            )
+            earth_w = (
+                F.grid_sample(src_t, grid, mode="bicubic", padding_mode="border", align_corners=True)
+                .clamp_(0.0, 255.0)
+                .squeeze(0)
+                .permute(1, 2, 0)
+            )
+
+            d_limb = gy_g - y_limb
+            zero = torch.zeros_like(d_limb)
+            haze_w = torch.where(d_limb >= 0.0, torch.exp(-d_limb / (58.0 * scale_h)) * 0.52, zero).unsqueeze(-1)
+            atmo_rgb = torch.tensor([92.0, 178.0, 250.0], device="cuda", dtype=torch.float32)
+            earth_lit = earth_w * (1.0 - haze_w) + atmo_rgb * haze_w
+
+            space_bg = torch.tensor([3.0, 6.0, 14.0], device="cuda", dtype=torch.float32).view(1, 1, 3).expand(out_h, out_w, 3).clone()
+            limb_at_stars = y_limb[star_ys, star_xs]
+            vis = star_ys.to(torch.float32) < (limb_at_stars - 6.0)
+            if bool(vis.any()):
+                v_xs = star_xs[vis]
+                v_ys = star_ys[vis]
+                v_b = star_b[vis]
+                space_bg[v_ys, v_xs, 0] = v_b * 0.88
+                space_bg[v_ys, v_xs, 1] = v_b * 0.94
+                space_bg[v_ys, v_xs, 2] = v_b
+
+            rim_out = torch.where(d_limb < 0.0, torch.exp(d_limb / (14.0 * scale_h)) * 0.82, zero).unsqueeze(-1)
+            rim_rgb = torch.tensor([82.0, 172.0, 252.0], device="cuda", dtype=torch.float32)
+            space_lit = space_bg * (1.0 - rim_out) + rim_rgb * rim_out
+
+            earth_mask = torch.clamp((d_limb + 2.5) / 5.0, 0.0, 1.0).unsqueeze(-1)
+            crest = (torch.exp(-((d_limb / (5.5 * scale_h)) ** 2)) * 0.45).unsqueeze(-1)
+            crest_rgb = torch.tensor([128.0, 208.0, 255.0], device="cuda", dtype=torch.float32)
+            comp = space_lit * (1.0 - earth_mask) + earth_lit * earth_mask + crest * crest_rgb
+            out_u8 = comp.clamp_(0.0, 255.0).round().to(torch.uint8).cpu().numpy()
+            del y_limb, span_h, t_y, sy_planar, sx_planar, denom, map_x, map_y, norm_x, norm_y, grid, src_t
+            del earth_w, d_limb, zero, haze_w, earth_lit, space_bg, rim_out, space_lit, earth_mask, crest, comp
+            return out_u8
+    except Exception:
+        return None
+
+
 def _apply_camera_homography(
     world_rgb: Image.Image,
     out_w: int,
@@ -2460,13 +2706,15 @@ def _apply_camera_homography(
     h_fwd = cv2.getPerspectiveTransform(src_arr, dst_pts)  # world -> screen
 
     if g_str <= 0.02:
-        warped = cv2.warpPerspective(
-            arr,
-            h_fwd,
-            (out_w, out_h),
-            flags=cv2.INTER_LANCZOS4,
-            borderMode=cv2.BORDER_REPLICATE,
-        )
+        warped = _cuda_warp_flat(arr, h_inv, out_w, out_h)
+        if warped is None:
+            warped = cv2.warpPerspective(
+                arr,
+                h_fwd,
+                (out_w, out_h),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
 
         def _proj_flat(wx: float, wy: float) -> tuple[float, float]:
             pt = np.array([[[float(wx), float(wy)]]], dtype=np.float32)
@@ -2484,60 +2732,55 @@ def _apply_camera_homography(
         nx_v = (2.0 * sx_val / max(1.0, float(out_w - 1))) - 1.0
         return y_h0 + curve_drop * (nx_v * nx_v) + bank_slope * nx_v
 
-    gx_grid = np.arange(out_w, dtype=np.float32)[None, :].repeat(out_h, axis=0)
-    gy_grid = np.arange(out_h, dtype=np.float32)[:, None].repeat(out_w, axis=1)
-    nx_norm = (2.0 * gx_grid / max(1.0, float(out_w - 1))) - 1.0
-    y_limb = y_h0 + curve_drop * (nx_norm * nx_norm) + bank_slope * nx_norm
+    comp = _cuda_warp_globe(arr, h_inv, out_w, out_h, g_str, y_h0, curve_drop, bank_slope)
+    if comp is None:
+        gx_grid, gy_grid, nx_norm, star_xs, star_ys, star_b = _get_cpu_globe_grid(out_w, out_h)
+        y_limb = y_h0 + curve_drop * (nx_norm * nx_norm) + bank_slope * nx_norm
 
-    # Remap curved screen pixels back onto planar screen domain smoothly
-    span_h = np.maximum(1.0, float(out_h) - y_limb)
-    t_y = np.clip((gy_grid - y_limb) / span_h, 0.0, 1.0)
-    # Subtle spherical compression near the limb so continents bow around Earth horizon cleanly
-    sy_planar = t_y * float(out_h)
-    sx_planar = out_w * 0.5 + (gx_grid - out_w * 0.5) * (1.0 + 0.08 * g_str * np.power(1.0 - t_y, 1.4))
+        # Remap curved screen pixels back onto planar screen domain smoothly
+        span_h = np.maximum(1.0, float(out_h) - y_limb)
+        t_y = np.clip((gy_grid - y_limb) / span_h, 0.0, 1.0)
+        # Subtle spherical compression near the limb so continents bow around Earth horizon cleanly
+        sy_planar = t_y * float(out_h)
+        sx_planar = out_w * 0.5 + (gx_grid - out_w * 0.5) * (1.0 + 0.08 * g_str * np.power(1.0 - t_y, 1.4))
 
-    denom = h_inv[2, 0] * sx_planar + h_inv[2, 1] * sy_planar + h_inv[2, 2]
-    denom = np.where(np.abs(denom) < 1e-6, 1e-6, denom)
-    map_x = ((h_inv[0, 0] * sx_planar + h_inv[0, 1] * sy_planar + h_inv[0, 2]) / denom).astype(np.float32)
-    map_y = ((h_inv[1, 0] * sx_planar + h_inv[1, 1] * sy_planar + h_inv[1, 2]) / denom).astype(np.float32)
+        denom = h_inv[2, 0] * sx_planar + h_inv[2, 1] * sy_planar + h_inv[2, 2]
+        denom = np.where(np.abs(denom) < 1e-6, 1e-6, denom)
+        map_x = ((h_inv[0, 0] * sx_planar + h_inv[0, 1] * sy_planar + h_inv[0, 2]) / denom).astype(np.float32)
+        map_y = ((h_inv[1, 0] * sx_planar + h_inv[1, 1] * sy_planar + h_inv[1, 2]) / denom).astype(np.float32)
 
-    earth_warped = cv2.remap(
-        arr,
-        map_x,
-        map_y,
-        interpolation=cv2.INTER_LANCZOS4,
-        borderMode=cv2.BORDER_REPLICATE,
-    ).astype(np.float32)
+        earth_warped = cv2.remap(
+            arr,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_LANCZOS4,
+            borderMode=cv2.BORDER_REPLICATE,
+        ).astype(np.float32)
 
-    # Space dome + crisp stars above y_limb + luminous Google Earth Rayleigh blue atmosphere halo
-    d_limb = gy_grid - y_limb  # >= 0 on Earth, < 0 in space
-    scale_h = max(0.5, out_h / 1080.0)
+        # Space dome + crisp stars above y_limb + luminous Google Earth Rayleigh blue atmosphere halo
+        d_limb = gy_grid - y_limb  # >= 0 on Earth, < 0 in space
+        scale_h = max(0.5, out_h / 1080.0)
 
-    # Soft Rayleigh scatter veil fading over distant Earth horizon
-    haze_w = np.where(d_limb >= 0.0, np.exp(-d_limb / (58.0 * scale_h)) * 0.52, 0.0).astype(np.float32)[..., None]
-    atmo_rgb = np.array([92.0, 178.0, 250.0], dtype=np.float32)
-    earth_lit = earth_warped * (1.0 - haze_w) + atmo_rgb * haze_w
+        # Soft Rayleigh scatter veil fading over distant Earth horizon
+        haze_w = np.where(d_limb >= 0.0, np.exp(-d_limb / (58.0 * scale_h)) * 0.52, 0.0).astype(np.float32)[..., None]
+        atmo_rgb = np.array([92.0, 178.0, 250.0], dtype=np.float32)
+        earth_lit = earth_warped * (1.0 - haze_w) + atmo_rgb * haze_w
 
-    # Deep cosmos backdrop with deterministic faint starlight above limb
-    space_bg = np.full((out_h, out_w, 3), np.array([3.0, 6.0, 14.0], dtype=np.float32), dtype=np.float32)
-    rng = np.random.default_rng(1972)
-    n_stars = max(80, int(140 * scale_h))
-    star_xs = rng.integers(4, max(5, out_w - 4), size=n_stars)
-    star_ys = rng.integers(2, max(4, int(out_h * 0.24)), size=n_stars)
-    star_b = rng.uniform(95.0, 205.0, size=n_stars)
-    for st_x, st_y, br in zip(star_xs, star_ys, star_b):
-        if st_y < y_limb[st_y, st_x] - 6.0:
-            space_bg[st_y, st_x] = [br * 0.88, br * 0.94, br]
+        # Deep cosmos backdrop with deterministic faint starlight above limb
+        space_bg = np.full((out_h, out_w, 3), np.array([3.0, 6.0, 14.0], dtype=np.float32), dtype=np.float32)
+        for st_x, st_y, br in zip(star_xs, star_ys, star_b):
+            if st_y < y_limb[st_y, st_x] - 6.0:
+                space_bg[st_y, st_x] = [br * 0.88, br * 0.94, br]
 
-    # Atmospheric rim bloom fading outward into space & softening horizon seam
-    rim_out = np.where(d_limb < 0.0, np.exp(d_limb / (14.0 * scale_h)) * 0.82, 0.0).astype(np.float32)[..., None]
-    space_lit = space_bg * (1.0 - rim_out) + np.array([82.0, 172.0, 252.0], dtype=np.float32) * rim_out
+        # Atmospheric rim bloom fading outward into space & softening horizon seam
+        rim_out = np.where(d_limb < 0.0, np.exp(d_limb / (14.0 * scale_h)) * 0.82, 0.0).astype(np.float32)[..., None]
+        space_lit = space_bg * (1.0 - rim_out) + np.array([82.0, 172.0, 252.0], dtype=np.float32) * rim_out
 
-    # Smooth anti-aliased transition across +/- 2.5px of horizon limb + specular blue limb crest
-    earth_mask = np.clip((d_limb + 2.5) / 5.0, 0.0, 1.0).astype(np.float32)[..., None]
-    crest = np.exp(-(d_limb / (5.5 * scale_h)) ** 2) * 0.45
-    comp = space_lit * (1.0 - earth_mask) + earth_lit * earth_mask
-    comp = np.clip(comp + crest[..., None] * np.array([128.0, 208.0, 255.0], dtype=np.float32), 0, 255).astype(np.uint8)
+        # Smooth anti-aliased transition across +/- 2.5px of horizon limb + specular blue limb crest
+        earth_mask = np.clip((d_limb + 2.5) / 5.0, 0.0, 1.0).astype(np.float32)[..., None]
+        crest = np.exp(-(d_limb / (5.5 * scale_h)) ** 2) * 0.45
+        comp = space_lit * (1.0 - earth_mask) + earth_lit * earth_mask
+        comp = np.clip(comp + crest[..., None] * np.array([128.0, 208.0, 255.0], dtype=np.float32), 0, 255).astype(np.uint8)
 
     def _proj_globe(wx: float, wy: float) -> tuple[float, float]:
         pt = np.array([[[float(wx), float(wy)]]], dtype=np.float32)
@@ -3307,13 +3550,14 @@ def _load_or_fetch_pyramid_tile(
     local_p = zdir / f"{tx_w}_{ty}.png"
     if not local_p.exists() and allow_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
         url = url_tpl.format(z=z, x=tx_w, y=ty)
-        req = urllib.request.Request(url, headers={"User-Agent": "video_editing_ai/1.0"})
-        try:
-            with urllib.request.urlopen(req, timeout=3.5, context=_build_ssl_ctx()) as resp:
-                data = resp.read()
-            if len(data) > 120:
+        data = _http_fetch_bytes(url, timeout=3.5)
+        if data is not None and len(data) > 120:
+            try:
                 local_p.write_bytes(data)
-        except Exception:
+            except Exception:
+                _PYRAMID_TILE_MEM[key] = None
+                return None
+        else:
             _PYRAMID_TILE_MEM[key] = None
             return None
     if not local_p.exists():
@@ -3592,7 +3836,7 @@ def prefetch_google_earth_tiles(
                         jobs.append((ltag, utpl, zt, tx_w, ty, mode))
     if not jobs:
         return
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=24) as pool:
         futs = [pool.submit(_load_or_fetch_pyramid_tile, ltag, utpl, zt, tx_w, ty, mode, c_dir_p, True) for (ltag, utpl, zt, tx_w, ty, mode) in jobs]
         for fut in futs:
             try:
@@ -3702,7 +3946,6 @@ def render_google_earth_flyover_frame(
         hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 0.92, 0, 255)
         base_rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32)
 
-    world_rgba = Image.fromarray(np.clip(base_rgb, 0, 255).astype(np.uint8)).convert("RGBA")
     if spec.get("roads_overlay_url") and z_tile >= 8:
         z_rd = min(16 if use_style == "satellite_hybrid_4k" else 15, z_tile)
         rd_sc = 2.0 ** (z_rd - z_tile)
@@ -3711,9 +3954,10 @@ def render_google_earth_flyover_frame(
             wx0 * rd_sc, wy0 * rd_sc, wx1 * rd_sc, wy1 * rd_sc, ww, wh,
             mode="RGBA", fill_val=(0, 0, 0, 0), cache_dir=c_dir_p, allow_fetch=fetch_ok,
         )
-        rd_im = Image.fromarray(rd_arr, mode="RGBA")
-        rd_im.putalpha(rd_im.getchannel("A").point(lambda v: int(round(v * 0.78))))
-        world_rgba.alpha_composite(rd_im)
+        rd_a = (rd_arr[:, :, 3:4].astype(np.float32) * (0.78 / 255.0))
+        if float(rd_a.max()) > 0.005:
+            base_rgb = base_rgb * (1.0 - rd_a) + rd_arr[:, :, :3].astype(np.float32) * rd_a
+    world_rgba = Image.fromarray(np.clip(base_rgb, 0, 255).astype(np.uint8)).convert("RGBA")
 
     route_arr = np.zeros((wh, ww, 4), dtype=np.uint8)
     s_w = ww / 1920.0
@@ -4073,7 +4317,7 @@ def render_travel_map_clip(
 
     # Pre-warm tile/font caches on frame 0, then render remaining frames in parallel chunks
     frame0_bytes = _render_frame_bytes(0)
-    map_workers = max(1, min(get_io_worker_count(6), total_frames - 1))
+    map_workers = max(1, min(get_io_worker_count(12), total_frames - 1))
 
     def _encode_all(force_sw: bool) -> tuple[int, bytes]:
         # Avoid OpenCV internal threadpool oversubscription when ThreadPoolExecutor fans out frames
