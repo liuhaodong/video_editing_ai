@@ -638,3 +638,69 @@ def test_render_batch_rgb_retries_single_frame_on_runtime_cuda_oom(monkeypatch: 
     assert out.shape == (3, 4, 4, 3)
     assert cache_clears["count"] == 1
     assert calls == [[0, 1, 2], [0], [1], [2]]
+
+
+def test_fast_3dlut_color_grade_matches_reference() -> None:
+    """Verify 33^3 Color3DLUT photo grading matches full NumPy apply_color_grade_to_pil_image (< 0.5 MAE)."""
+    from video_editing_ai.models.schema import EffectTrackItem
+    from video_editing_ai.renderer import ken_burns
+    from video_editing_ai.renderer.color_grading import apply_color_grade_to_pil_image
+
+    rng = np.random.default_rng(7)
+    arr = rng.integers(0, 256, size=(420, 420, 3), dtype=np.uint8)
+    img = Image.fromarray(arr, mode="RGB")
+    fx = EffectTrackItem(
+        id="fx_lut_test",
+        target_clip_id="clip_test",
+        effect_type="color_grade",
+        timeline_start=0.0,
+        duration=3.0,
+        parameters={
+            "exposure_ev": 0.08,
+            "contrast": 1.05,
+            "saturation": 1.06,
+            "gamma": 0.99,
+            "black_lift": 0.01,
+            "lut_intensity": 0.45,
+            "chapter_look": "pacific_coastal_chrome",
+        },
+    )
+    ref = np.asarray(apply_color_grade_to_pil_image(img, fx), dtype=np.float32)
+    fast = np.asarray(ken_burns._apply_color_grade_fast_pil(img, fx), dtype=np.float32)
+    mae = float(np.mean(np.abs(ref - fast)))
+    assert mae < 0.5, f"33^3 Color3DLUT MAE too high: {mae:.4f}"
+
+
+def test_cuda_4k_non_mpi_unlock_and_gpu_pixel_encoders(tmp_path: Path) -> None:
+    """Verify non-MPI 4K CUDA parallelism unlock, GPU HLG p010le / BT.709 yuv420p encoders, and static PNG 1-frame loop."""
+    from video_editing_ai.renderer import ken_burns, mps_photo_compositor as mpc
+
+    assert ken_burns._cuda_photo_budget(3840, 16.0, 13.5, mode="passepartout_shadowbox") == (6, (6, 3, 1), False)
+    assert ken_burns._cuda_photo_budget(3840, 16.0, 8.6, mode="passepartout_shadowbox") == (3, (3, 1), True)
+    assert ken_burns._cuda_photo_budget(3840, 16.0, 13.5, mode="cinematic_depth_3d") == (3, (3, 1), True)
+
+    # Verify GPU HLG p010le & BT.709 yuv420p shapes & TV-range bounds
+    canvas = torch.linspace(0.0, 255.0, 2 * 3 * 16 * 16, dtype=torch.float32).reshape(2, 3, 16, 16)
+    p010 = mpc._rgb_to_hlg_p010le_gpu(canvas, npl_nits=380.0)
+    assert p010.shape == (2, 24, 16) and p010.dtype == torch.uint16
+    y_10 = (p010[:, :16, :].to(torch.int32) >> 6)
+    assert int(y_10.min()) >= 64 and int(y_10.max()) <= 940
+
+    yuv420 = mpc._rgb_to_bt709_yuv420p_gpu(canvas)
+    assert yuv420.shape == (2, 16 * 16 * 3 // 2) and yuv420.dtype == torch.uint8
+    assert int(yuv420.min()) >= 16 and int(yuv420.max()) <= 240
+
+    # Verify static PNG HDR segment overlay uses 1-frame input + loop filter instead of -loop 1
+    png_p = tmp_path / "ov.png"
+    Image.new("RGBA", (64, 64), (255, 255, 255, 128)).save(png_p)
+    extra_in, parts, _out = ken_burns.build_segment_overlay_filtergraph(
+        base_label="[vbase]",
+        hdr=True,
+        next_input_idx=2,
+        segment_titles=[{"kind": "static_png", "overlay_path": png_p, "local_st": 0.5, "local_dur": 3.0, "roi": (0, 0, 64, 64)}],
+        fps=30,
+    )
+    assert "-loop" not in extra_in
+    joined = ";".join(parts)
+    assert "loop=loop=-1:size=1:start=0" in joined
+

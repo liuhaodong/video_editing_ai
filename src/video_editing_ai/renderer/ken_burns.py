@@ -39,7 +39,7 @@ from ..models.schema import (
     KenBurnsConfig,
     TransitionConfig,
 )
-from .color_grading import apply_color_grade_to_pil_image
+from .color_grading import apply_color_grade_to_pil_image, apply_color_grade_to_rgb
 from .depth_parallax import (
     build_mpi_depth_layers,
     build_rack_focus_assets,
@@ -454,14 +454,96 @@ def _composite_frosted_card_on_rgb(
         frame_rgb.paste(frosted_rgb, (dst_x, dst_y), scaled_mask)
 
 
+_COLOR_GRADE_3DLUT_LOCK = threading.Lock()
+_COLOR_GRADE_3DLUT_CACHE: dict[tuple[Any, ...], ImageFilter.Color3DLUT] = {}
+_IDENTITY_LUT_CUBE_33: Optional[np.ndarray] = None
+
+_BG_PLANE_MODES = frozenset(
+    {
+        "diptych_frame",
+        "triptych_cinematic",
+        "polaroid_scrapbook",
+        "parallax_gallery",
+        "glassmorphic_pedestal",
+        "medium_format_slide",
+        "floating_tilt_plate",
+    }
+)
+
+
+def _normalize_grade_cache_key(color_grade_fx: EffectTrackItem | dict[str, Any]) -> Optional[tuple[Any, ...]]:
+    """Build a deterministic hashable cache key for a photo color-grade spec."""
+    params = (
+        dict(getattr(color_grade_fx, "parameters"))
+        if hasattr(color_grade_fx, "parameters") and isinstance(getattr(color_grade_fx, "parameters"), dict)
+        else (dict(color_grade_fx) if isinstance(color_grade_fx, dict) else None)
+    )
+    if not params or params.get("bypass"):
+        return None
+    items: list[tuple[str, Any]] = []
+    for k in sorted(params.keys()):
+        v = params[k]
+        if isinstance(v, float):
+            items.append((k, round(v, 5)))
+        elif isinstance(v, (list, tuple)):
+            items.append((k, tuple(round(x, 5) if isinstance(x, float) else x for x in v)))
+        elif isinstance(v, (str, int, bool, type(None))):
+            items.append((k, v))
+        else:
+            items.append((k, str(v)))
+    return tuple(items)
+
+
+def _apply_color_grade_fast_pil(
+    img: Image.Image,
+    color_grade_fx: EffectTrackItem | dict[str, Any],
+) -> Image.Image:
+    """
+    Apply full DI color grading (`apply_color_grade_to_rgb`) to an RGB PIL photo via a cached
+    33x33x33 `ImageFilter.Color3DLUT` (~100x faster on 15-33MP stills, MAE ~0.05/255).
+    """
+    global _IDENTITY_LUT_CUBE_33
+    if img.mode != "RGB" or (img.width * img.height) < 120_000:
+        return apply_color_grade_to_pil_image(img, color_grade_fx)
+    cache_key = _normalize_grade_cache_key(color_grade_fx)
+    if cache_key is None:
+        return img
+    try:
+        with _COLOR_GRADE_3DLUT_LOCK:
+            lut = _COLOR_GRADE_3DLUT_CACHE.get(cache_key)
+        if lut is None:
+            if _IDENTITY_LUT_CUBE_33 is None:
+                ax = np.linspace(0.0, 1.0, 33, dtype=np.float32)
+                b_g, g_g, r_g = np.meshgrid(ax, ax, ax, indexing="ij")
+                _IDENTITY_LUT_CUBE_33 = np.stack([r_g, g_g, b_g], axis=-1)
+            graded_cube = apply_color_grade_to_rgb(_IDENTITY_LUT_CUBE_33, color_grade_fx)
+            lut = ImageFilter.Color3DLUT(33, graded_cube.reshape(-1, 3).ravel().tolist())
+            with _COLOR_GRADE_3DLUT_LOCK:
+                if len(_COLOR_GRADE_3DLUT_CACHE) >= 64:
+                    _COLOR_GRADE_3DLUT_CACHE.clear()
+                _COLOR_GRADE_3DLUT_CACHE[cache_key] = lut
+        return img.filter(lut)
+    except Exception:
+        return apply_color_grade_to_pil_image(img, color_grade_fx)
+
+
 def _load_graded_photo_rgb(
     photo_path: str | Path,
     color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    max_dim: Optional[int] = None,
 ) -> Image.Image:
-    """Open an EXIF-oriented RGB photograph and apply Stage 42 DI color grade before borders/mattes."""
-    img = ImageOps.exif_transpose(Image.open(photo_path)).convert("RGB")
+    """Open an EXIF-oriented RGB photograph, optionally pre-capping oversized 24-60MP stills, and apply DI color grade."""
+    with Image.open(photo_path) as raw_im:
+        if max_dim is not None and max_dim >= 512:
+            try:
+                raw_im.draft("RGB", (max_dim, max_dim))
+            except Exception:
+                pass
+        img = ImageOps.exif_transpose(raw_im).convert("RGB")
+    if max_dim is not None and max_dim >= 512 and max(img.width, img.height) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     if color_grade_fx is not None:
-        return apply_color_grade_to_pil_image(img, color_grade_fx)
+        return _apply_color_grade_fast_pil(img, color_grade_fx)
     return img
 
 
@@ -1053,12 +1135,13 @@ def _build_triptych_panels(
     panel_h = int(height * (0.70 if has_card else 0.78))
     border_px = max(8, int(round(11 * scale_factor)))
 
+    sec_max_dim = max(512, (max(width, height) * 5) // 4)
     sec_img: Optional[Image.Image] = None
     tert_img: Optional[Image.Image] = None
     if kb.secondary_source and Path(kb.secondary_source).exists():
-        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=sec_max_dim)
     if kb.tertiary_source and Path(kb.tertiary_source).exists():
-        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
+        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx, max_dim=sec_max_dim)
 
     if sec_img is not None and tert_img is not None:
         imgs = [
@@ -1344,12 +1427,13 @@ def _build_contact_sheet_zoom_assets(
     cell_w = max(80, (sw - outer_x * 2 - gap_x * (cols - 1)) // cols)
     cell_h = max(60, (sh - outer_top - outer_bot - gap_y * (rows - 1) - rebate_h * rows) // rows)
 
+    sec_max_dim = max(512, (max(width, height) * 5) // 4)
     sec_img: Optional[Image.Image] = None
     tert_img: Optional[Image.Image] = None
     if kb.secondary_source and Path(kb.secondary_source).exists():
-        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=sec_max_dim)
     if kb.tertiary_source and Path(kb.tertiary_source).exists():
-        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
+        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx, max_dim=sec_max_dim)
 
     # Populate the 6 cells; Hero frame sits at row=0, col=1 (idx=1 -> '02A SELECT') so zoom clearance fits above captions
     focal = kb.start_center
@@ -1695,12 +1779,13 @@ def _build_criterion_atelier_assets(
         method=Image.Resampling.LANCZOS,
     )
 
+    sec_max_dim = max(512, (max(width, height) * 5) // 4)
     sec_img: Optional[Image.Image] = None
     tert_img: Optional[Image.Image] = None
     if kb.secondary_source and Path(kb.secondary_source).exists():
-        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+        sec_img = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=sec_max_dim)
     if kb.tertiary_source and Path(kb.tertiary_source).exists():
-        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
+        tert_img = _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx, max_dim=sec_max_dim)
 
     rt_src = sec_img if sec_img is not None else raw_primary
     rt_center = (0.50, 0.50) if sec_img is not None else (0.52, 0.28)
@@ -1841,6 +1926,10 @@ def _wrap_editorial_text(
     return lines[:max_lines]
 
 
+_SURFACE_BOARD_CACHE_LOCK = threading.Lock()
+_SURFACE_BOARD_CACHE: dict[tuple[Any, ...], Image.Image] = {}
+
+
 def _make_textured_surface_rgb(
     width: int,
     height: int,
@@ -1851,6 +1940,11 @@ def _make_textured_surface_rgb(
     grain_std: float = 1.8,
 ) -> Image.Image:
     """Create a deterministic museum surface board with gentle gallery top-light wash and radial corner falloff."""
+    key = (int(width), int(height), tuple(int(c) for c in base_rgb), int(seed), round(float(grad_top), 3), round(float(grad_bot), 3), round(float(grain_std), 3))
+    with _SURFACE_BOARD_CACHE_LOCK:
+        cached = _SURFACE_BOARD_CACHE.get(key)
+    if cached is not None:
+        return cached.copy()
     sw, sh = max(32, width // 3), max(32, height // 3)
     ny = np.linspace(0.0, 1.0, sh, dtype=np.float32).reshape(sh, 1)
     nx_2d = np.linspace(-1.0, 1.0, sw, dtype=np.float32).reshape(1, sw)
@@ -1864,7 +1958,12 @@ def _make_textured_surface_rgb(
     arr[:, :, 1] = base_rgb[1] + wash[:, :, 0] + vig[:, :, 0] + grain[:, :, 0]
     arr[:, :, 2] = base_rgb[2] + wash[:, :, 0] + vig[:, :, 0] + grain[:, :, 0]
     u8 = np.clip(arr, 4.0, 244.0).astype(np.uint8)
-    return Image.fromarray(u8, mode="RGB").resize((width, height), Image.Resampling.BILINEAR)
+    out = Image.fromarray(u8, mode="RGB").resize((width, height), Image.Resampling.BILINEAR)
+    with _SURFACE_BOARD_CACHE_LOCK:
+        if len(_SURFACE_BOARD_CACHE) >= 16:
+            _SURFACE_BOARD_CACHE.clear()
+        _SURFACE_BOARD_CACHE[key] = out
+    return out.copy()
 
 
 def _build_passepartout_shadowbox_assets(
@@ -2059,13 +2158,14 @@ def _build_panoramic_frieze_assets(
     focal_uv: Optional[tuple[float, float]] = None,
 ) -> dict[str, Any]:
     """Build an exhibition gallery wall hanging 3 aspect-preserved matted prints across equal gutters."""
+    sec_max_dim = max(512, (max(width, height) * 5) // 4)
     sec_img = (
-        _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+        _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=sec_max_dim)
         if (kb.secondary_source and Path(kb.secondary_source).exists())
         else None
     )
     tert_img = (
-        _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx)
+        _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx, max_dim=sec_max_dim)
         if (kb.tertiary_source and Path(kb.tertiary_source).exists())
         else None
     )
@@ -2149,7 +2249,7 @@ def _build_atelier_layered_duo_assets(
     )
 
     if kb.secondary_source and Path(kb.secondary_source).exists():
-        fg_src = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+        fg_src = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=max(512, (max(width, height) * 5) // 4))
     else:
         sw, sh = raw_primary.size
         cw_d = max(48, int(round(sw * 0.56)))
@@ -2596,8 +2696,9 @@ def _prepare_photo_scene_context(
     kb: KenBurnsConfig,
     color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Pre-build all multi-plane assets for any of the 10 photo presentation modes + 4 atmospheric finishers."""
-    raw_primary = _load_graded_photo_rgb(photo_path, color_grade_fx)
+    """Pre-build all multi-plane assets for all active photo presentation modes + atmospheric finishers."""
+    photo_max_dim = max(512, (max(width, height) * 5) // 4)
+    raw_primary = _load_graded_photo_rgb(photo_path, color_grade_fx, max_dim=photo_max_dim)
     scale_factor = width / 1920.0
     s_zoom, e_zoom, (sx, sy), (ex, ey) = _resolve_kb_endpoints(kb)
     resample_mode = Image.Resampling.BILINEAR if width >= 3840 else Image.Resampling.BICUBIC
@@ -2631,10 +2732,12 @@ def _prepare_photo_scene_context(
     bg_oversample = 1.12
     bg_w = int(round(width * bg_oversample))
     bg_h = int(round(height * bg_oversample))
-    bg_small = ImageOps.fit(raw_primary, (bg_w // 4, bg_h // 4), method=Image.Resampling.BILINEAR)
-    bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(8 * scale_factor)))))
-    bg_plane = bg_small.resize((bg_w, bg_h), Image.Resampling.BILINEAR)
-    bg_plane = Image.blend(bg_plane, Image.new("RGB", (bg_w, bg_h), (8, 10, 18)), 0.34)
+    bg_plane: Optional[Image.Image] = None
+    if mode in _BG_PLANE_MODES:
+        bg_small = ImageOps.fit(raw_primary, (bg_w // 4, bg_h // 4), method=Image.Resampling.BILINEAR)
+        bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(8 * scale_factor)))))
+        bg_plane = bg_small.resize((bg_w, bg_h), Image.Resampling.BILINEAR)
+        bg_plane = Image.blend(bg_plane, Image.new("RGB", (bg_w, bg_h), (8, 10, 18)), 0.34)
 
     card_max_h_ratio = 0.74 if has_card else 0.80
     card_cy_ratio = 0.435 if has_card else 0.48
@@ -2670,7 +2773,7 @@ def _prepare_photo_scene_context(
     if mode == "diptych_frame":
         sec_path = kb.secondary_source
         if sec_path and Path(sec_path).exists():
-            raw_sec = _load_graded_photo_rgb(sec_path, color_grade_fx)
+            raw_sec = _load_graded_photo_rgb(sec_path, color_grade_fx, max_dim=photo_max_dim)
         else:
             raw_sec = ImageOps.fit(
                 raw_primary,
@@ -2702,7 +2805,7 @@ def _prepare_photo_scene_context(
             raw_primary, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=-3.2, stamp_text=stamp_1
         )
         if kb.secondary_source and Path(kb.secondary_source).exists():
-            raw_sec = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx)
+            raw_sec = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=photo_max_dim)
             ctx["polaroid_2"] = _build_polaroid_card(
                 raw_sec, max_w=max_w, max_h=max_h, scale_factor=scale_factor, angle_deg=3.6, stamp_text=""
             )
@@ -3701,6 +3804,7 @@ def build_segment_overlay_filtergraph(
     next_input_idx: int,
     segment_broll: Optional[list[tuple[Path, float, float]]] = None,
     segment_titles: Optional[list[tuple[Path, float, float, float, float] | dict[str, Any]]] = None,
+    fps: int = 30,
 ) -> tuple[list[str], list[str], str]:
     """Build extra FFmpeg -i inputs & filter_complex stages for segment-scoped Track V2/V3 overlays."""
     extra_inputs: list[str] = []
@@ -3765,26 +3869,45 @@ def build_segment_overlay_filtergraph(
             rx, ry, _, _ = t_ent.get("roi", (0, 0, 0, 0))
             ov_label = f"[sov{t_idx}]"
             next_v = f"[svt{t_idx + 1}]"
-            if t_ent.get("kind") == "static_png":
-                extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(ov_path)])
-                fade_chain = f"fade=t=in:st=0:d={fi:.3f}:alpha=1,fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1"
-            else:
+            is_static_png = t_ent.get("kind") == "static_png"
+            if is_static_png and hdr:
+                # Decode single PNG frame, run 4K zscale ONCE, then loop+fade in HLG space (~2x faster)
                 extra_inputs.extend(["-i", str(ov_path)])
-                fade_chain = ""
-            pts_chain = f"setpts=PTS+{local_st:.3f}/TB"
-            if hdr:
+                fade_chain = f"fade=t=in:st=0:d={fi:.3f}:alpha=1,fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1"
+                loop_pts_chain = (
+                    f"loop=loop=-1:size=1:start=0,setpts=N/({max(1, int(fps))}*TB),"
+                    f"trim=duration={t_dur:.3f},{fade_chain},setpts=PTS+{local_st:.3f}/TB"
+                )
                 filter_parts.append(
                     build_rgba_hdr_overlay_filter(
                         f"[{in_idx}:v]",
                         ov_label,
                         tag=f"sgov{t_idx}",
-                        fade_chain=fade_chain,
-                        pts_chain=pts_chain,
+                        fade_chain="",
+                        pts_chain=loop_pts_chain,
                     )
                 )
             else:
-                chain = f"format=rgba,{fade_chain},{pts_chain}" if fade_chain else f"format=rgba,{pts_chain}"
-                filter_parts.append(f"[{in_idx}:v]{chain}{ov_label}")
+                if is_static_png:
+                    extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(ov_path)])
+                    fade_chain = f"fade=t=in:st=0:d={fi:.3f}:alpha=1,fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1"
+                else:
+                    extra_inputs.extend(["-i", str(ov_path)])
+                    fade_chain = ""
+                pts_chain = f"setpts=PTS+{local_st:.3f}/TB"
+                if hdr:
+                    filter_parts.append(
+                        build_rgba_hdr_overlay_filter(
+                            f"[{in_idx}:v]",
+                            ov_label,
+                            tag=f"sgov{t_idx}",
+                            fade_chain=fade_chain,
+                            pts_chain=pts_chain,
+                        )
+                    )
+                else:
+                    chain = f"format=rgba,{fade_chain},{pts_chain}" if fade_chain else f"format=rgba,{pts_chain}"
+                    filter_parts.append(f"[{in_idx}:v]{chain}{ov_label}")
             filter_parts.append(
                 f"{cur_v}{ov_label}overlay=x={rx}:y={ry}:format={ov_fmt}:eof_action=pass:"
                 f"enable='between(t,{local_st:.3f},{end_t:.3f})'{next_v}"
@@ -3793,7 +3916,6 @@ def build_segment_overlay_filtergraph(
             in_idx += 1
         else:
             t_png, local_st, t_dur, fade_in, fade_out = t_ent
-            extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(t_png)])
             end_t = local_st + t_dur
             fi = min(t_dur * 0.4, fade_in)
             fo = min(t_dur * 0.4, fade_out)
@@ -3801,18 +3923,24 @@ def build_segment_overlay_filtergraph(
             ov_label = f"[sov{t_idx}]"
             next_v = f"[svt{t_idx + 1}]"
             fade_chain = f"fade=t=in:st=0:d={fi:.3f}:alpha=1,fade=t=out:st={fo_st:.3f}:d={fo:.3f}:alpha=1"
-            pts_chain = f"setpts=PTS+{local_st:.3f}/TB"
             if hdr:
+                extra_inputs.extend(["-i", str(t_png)])
+                loop_pts_chain = (
+                    f"loop=loop=-1:size=1:start=0,setpts=N/({max(1, int(fps))}*TB),"
+                    f"trim=duration={t_dur:.3f},{fade_chain},setpts=PTS+{local_st:.3f}/TB"
+                )
                 filter_parts.append(
                     build_rgba_hdr_overlay_filter(
                         f"[{in_idx}:v]",
                         ov_label,
                         tag=f"sgov{t_idx}",
-                        fade_chain=fade_chain,
-                        pts_chain=pts_chain,
+                        fade_chain="",
+                        pts_chain=loop_pts_chain,
                     )
                 )
             else:
+                extra_inputs.extend(["-loop", "1", "-t", f"{t_dur:.3f}", "-i", str(t_png)])
+                pts_chain = f"setpts=PTS+{local_st:.3f}/TB"
                 filter_parts.append(f"[{in_idx}:v]format=rgba,{fade_chain},{pts_chain}{ov_label}")
             filter_parts.append(
                 f"{cur_v}{ov_label}overlay=0:0:format={ov_fmt}:eof_action=pass:"
@@ -3840,10 +3968,24 @@ _CUDA_PHOTO_SEM = threading.BoundedSemaphore(2)
 _CUDA_4K_LOCK = threading.Lock()
 
 
-def _cuda_photo_budget(width: int, total_vram_gb: float, free_vram_gb: float) -> tuple[int, tuple[int, ...], bool]:
+_HEAVY_VRAM_PHOTO_MODES = frozenset({"", "cinematic_depth_3d", "dolly_zoom_vertigo", "aperture_rack_focus"})
+
+
+def _cuda_photo_budget(
+    width: int,
+    total_vram_gb: float,
+    free_vram_gb: float,
+    mode: str = "",
+) -> tuple[int, tuple[int, ...], bool]:
     """Compute CUDA photo batch size, progressive retry schedule, and 4K/low-VRAM serialization."""
     free_gb = free_vram_gb if free_vram_gb > 0.0 else total_vram_gb
     if width >= 3840:
+        if mode not in _HEAVY_VRAM_PHOTO_MODES:
+            if free_gb >= 10.5:
+                return 6, (6, 3, 1), False
+            if free_gb >= 7.5:
+                return 3, (3, 1), True
+            return 1, (1,), True
         if free_gb >= 12.5:
             init_b = 3
         elif free_gb >= 7.5:
@@ -3968,24 +4110,65 @@ def render_photo_clip(
 
     has_seg_overlays = bool(segment_broll or segment_titles)
 
-    def _build_photo_cmd(force_sw: bool, out_target: Optional[Path] = None) -> list[str]:
+    def _build_photo_cmd(
+        force_sw: bool,
+        out_target: Optional[Path] = None,
+        raw_pix_fmt: Literal["rgb24", "p010le", "yuv420p"] = "rgb24",
+    ) -> list[str]:
         v_enc_local = get_video_encoder_args(hdr=hdr, force_software=force_sw)
         mux_local = build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=v_enc_local)
         target_p = out_target or tmp_out
+        raw_in_args = [
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            raw_pix_fmt,
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+        ]
+        if raw_pix_fmt == "p010le":
+            raw_in_args.extend(
+                [
+                    "-color_primaries",
+                    "bt2020",
+                    "-color_trc",
+                    "arib-std-b67",
+                    "-colorspace",
+                    "bt2020nc",
+                    "-color_range",
+                    "tv",
+                ]
+            )
+            eff_vf: list[str] = [
+                "setsar=1:1",
+                "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv",
+            ]
+        elif raw_pix_fmt == "yuv420p":
+            raw_in_args.extend(
+                [
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                    "-colorspace",
+                    "bt709",
+                    "-color_range",
+                    "tv",
+                ]
+            )
+            eff_vf = ["setsar=1:1"]
+        else:
+            eff_vf = vf_filters
+
         c = [
             _resolve_ffmpeg_bin(),
             "-y",
             "-hide_banner",
             "-loglevel",
             "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            f"{width}x{height}",
-            "-r",
-            str(fps),
+            *raw_in_args,
             "-i",
             "pipe:0",
             "-f",
@@ -4000,8 +4183,9 @@ def render_photo_clip(
                 next_input_idx=2,
                 segment_broll=segment_broll,
                 segment_titles=segment_titles,
+                fps=fps,
             )
-            fc_parts = [f"[0:v]{','.join(vf_filters)}[vbase]", *ov_parts]
+            fc_parts = [f"[0:v]{','.join(eff_vf)}[vbase]", *ov_parts]
             c.extend(extra_inputs)
             c.extend(
                 [
@@ -4015,13 +4199,22 @@ def render_photo_clip(
                     "1:a:0",
                 ]
             )
+        elif raw_pix_fmt in ("p010le", "yuv420p"):
+            c.extend(
+                [
+                    "-t",
+                    f"{duration:.3f}",
+                    "-vf",
+                    ",".join(eff_vf),
+                ]
+            )
         else:
             c.extend(
                 [
                     "-t",
                     f"{duration:.3f}",
                     "-vf",
-                    ",".join(vf_filters),
+                    ",".join(eff_vf),
                 ]
             )
         c.extend(
@@ -4051,6 +4244,10 @@ def render_photo_clip(
                 width=width,
                 total_vram_gb=hw.cuda_vram_gb,
                 free_vram_gb=free_vram_gb,
+                mode=str(ctx.get("mode") or ""),
+            )
+            gpu_pipe_fmt: Literal["rgb24", "p010le", "yuv420p"] = (
+                ("p010le" if hdr else "yuv420p") if (width % 2 == 0 and height % 2 == 0) else "rgb24"
             )
             cuda_ok = False
             last_ok_batch = cuda_batch
@@ -4065,7 +4262,7 @@ def render_photo_clip(
                     cuda_4k_held = False
                     proc = None
                     attempt_out = out_path.with_name(f".{out_path.stem}.tmp_{os.getpid()}_{threading.get_ident()}_a{attempt_idx}.mp4")
-                    cmd_attempt = _build_photo_cmd(force_sw=False, out_target=attempt_out)
+                    cmd_attempt = _build_photo_cmd(force_sw=False, out_target=attempt_out, raw_pix_fmt=gpu_pipe_fmt)
                     try:
                         if serialize_cuda:
                             _CUDA_4K_LOCK.acquire()
@@ -4084,6 +4281,9 @@ def render_photo_clip(
                             pipe_stdin=proc.stdin,
                             batch_size=attempt_batch,
                             device_override="cuda",
+                            output_pix_fmt=gpu_pipe_fmt,
+                            transition_in=transition_in if gpu_pipe_fmt != "rgb24" else None,
+                            transition_out=transition_out if gpu_pipe_fmt != "rgb24" else None,
                         )
                         cuda_ok = True
                         last_ok_batch = attempt_batch
@@ -4136,7 +4336,7 @@ def render_photo_clip(
                     attempt_out.unlink(missing_ok=True)
             if cuda_ok and ret != 0:
                 sw_out = out_path.with_name(f".{out_path.stem}.tmp_{os.getpid()}_{threading.get_ident()}_sw.mp4")
-                sw_cmd = _build_photo_cmd(force_sw=True, out_target=sw_out)
+                sw_cmd = _build_photo_cmd(force_sw=True, out_target=sw_out, raw_pix_fmt=gpu_pipe_fmt)
                 sw_proc: Optional[subprocess.Popen[bytes]] = None
                 sw_sem_held = False
                 sw_4k_held = False
@@ -4158,6 +4358,9 @@ def render_photo_clip(
                         pipe_stdin=sw_proc.stdin,
                         batch_size=last_ok_batch,
                         device_override="cuda",
+                        output_pix_fmt=gpu_pipe_fmt,
+                        transition_in=transition_in if gpu_pipe_fmt != "rgb24" else None,
+                        transition_out=transition_out if gpu_pipe_fmt != "rgb24" else None,
                     )
                 finally:
                     if sw_proc is not None and sw_proc.stdin is not None:

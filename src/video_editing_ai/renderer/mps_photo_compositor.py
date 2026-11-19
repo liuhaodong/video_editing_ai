@@ -6,7 +6,7 @@ import contextlib
 import math
 import queue
 import threading
-from typing import IO, Any, Iterator, Optional
+from typing import IO, Any, Iterator, Literal, Optional
 
 import numpy as np
 from PIL import Image
@@ -47,6 +47,203 @@ def _solve_perspective_coeffs(
         rhs.append(v)
     coeffs = np.linalg.solve(np.asarray(rows, dtype=np.float64), np.asarray(rhs, dtype=np.float64))
     return tuple(float(c) for c in coeffs)
+
+
+def _apply_gpu_transition_fades(
+    canvas: torch.Tensor,
+    frame_indices: list[int],
+    duration: float,
+    fps: int,
+    transition_in: Any = None,
+    transition_out: Any = None,
+) -> torch.Tensor:
+    """Apply exact RGB fade-in / fade-out transitions on GPU before HLG/YUV conversion."""
+    if transition_in is None and transition_out is None:
+        return canvas
+
+    def _fade_color(t_type: str) -> tuple[float, float, float]:
+        if t_type == "dip_to_white":
+            return (246.0, 242.0, 232.0)  # #F6F2E8
+        if t_type in ("dissolve", "crossfade"):
+            return (11.0, 14.0, 20.0)  # #0B0E14
+        return (0.0, 0.0, 0.0)
+
+    def _fade_dur(t_type: str, raw_d: float) -> float:
+        if t_type == "dip_to_white":
+            return min(duration * 0.35, raw_d)
+        if t_type in ("dissolve", "crossfade"):
+            return min(duration * 0.25, raw_d, 0.26)
+        return min(duration * 0.40, raw_d)
+
+    fps_f = max(1.0, float(fps))
+    in_active = (
+        transition_in is not None
+        and getattr(transition_in, "type", "none") not in ("none", "cut")
+        and float(getattr(transition_in, "duration", 0.0) or 0.0) > 0.0
+    )
+    out_active = (
+        transition_out is not None
+        and getattr(transition_out, "type", "none") not in ("none", "cut")
+        and float(getattr(transition_out, "duration", 0.0) or 0.0) > 0.0
+    )
+    if not in_active and not out_active:
+        return canvas
+
+    if in_active:
+        in_type = str(getattr(transition_in, "type", "fade"))
+        fd_in = _fade_dur(in_type, float(getattr(transition_in, "duration", 0.0)))
+        if fd_in > 1e-4:
+            alphas = [min(1.0, max(0.0, (fi / fps_f) / fd_in)) for fi in frame_indices]
+            if any(a < 0.9999 for a in alphas):
+                c_in = torch.tensor(_fade_color(in_type), device=canvas.device, dtype=canvas.dtype).view(1, 3, 1, 1)
+                a_t = torch.tensor(alphas, device=canvas.device, dtype=canvas.dtype).view(len(alphas), 1, 1, 1)
+                canvas = canvas * a_t + c_in * (1.0 - a_t)
+
+    if out_active:
+        out_type = str(getattr(transition_out, "type", "fade"))
+        fd_out = _fade_dur(out_type, float(getattr(transition_out, "duration", 0.0)))
+        st_out = max(0.0, duration - fd_out)
+        if fd_out > 1e-4:
+            alphas = [
+                1.0 if (fi / fps_f) <= st_out else min(1.0, max(0.0, 1.0 - ((fi / fps_f) - st_out) / fd_out))
+                for fi in frame_indices
+            ]
+            if any(a < 0.9999 for a in alphas):
+                c_out = torch.tensor(_fade_color(out_type), device=canvas.device, dtype=canvas.dtype).view(1, 3, 1, 1)
+                a_t = torch.tensor(alphas, device=canvas.device, dtype=canvas.dtype).view(len(alphas), 1, 1, 1)
+                canvas = canvas * a_t + c_out * (1.0 - a_t)
+
+    return canvas
+
+
+_GPU_HLG_CONST_CACHE: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_hlg_gpu_constants(device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return cached (M709_2020_fp16, Y2020_w_fp16, srgb_lut_1024_fp16) tensors on `device`."""
+    key = (device.type, int(device.index or 0))
+    cached = _GPU_HLG_CONST_CACHE.get(key)
+    if cached is not None:
+        return cached
+    m709 = torch.tensor(
+        [
+            [0.6274040, 0.3292820, 0.0433136],
+            [0.0690970, 0.9195400, 0.0113612],
+            [0.0163916, 0.0880132, 0.8955950],
+        ],
+        device=device,
+        dtype=torch.float16,
+    ).view(3, 3, 1, 1)
+    y_w = torch.tensor([0.2627, 0.6780, 0.0593], device=device, dtype=torch.float16).view(1, 3, 1, 1)
+    lin_ax = torch.linspace(0.0, 1.0, 1024, device=device, dtype=torch.float32)
+    srgb_lut = torch.where(
+        lin_ax <= 0.04045,
+        lin_ax / 12.92,
+        torch.pow((lin_ax + 0.055) / 1.055, 2.4),
+    ).to(torch.float16)
+    cached = (m709, y_w, srgb_lut)
+    _GPU_HLG_CONST_CACHE[key] = cached
+    return cached
+
+
+def _rgb_to_hlg_p010le_gpu(canvas: torch.Tensor, npl_nits: float = 380.0) -> torch.Tensor:
+    """
+    Convert `(B, 3, H, W)` sRGB [0..255] tensor directly on GPU to packed 10-bit BT.2020 HLG
+    `p010le` tensor `(B, H * 3 // 2, W)` uint16, matching FFmpeg `zscale` (`MAE ~1.16/255`).
+    """
+    scale = max(100.0, min(1000.0, float(npl_nits))) / 1000.0
+    if canvas.device.type == "cuda":
+        m709, y_w, srgb_lut = _get_hlg_gpu_constants(canvas.device)
+        idx = (canvas.clamp(0.0, 255.0) * (1023.0 / 255.0)).to(torch.long)
+        lin = srgb_lut[idx]
+        del idx
+        rgb_d = F.conv2d(lin, m709 * scale).clamp_(0.0, 1.0)
+        del lin
+        yd = (rgb_d * y_w).sum(dim=1, keepdim=True).clamp_(min=1e-4)
+        inv_ootf = torch.pow(yd.float(), -1.0 / 6.0).to(torch.float16)
+        del yd
+        rgb_s = rgb_d.mul_(inv_ootf).clamp_(0.0, 1.0)
+        del inv_ootf
+        low = torch.sqrt((rgb_s * 3.0).clamp_(min=0.0))
+        hi = 0.17883277 * torch.log((rgb_s * 12.0 - 0.28466892).clamp_(min=1e-4)) + 0.55991073
+        rgb_h = torch.where(rgb_s <= (1.0 / 12.0), low, hi).clamp_(0.0, 1.0)
+        del rgb_s, low, hi
+        y = (rgb_h * y_w).sum(dim=1)
+        y10 = (y * 876.0 + 64.0).round_().clamp_(64.0, 940.0).to(torch.int16) << 6
+        uv_in = torch.stack(
+            (
+                (rgb_h[:, 2] - y) * (896.0 / 1.8814) + 512.0,
+                (rgb_h[:, 0] - y) * (896.0 / 1.4746) + 512.0,
+            ),
+            dim=1,
+        )
+        del rgb_h, y
+        uv_sub = F.avg_pool2d(uv_in, kernel_size=2, stride=2).round_().clamp_(64.0, 960.0).to(torch.int16) << 6
+        del uv_in
+        b_sz, h, w = y10.shape
+        uv_inter = uv_sub.permute(0, 2, 3, 1).reshape(b_sz, h // 2, w)
+        return torch.cat((y10, uv_inter), dim=1).view(torch.uint16).contiguous()
+
+    x = canvas.float().mul_(1.0 / 255.0).clamp_(0.0, 1.0)
+    # 1. IEC 61966-2-1 sRGB EOTF -> scene/display linear [0..1]
+    lin_709 = torch.where(x <= 0.04045, x / 12.92, torch.pow((x + 0.055) / 1.055, 2.4))
+
+    # 2. BT.709 -> BT.2020 linear primaries (ITU-R BT.2087)
+    r7, g7, b7 = lin_709[:, 0], lin_709[:, 1], lin_709[:, 2]
+    rd = ((0.6274040 * r7 + 0.3292820 * g7 + 0.0433136 * b7) * scale).clamp_(0.0, 1.0)
+    gd = ((0.0690970 * r7 + 0.9195400 * g7 + 0.0113612 * b7) * scale).clamp_(0.0, 1.0)
+    bd = ((0.0163916 * r7 + 0.0880132 * g7 + 0.8955950 * b7) * scale).clamp_(0.0, 1.0)
+
+    # 3. Inverse HLG OOTF (gamma = 1.2) -> scene-referred linear
+    yd = (0.2627 * rd + 0.6780 * gd + 0.0593 * bd).clamp_(min=1e-7)
+    inv_ootf = torch.pow(yd, (1.0 - 1.2) / 1.2)
+    rs = (rd * inv_ootf).clamp_(0.0, 1.0)
+    gs = (gd * inv_ootf).clamp_(0.0, 1.0)
+    bs = (bd * inv_ootf).clamp_(0.0, 1.0)
+
+    # 4. ARIB STD-B67 / BT.2100 HLG OETF
+    a_hlg = 0.17883277
+    b_hlg = 0.28466892
+    c_hlg = 0.55991073
+    thresh = 1.0 / 12.0
+
+    rh = torch.where(rs <= thresh, torch.sqrt(3.0 * rs), a_hlg * torch.log((12.0 * rs - b_hlg).clamp_(min=1e-7)) + c_hlg).clamp_(0.0, 1.0)
+    gh = torch.where(gs <= thresh, torch.sqrt(3.0 * gs), a_hlg * torch.log((12.0 * gs - b_hlg).clamp_(min=1e-7)) + c_hlg).clamp_(0.0, 1.0)
+    bh = torch.where(bs <= thresh, torch.sqrt(3.0 * bs), a_hlg * torch.log((12.0 * bs - b_hlg).clamp_(min=1e-7)) + c_hlg).clamp_(0.0, 1.0)
+
+    # 5. BT.2020 NCL limited (TV) range 10-bit -> P010LE (shifted left 6 bits into uint16)
+    y = 0.2627 * rh + 0.6780 * gh + 0.0593 * bh
+    cb = (bh - y) / 1.8814
+    cr = (rh - y) / 1.4746
+
+    y10 = (y * 876.0 + 64.0).round_().clamp_(64.0, 940.0).to(torch.int32) << 6
+    uv_sub = F.avg_pool2d(torch.stack((cb, cr), dim=1), kernel_size=2, stride=2)
+    cb10 = (uv_sub[:, 0] * 896.0 + 512.0).round_().clamp_(64.0, 960.0).to(torch.int32) << 6
+    cr10 = (uv_sub[:, 1] * 896.0 + 512.0).round_().clamp_(64.0, 960.0).to(torch.int32) << 6
+
+    b_sz, h, w = y10.shape
+    uv_interleaved = torch.stack((cb10, cr10), dim=-1).reshape(b_sz, h // 2, w)
+    return torch.cat((y10, uv_interleaved), dim=1).to(torch.uint16).contiguous()
+
+
+def _rgb_to_bt709_yuv420p_gpu(canvas: torch.Tensor) -> torch.Tensor:
+    """
+    Convert `(B, 3, H, W)` sRGB [0..255] tensor directly on GPU to packed 8-bit BT.709 limited-range
+    `yuv420p` raw bytes `(B, H * W * 3 // 2)` uint8 (50% lower PCIe & pipe bandwidth vs rgb24).
+    """
+    x = canvas.float().mul_(1.0 / 255.0).clamp_(0.0, 1.0)
+    r, g, b = x[:, 0], x[:, 1], x[:, 2]
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    cb = (b - y) / 1.8556
+    cr = (r - y) / 1.5748
+
+    y8 = (y * 219.0 + 16.0).round_().clamp_(16.0, 235.0).to(torch.uint8)
+    uv_sub = F.avg_pool2d(torch.stack((cb, cr), dim=1), kernel_size=2, stride=2)
+    u8 = (uv_sub[:, 0] * 224.0 + 128.0).round_().clamp_(16.0, 240.0).to(torch.uint8)
+    v8 = (uv_sub[:, 1] * 224.0 + 128.0).round_().clamp_(16.0, 240.0).to(torch.uint8)
+
+    b_sz = y8.shape[0]
+    return torch.cat((y8.reshape(b_sz, -1), u8.reshape(b_sz, -1), v8.reshape(b_sz, -1)), dim=1).contiguous()
 
 
 def _pil_to_tensor(
@@ -329,13 +526,15 @@ class MPSPhotoCompositor:
 
         # Micro-chunk large 4K multi-channel warps (e.g. 4-layer RGBA MPI) to bound peak float32 grid_sample VRAM
         ch = int(src.shape[1])
-        pix_budget = 18_000_000 if ch <= 3 else 10_000_000
+        pix_budget = 34_000_000 if ch <= 3 else 12_000_000
         if self.device.type == "cuda" and (batch_n * out_h * out_w > pix_budget) and batch_n > 1:
-            sub_bs = 1 if (out_w >= 3840 and ch >= 4) else min(2, batch_n - 1)
+            sub_bs = 1 if (out_w >= 3840 and ch >= 4) else min(4, batch_n - 1)
             if sub_bs < batch_n:
                 chunks: list[torch.Tensor] = []
+                batched_src = int(src.shape[0]) == batch_n
                 for start_i in range(0, batch_n, sub_bs):
-                    chunks.append(self._warp_extents_batch(src, out_size, boxes[start_i : start_i + sub_bs]))
+                    sub_src = src[start_i : start_i + sub_bs] if batched_src else src
+                    chunks.append(self._warp_extents_batch(sub_src, out_size, boxes[start_i : start_i + sub_bs]))
                 return torch.cat(chunks, dim=0)
 
         _, _, src_h, src_w = src.shape
@@ -353,7 +552,7 @@ class MPSPhotoCompositor:
         grid = torch.stack((gx, gy), dim=-1)
 
         # PyTorch MPS/CPU F.grid_sample expects matching float32 inputs & grid for exact sub-pixel stability
-        src_f32 = src.float().expand(batch_n, -1, -1, -1)
+        src_f32 = src.float() if int(src.shape[0]) == batch_n else src.float().expand(batch_n, -1, -1, -1)
         warped = F.grid_sample(src_f32, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
         out = warped.to(dtype=self.work_dtype)
         del grid, src_f32, warped
@@ -1008,14 +1207,9 @@ class MPSPhotoCompositor:
             z_outs = [1.00 + 0.020 * e for e in eased_list]
             cx_outs = [0.50 + (ex - sx) * 0.12 * (e - 0.5) for e in eased_list]
             cy_outs = [0.50 + (ey - sy) * 0.10 * (e - 0.5) for e in eased_list]
-            board_work = tex["sb_board_rgb"].clone()
-            out_frames: list[torch.Tensor] = []
-            for b in range(batch_n):
-                board_work[0, :, wy : wy + wh, wx : wx + ww] = win_crops[b]
-                out_frames.append(
-                    self._crop_plane_batch(board_work, (w, h), [z_outs[b]], [cx_outs[b]], [cy_outs[b]])
-                )
-            return torch.cat(out_frames, dim=0)
+            board_batch = tex["sb_board_rgb"].expand(batch_n, -1, -1, -1).clone()
+            board_batch[:, :, wy : wy + wh, wx : wx + ww] = win_crops
+            return self._crop_plane_batch(board_batch, (w, h), z_outs, cx_outs, cy_outs)
 
         if mode == "kinfolk_linen_folio":
             kf = ctx["kinfolk_folio"]
@@ -1085,10 +1279,11 @@ class MPSPhotoCompositor:
             sm = tex["leica_surround_mask"]
             canvas = canvas * (1.0 - sm) + tex["leica_dim_rgb"] * sm
             reticle = tex["leica_reticle_rgba"]
+            locked_idx: list[int] = []
             for b, t_norm in enumerate(t_norms):
                 lock_p = _ease_out_cubic(min(1.0, t_norm / 0.32))
                 if lock_p >= 0.999:
-                    self._paste_rgba_single(canvas[b : b + 1], reticle, 0, 0)
+                    locked_idx.append(b)
                 else:
                     ret_scale = 1.0 + 0.028 * (1.0 - lock_p)
                     rw = max(1, int(round(w * ret_scale)))
@@ -1096,6 +1291,14 @@ class MPSPhotoCompositor:
                     px = (w - rw) // 2
                     py = (h - rh) // 2
                     self._paste_rgba_single(canvas[b : b + 1], reticle, px, py, dst_w=rw, dst_h=rh)
+            if locked_idx:
+                ret_a = reticle[:, 3:4] / 255.0
+                ret_rgb = reticle[:, :3]
+                if len(locked_idx) == batch_n:
+                    canvas = canvas * (1.0 - ret_a) + ret_rgb * ret_a
+                else:
+                    idx_t = torch.tensor(locked_idx, device=self.device, dtype=torch.long)
+                    canvas[idx_t] = canvas[idx_t] * (1.0 - ret_a) + ret_rgb * ret_a
             return canvas
 
         # gallery_frame & full_bleed (and any default)
@@ -1348,6 +1551,11 @@ class MPSPhotoCompositor:
         total_frames: int,
         duration: float,
         fps: int,
+        output_pix_fmt: Literal["rgb24", "p010le", "yuv420p"] = "rgb24",
+        transition_in: Any = None,
+        transition_out: Any = None,
+        hlg_npl_nits: float = 380.0,
+        pinned_dst: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         denom = max(1, total_frames - 1)
         t_norms = [f_idx / denom for f_idx in frame_indices]
@@ -1367,12 +1575,97 @@ class MPSPhotoCompositor:
                 canvas = self._composite_frosted_card_batch(
                     canvas, frame_indices=frame_indices, duration=duration, fps=fps
                 )
-                gpu_u8 = canvas.clamp(0.0, 255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
+                if transition_in is not None or transition_out is not None:
+                    canvas = _apply_gpu_transition_fades(
+                        canvas,
+                        frame_indices=frame_indices,
+                        duration=duration,
+                        fps=fps,
+                        transition_in=transition_in,
+                        transition_out=transition_out,
+                    )
+
+                if output_pix_fmt == "p010le":
+                    gpu_out = _rgb_to_hlg_p010le_gpu(canvas, npl_nits=hlg_npl_nits)
+                elif output_pix_fmt == "yuv420p":
+                    gpu_out = _rgb_to_bt709_yuv420p_gpu(canvas)
+                else:
+                    gpu_out = canvas.clamp(0.0, 255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
                 del canvas
-                out_u8 = gpu_u8.to("cpu", non_blocking=False)
+
+                if pinned_dst is not None and self.device.type == "cuda" and tuple(pinned_dst.shape) == tuple(gpu_out.shape) and pinned_dst.dtype == gpu_out.dtype:
+                    pinned_dst.copy_(gpu_out, non_blocking=True)
+                    if self._cuda_stream is not None:
+                        self._cuda_stream.synchronize()
+                    return pinned_dst
+
+                out_cpu = gpu_out.to("cpu", non_blocking=False)
                 if self._cuda_stream is not None:
                     self._cuda_stream.synchronize()
-                return out_u8
+                return out_cpu
+
+    def render_batch_raw(
+        self,
+        frame_indices: list[int],
+        total_frames: int,
+        duration: float,
+        fps: int,
+        output_pix_fmt: Literal["rgb24", "p010le", "yuv420p"] = "rgb24",
+        transition_in: Any = None,
+        transition_out: Any = None,
+        hlg_npl_nits: float = 380.0,
+        pinned_dst: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Synthesize a batch of frames in `rgb24`, `p010le` (BT.2020 HLG), or `yuv420p` (BT.709 SDR)."""
+        if not frame_indices:
+            if output_pix_fmt == "p010le":
+                return torch.empty((0, self.height * 3 // 2, self.width), dtype=torch.uint16)
+            if output_pix_fmt == "yuv420p":
+                return torch.empty((0, self.height * self.width * 3 // 2), dtype=torch.uint8)
+            return torch.empty((0, self.height, self.width, 3), dtype=torch.uint8)
+
+        try:
+            return self._render_batch_impl(
+                frame_indices=frame_indices,
+                total_frames=total_frames,
+                duration=duration,
+                fps=fps,
+                output_pix_fmt=output_pix_fmt,
+                transition_in=transition_in,
+                transition_out=transition_out,
+                hlg_npl_nits=hlg_npl_nits,
+                pinned_dst=pinned_dst,
+            )
+        except (torch.OutOfMemoryError, RuntimeError) as exc:
+            is_oom = isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower()
+            if self.device.type != "cuda" or not is_oom:
+                raise
+            try:
+                if self._cuda_stream is not None:
+                    self._cuda_stream.synchronize()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+            if len(frame_indices) <= 1:
+                raise
+            singles = [
+                self._render_batch_impl(
+                    frame_indices=[f_idx],
+                    total_frames=total_frames,
+                    duration=duration,
+                    fps=fps,
+                    output_pix_fmt=output_pix_fmt,
+                    transition_in=transition_in,
+                    transition_out=transition_out,
+                    hlg_npl_nits=hlg_npl_nits,
+                )
+                for f_idx in frame_indices
+            ]
+            cat_out = torch.cat(singles, dim=0)
+            if pinned_dst is not None and tuple(pinned_dst.shape) == tuple(cat_out.shape) and pinned_dst.dtype == cat_out.dtype:
+                pinned_dst.copy_(cat_out)
+                return pinned_dst
+            return cat_out
 
     def render_batch_rgb(
         self,
@@ -1440,13 +1733,43 @@ def stream_photo_frames_to_pipe(
     pipe_stdin: IO[bytes],
     batch_size: int = 8,
     device_override: Optional[str] = None,
+    output_pix_fmt: Literal["rgb24", "p010le", "yuv420p"] = "rgb24",
+    transition_in: Any = None,
+    transition_out: Any = None,
+    hlg_npl_nits: float = 380.0,
 ) -> None:
     """
-    Synthesize photo clip frames in batches on GPU (CUDA/MPS) and stream contiguous RGB24 buffers into
-    `pipe_stdin` through a bounded async queue so GPU compute overlaps with FFmpeg encoding.
+    Synthesize photo clip frames in batches on GPU (CUDA/MPS) and stream contiguous rawvideo buffers
+    (`rgb24`, GPU-native BT.2020 HLG `p010le`, or BT.709 `yuv420p`) into `pipe_stdin` through a
+    bounded async queue (using pinned host staging buffers on CUDA) so GPU compute overlaps FFmpeg encoding.
     """
     comp = MPSPhotoCompositor(ctx=ctx, device_override=device_override)
-    q: queue.Queue[Optional[torch.Tensor]] = queue.Queue(maxsize=3)
+    eff_batch = (
+        min(max(1, batch_size), 4)
+        if (comp.device.type != "cuda" and int(ctx.get("width", 0)) >= 3840)
+        else max(1, batch_size)
+    )
+    q: queue.Queue[Optional[tuple[torch.Tensor, int, Optional[torch.Tensor]]]] = queue.Queue(maxsize=3)
+    free_slots: queue.Queue[torch.Tensor] = queue.Queue(maxsize=3)
+    use_pinned_pool = False
+    if comp.device.type == "cuda" and total_frames > 0:
+        try:
+            w, h = comp.width, comp.height
+            if output_pix_fmt == "p010le":
+                slot_shape: tuple[int, ...] = (eff_batch, h * 3 // 2, w)
+                slot_dtype = torch.uint16
+            elif output_pix_fmt == "yuv420p":
+                slot_shape = (eff_batch, h * w * 3 // 2)
+                slot_dtype = torch.uint8
+            else:
+                slot_shape = (eff_batch, h, w, 3)
+                slot_dtype = torch.uint8
+            for _ in range(3):
+                free_slots.put(torch.empty(slot_shape, dtype=slot_dtype, pin_memory=True))
+            use_pinned_pool = True
+        except Exception:
+            use_pinned_pool = False
+
     stop_event = threading.Event()
     writer_error: list[BaseException] = []
 
@@ -1456,8 +1779,10 @@ def stream_photo_frames_to_pipe(
                 item = q.get()
                 if item is None:
                     return
+                buf_tensor, n_frames, slot_owner = item
                 try:
-                    arr_np = item.numpy()
+                    sub = buf_tensor[:n_frames]
+                    arr_np = sub.numpy()
                     if not arr_np.flags["C_CONTIGUOUS"]:
                         arr_np = np.ascontiguousarray(arr_np)
                     mv = memoryview(arr_np)
@@ -1466,7 +1791,12 @@ def stream_photo_frames_to_pipe(
                     stop_event.set()
                     return
                 finally:
-                    del item
+                    del buf_tensor
+                    if slot_owner is not None:
+                        try:
+                            free_slots.put_nowait(slot_owner)
+                        except queue.Full:
+                            pass
         except BaseException as exc:
             writer_error.append(exc)
             stop_event.set()
@@ -1475,28 +1805,53 @@ def stream_photo_frames_to_pipe(
     writer.start()
 
     try:
-        eff_batch = (
-            min(max(1, batch_size), 4)
-            if (comp.device.type != "cuda" and int(ctx.get("width", 0)) >= 3840)
-            else max(1, batch_size)
-        )
         for start_idx in range(0, total_frames, eff_batch):
             if stop_event.is_set():
                 break
             batch_indices = list(range(start_idx, min(total_frames, start_idx + eff_batch)))
-            batch_u8 = comp.render_batch_rgb(
+            n_cur = len(batch_indices)
+            slot_owner: Optional[torch.Tensor] = None
+            pinned_dst: Optional[torch.Tensor] = None
+            if use_pinned_pool:
+                while not stop_event.is_set():
+                    try:
+                        slot_owner = free_slots.get(timeout=0.2)
+                        pinned_dst = slot_owner[:n_cur]
+                        break
+                    except queue.Empty:
+                        continue
+                if stop_event.is_set():
+                    if slot_owner is not None:
+                        try:
+                            free_slots.put_nowait(slot_owner)
+                        except queue.Full:
+                            pass
+                    break
+            batch_out = comp.render_batch_raw(
                 frame_indices=batch_indices,
                 total_frames=total_frames,
                 duration=duration,
                 fps=fps,
+                output_pix_fmt=output_pix_fmt,
+                transition_in=transition_in,
+                transition_out=transition_out,
+                hlg_npl_nits=hlg_npl_nits,
+                pinned_dst=pinned_dst,
             )
+            pushed = False
             while not stop_event.is_set():
                 try:
-                    q.put(batch_u8, timeout=0.2)
+                    q.put((batch_out, n_cur, slot_owner), timeout=0.2)
+                    pushed = True
                     break
                 except queue.Full:
                     continue
-            del batch_u8
+            if not pushed and slot_owner is not None:
+                try:
+                    free_slots.put_nowait(slot_owner)
+                except queue.Full:
+                    pass
+            del batch_out
     finally:
         for _ in range(10):
             if not writer.is_alive():
