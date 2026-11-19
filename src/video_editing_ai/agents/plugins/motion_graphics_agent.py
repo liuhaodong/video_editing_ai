@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -574,23 +576,50 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                         seg_dur = round(min(7.2, max(1.8, float(host_v1.duration) - 0.12)), 2)
                         seg_start = round(float(host_v1.timeline_start) + 0.06, 2)
                         map_mp4 = maps_dir / f"flyover_leg_{leg_i + 1:02d}.mp4"
-                        render_travel_map_clip(
-                            waypoints=waypoints,
-                            output_mp4=map_mp4,
-                            style=leg_style,
-                            duration=seg_dur,
-                            width=map_w,
-                            height=map_h,
-                            fps=int(timeline.settings.fps),
-                            leg_index=leg_i,
-                            transport_mode=t_mode,
-                            hdr_safe=is_hdr,
-                            allow_tile_fetch=allow_tiles,
-                            with_audio=False,
-                            cache_dir=tiles_cache_dir,
-                            leg_modes=all_leg_modes,
-                            dynamic_zoom=allow_tiles,
+                        map_sig_payload = json.dumps(
+                            {
+                                "v": 2,
+                                "wps": [(round(w.lat, 5), round(w.lon, 5), w.label, w.hero_thumbnail_path) for w in waypoints],
+                                "style": leg_style,
+                                "dur": seg_dur,
+                                "w": map_w,
+                                "h": map_h,
+                                "fps": int(timeline.settings.fps),
+                                "leg": leg_i,
+                                "mode": t_mode,
+                                "hdr": is_hdr,
+                                "tiles": allow_tiles,
+                                "leg_modes": all_leg_modes,
+                            },
+                            sort_keys=True,
                         )
+                        map_sig = hashlib.sha1(map_sig_payload.encode("utf-8")).hexdigest()[:16]
+                        map_sig_file = map_mp4.with_suffix(".sha1")
+                        cache_hit = (
+                            map_mp4.exists()
+                            and map_mp4.stat().st_size > 10000
+                            and map_sig_file.exists()
+                            and map_sig_file.read_text(encoding="utf-8").strip() == map_sig
+                        )
+                        if not cache_hit:
+                            render_travel_map_clip(
+                                waypoints=waypoints,
+                                output_mp4=map_mp4,
+                                style=leg_style,
+                                duration=seg_dur,
+                                width=map_w,
+                                height=map_h,
+                                fps=int(timeline.settings.fps),
+                                leg_index=leg_i,
+                                transport_mode=t_mode,
+                                hdr_safe=is_hdr,
+                                allow_tile_fetch=allow_tiles,
+                                with_audio=False,
+                                cache_dir=tiles_cache_dir,
+                                leg_modes=all_leg_modes,
+                                dynamic_zoom=allow_tiles,
+                            )
+                            map_sig_file.write_text(map_sig, encoding="utf-8")
                         broll_id = f"broll_map_{len(v2_map_windows) + 1:02d}"
                         timeline.broll_track.append(
                             VisualTrackItem(
