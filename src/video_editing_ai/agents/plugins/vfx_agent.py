@@ -35,6 +35,9 @@ class VFXAgent(BaseEditingAgent):
 
         for idx, item in enumerate(timeline.visual_track):
             note_low = (item.narrative_note or "").lower()
+            src_low = str(item.source or "").lower()
+            if "travel_maps" in src_low or "flyover_leg_" in src_low or "2.5d travel map" in note_low:
+                continue
             kb = item.ken_burns if item.type == "photo" else None
             kb_mode = kb.mode if kb is not None else ""
             kb_palette = getattr(kb, "surface_palette", "auto") if kb is not None else "auto"

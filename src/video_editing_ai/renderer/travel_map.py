@@ -297,9 +297,9 @@ def resolve_travel_map_style(
 
     t_mode = (transport_mode or "auto").strip().lower()
     if t_mode in ("flight", "boat"):
-        return "aerial_relief_hybrid"
+        return "satellite_hybrid_4k"
     if t_mode in ("drive", "train", "walk"):
-        return "google_road_navigator"
+        return "midnight_vox_atlas"
 
     theme_map = {
         "criterion_atelier": "archival_expedition_parchment",
@@ -3207,8 +3207,16 @@ def render_travel_map_frame(
             scale=veh_scale_w * (0.92 - 0.28 * alt_sin),
             alpha=int(round(125 - 65 * alt_sin)),
         )
-    elif resolved_mode == "train":
-        _draw_articulated_train(world_rgba, arc_path=ground_arc_path, u=u, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w)
+    elif resolved_mode in ("train", "walk", "drive"):
+        _draw_glow_beacon_dot(
+            world_rgba,
+            cx=head_pt[0],
+            cy=head_pt[1],
+            glow_rgb=spec["route_glow"],
+            core_rgb=spec["accent"],
+            stroke_rgb=stroke_col,
+            scale=veh_scale_w,
+        )
     elif resolved_mode == "boat":
         _draw_boat_kelvin_wake(world_rgba, arc_path=ground_arc_path, u=u, scale=veh_scale_w)
         _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode="boat", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=bank_factor)
@@ -4023,7 +4031,7 @@ def render_google_earth_flyover_frame(
         alt_sin = math.sin(math.pi * leg_u)
         g_heading, _ = ground_arc_path.tangent_and_curvature(leg_u, window_px=24.0 * s_w)
         _draw_aircraft_ground_shadow(world_rgba, ground_head_pt[0] + 10.0 * s_w * alt_sin, ground_head_pt[1] + 12.0 * s_w * alt_sin, g_heading, veh_scale_w * (0.92 - 0.28 * alt_sin), int(round(125 - 65 * alt_sin)))
-    elif cur_mode in ("train", "walk"):
+    elif cur_mode in ("train", "walk", "drive"):
         _draw_glow_beacon_dot(
             world_rgba,
             cx=head_pt[0],

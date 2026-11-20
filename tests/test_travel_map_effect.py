@@ -413,8 +413,11 @@ def test_arclength_constant_speed_and_great_circle_geodesic() -> None:
 
 
 def test_all_vehicles_and_satellite_hybrid_4k_hdr(tmp_path: Path) -> None:
-    assert resolve_travel_map_style("auto", transport_mode="drive") == "google_road_navigator"
-    assert resolve_travel_map_style("auto", transport_mode="flight") == "aerial_relief_hybrid"
+    assert resolve_travel_map_style("auto", transport_mode="drive") == "midnight_vox_atlas"
+    assert resolve_travel_map_style("auto", transport_mode="train") == "midnight_vox_atlas"
+    assert resolve_travel_map_style("auto", transport_mode="walk") == "midnight_vox_atlas"
+    assert resolve_travel_map_style("auto", transport_mode="flight") == "satellite_hybrid_4k"
+    assert resolve_travel_map_style("auto", transport_mode="boat") == "satellite_hybrid_4k"
     assert "satellite_hybrid_4k" in CART_THEME_SPECS
 
     waypoints = [
@@ -569,6 +572,78 @@ def test_cuda_travel_map_warp_parity_and_ssl_singleton(monkeypatch: pytest.Monke
         )
         mae = float(np.abs(gpu_out.astype(np.float32) - cpu_out.astype(np.float32)).mean())
         assert mae < 1.5, f"CUDA/CPU map warp parity drift for g_str={g_str}: MAE={mae:.3f}"
+
+
+def test_glow_beacon_dot_default_for_all_ground_modes_and_vfx_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify glowing beacon dot is used by default for train/walk/drive across both renderers and VFX skips map clips."""
+    from video_editing_ai.agents.base import PipelineBlackboard
+    from video_editing_ai.agents.plugins.vfx_agent import VFXAgent
+    from video_editing_ai.renderer import travel_map as tm
+
+    beacon_calls: list[tuple[float, float]] = []
+    orig_beacon = tm._draw_glow_beacon_dot
+
+    def _spy_beacon(*args, **kwargs):
+        beacon_calls.append((float(kwargs.get("cx", 0.0)), float(kwargs.get("cy", 0.0))))
+        return orig_beacon(*args, **kwargs)
+
+    monkeypatch.setattr(tm, "_draw_glow_beacon_dot", _spy_beacon)
+    wps = [
+        {"label": "Zurich HB", "lat": 47.3779, "lon": 8.5402, "alt_m": 408.0},
+        {"label": "ETH Zurich", "lat": 47.3764, "lon": 8.5476, "alt_m": 446.0},
+    ]
+    for mode in ("train", "walk", "drive"):
+        beacon_calls.clear()
+        tm.render_travel_map_frame(
+            waypoints=wps, style="midnight_vox_atlas", width=320, height=180,
+            leg_index=0, t_norm=0.5, transport_mode=mode, allow_tile_fetch=False,
+        )
+        assert len(beacon_calls) == 1, f"Expected beacon dot in render_travel_map_frame for mode={mode}"
+
+        beacon_calls.clear()
+        tm.render_google_earth_flyover_frame(
+            waypoints=wps, style="midnight_vox_atlas", width=320, height=180,
+            global_t=0.5, leg_index=0, leg_modes=[mode], transport_mode=mode, allow_tile_fetch=False,
+        )
+        assert len(beacon_calls) == 1, f"Expected beacon dot in render_google_earth_flyover_frame for mode={mode}"
+
+    # Verify VFXAgent leaves travel-map clips untouched (no contrast_pop / brightness blowout)
+    proj = tmp_path / "vfx_map_proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    tl = EditTimeline(
+        project_name="vfx_map_test",
+        visual_track=[
+            VisualTrackItem(
+                id="clip_map_01",
+                type="video",
+                roll_type="b_roll",
+                source=str(proj / "cache" / "travel_maps" / "map_01.mp4"),
+                timeline_start=0.0,
+                duration=6.0,
+                source_in=0.0,
+                source_out=6.0,
+                narrative_note="2.5D Travel Map (midnight_vox_atlas)",
+            ),
+            VisualTrackItem(
+                id="clip_broll_01",
+                type="video",
+                roll_type="b_roll",
+                source=str(proj / "broll.mp4"),
+                timeline_start=6.0,
+                duration=5.0,
+                source_in=0.0,
+                source_out=5.0,
+                narrative_note="Scenic harbor panning shot",
+            ),
+        ],
+    )
+    bb = PipelineBlackboard(media_dir=proj, project_dir=proj, user_prompt="test", use_antigravity=False)
+    bb.timeline = tl
+    VFXAgent().run(bb)
+    target_ids = {fx.target_clip_id for fx in bb.timeline.effects_track}
+    assert "clip_map_01" not in target_ids
+    assert "clip_broll_01" in target_ids
+
 
 
 

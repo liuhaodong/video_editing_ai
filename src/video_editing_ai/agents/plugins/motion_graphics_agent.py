@@ -530,7 +530,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 bearing = round(initial_bearing_deg(orig_wp.lat, orig_wp.lon, dest_wp.lat, dest_wp.lon), 1)
                 t_mode = all_leg_modes[leg_i]
                 if str(tm_raw_style or "auto").strip().lower() == "auto":
-                    if t_mode in ("flight", "boat") or (t_mode == "train" and leg_km >= 10.0):
+                    if t_mode in ("flight", "boat"):
                         leg_style = "satellite_hybrid_4k" if allow_tiles else resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
                     else:
                         leg_style = resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
