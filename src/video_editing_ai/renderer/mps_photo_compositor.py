@@ -22,10 +22,17 @@ _CUDA_MEM_FRACTION_SET: set[int] = set()
 
 
 def _ease_in_out_cubic(t: float) -> float:
-    if t < 0.5:
-        return 4.0 * t * t * t
-    p = 2.0 * t - 2.0
+    t_c = max(0.0, min(1.0, t))
+    if t_c < 0.5:
+        return 4.0 * t_c * t_c * t_c
+    p = 2.0 * t_c - 2.0
     return 0.5 * p * p * p + 1.0
+
+
+def _ease_in_out_quintic(t: float) -> float:
+    """C2-continuous quintic smootherstep (zero velocity & zero acceleration at endpoints and midpoint)."""
+    t_c = max(0.0, min(1.0, t))
+    return t_c * t_c * t_c * (t_c * (t_c * 6.0 - 15.0) + 10.0)
 
 
 def _ease_out_cubic(t: float) -> float:
@@ -452,6 +459,70 @@ class MPSPhotoCompositor:
                 [8.0, 10.0, 14.0], device=self.device, dtype=self.work_dtype
             ).view(1, 3, 1, 1)
             t["leica_reticle_rgba"] = self._up(lf["reticle_rgba"], "RGBA")
+        elif mode == "swiss_monograph_grid":
+            sg = ctx["swiss_grid"]
+            t["sw_page_rgb"] = self._up(sg["page_rgb"], "RGB")
+            t["sw_hero_over"] = self._up(sg["hero_over"], "RGB")
+            t["sw_det_over"] = self._up(sg["det_over"], "RGB")
+        elif mode == "editorial_bookspread":
+            bs = ctx["bookspread"]
+            t["bs_table_rgb"] = self._up(bs["table_rgb"], "RGB")
+            t["bs_p1_over"] = self._up(bs["p1_over"], "RGB")
+            t["bs_p2_over"] = self._up(bs["p2_over"], "RGB")
+        elif mode == "gallery_wall_triptych":
+            t["gw_wall_rgb"] = self._up(ctx["gallery_wall"]["wall_rgb"], "RGB")
+        elif mode == "archival_lightbox_strip":
+            t["lb_strip_rgb"] = self._up(ctx["lightbox_strip"]["strip_rgb"], "RGB")
+        elif mode == "optical_tilt_shift":
+            ts = ctx["tilt_shift"]
+            t["ts_sharp_over"] = self._up(ts["sharp_over"], "RGB")
+            t["ts_bokeh_over"] = self._up(ts["bokeh_over"], "RGB")
+        elif mode == "darkroom_developer_reveal":
+            dd = ctx["darkroom_dev"]
+            t["dd_color_over"] = self._up(dd["color_over"], "RGB")
+            t["dd_bw_over"] = self._up(dd["bw_over"], "RGB")
+            t["dd_paper_rgb"] = torch.tensor(
+                list(dd["paper_rgb"]), device=self.device, dtype=self.work_dtype
+            ).view(1, 3, 1, 1)
+        elif mode == "cinema_gate_reveal":
+            cg = ctx["cinema_gate"]
+            t["cg_photo_over"] = self._up(cg["photo_over"], "RGB")
+            t["cg_txt_rgba"] = self._up(cg["txt_rgba"], "RGBA")
+        elif mode == "prism_glass_refraction":
+            pg = ctx["prism_glass"]
+            t["pg_base_over"] = self._up(pg["base_over"], "RGB")
+            t["pg_soft_over"] = self._up(pg["soft_over"], "RGB")
+        elif mode == "venetian_sunbeam_pan":
+            vn = ctx["venetian"]
+            t["vn_base_over"] = self._up(vn["base_over"], "RGB")
+            m = vn["motes"]
+            t["vn_mx0"] = torch.from_numpy(m["mx0"]).to(device=self.device, dtype=torch.float32)
+            t["vn_my0"] = torch.from_numpy(m["my0"]).to(device=self.device, dtype=torch.float32)
+            t["vn_m_rad"] = torch.from_numpy(m["m_rad"]).to(device=self.device, dtype=torch.float32)
+            t["vn_m_ph"] = torch.from_numpy(m["m_ph"]).to(device=self.device, dtype=torch.float32)
+        elif mode == "vintage_postcard_deck":
+            pd_c = ctx["postcard_deck"]
+            t["pd_desk_rgb"] = self._up(pd_c["desk_rgb"], "RGB")
+            t["pd_c1_rgba"] = self._up(pd_c["card1_rgba"], "RGBA")
+            t["pd_c2_rgba"] = self._up(pd_c["card2_rgba"], "RGBA")
+        elif mode == "viewfinder_shutter_snap":
+            ss = ctx["shutter_snap"]
+            t["ss_live_over"] = self._up(ss["live_over"], "RGB")
+            t["ss_vf_rgba"] = self._up(ss["vf_rgba"], "RGBA")
+            t["ss_mat_rgb"] = self._up(ss["mat_rgb"], "RGB")
+        elif mode == "accordion_leporello_fold":
+            lp = ctx["leporello"]
+            t["lp_bg_rgb"] = self._up(lp["bg_rgb"], "RGB")
+            t["lp_panels_rgba"] = [self._up(p, "RGBA") for p in lp["panels_rgba"]]
+        elif mode == "film_strip_sprocket_glide":
+            t["fs_strip_rgb"] = self._up(ctx["film_sprocket"]["strip_rgb"], "RGB")
+        elif mode == "museum_acrylic_float":
+            af = ctx["acrylic_float"]
+            t["af_wall_rgb"] = self._up(af["wall_rgb"], "RGB")
+            t["af_acrylic_rgba"] = self._up(af["acrylic_rgba"], "RGBA")
+            t["af_shadow_rgba"] = self._up(af["shadow_rgba"], "RGBA")
+        elif mode == "kinetic_triptych_reveal":
+            t["kt_cols_over"] = [self._up(c, "RGB") for c in ctx["kinetic_triptych"]["cols_over"]]
         else:
             t["base_static_img"] = self._up(ctx["base_static_img"], "RGB")
 
@@ -478,7 +549,7 @@ class MPSPhotoCompositor:
         elif fx_type == "fine_art_rag_texture":
             t["fx_rag"] = self._up(fx["rag_img"], "RGB")
         elif fx_type == "caustic_water_shimmer":
-            t["fx_shimmer"] = self._up(fx["shimmer_img"], "RGB")
+            t["fx_shimmer_over"] = self._up(fx["shimmer_over"], "RGB")
         elif fx_type == "architectural_window_dapple":
             t["fx_dapple_sun_over"] = self._up(fx["sun_mask_over"], "L") / 255.0
             t["fx_dapple_shade_over"] = self._up(fx["shade_mask_over"], "L") / 255.0
@@ -580,37 +651,47 @@ class MPSPhotoCompositor:
         self,
         canvas_slice: torch.Tensor,
         src_rgba: torch.Tensor,
-        px: int,
-        py: int,
-        dst_w: Optional[int] = None,
-        dst_h: Optional[int] = None,
+        px: float,
+        py: float,
+        dst_w: Optional[float] = None,
+        dst_h: Optional[float] = None,
+        alpha_mul: float = 1.0,
     ) -> None:
-        """Alpha-composite an RGBA tensor `(1, 4, sh, sw)` onto a `(1, 3, H, W)` canvas in-place."""
+        """Alpha-composite an RGBA tensor `(1, 4, sh, sw)` onto `(1, 3, H, W)` at floating-point `(px, py)` with sub-pixel resampling."""
+        if alpha_mul <= 1e-4:
+            return
         _, _, ch, cw = canvas_slice.shape
         _, _, sh, sw = src_rgba.shape
-        tw = sw if dst_w is None else max(1, dst_w)
-        th = sh if dst_h is None else max(1, dst_h)
+        tw = float(sw) if dst_w is None else max(1.0, float(dst_w))
+        th = float(sh) if dst_h is None else max(1.0, float(dst_h))
 
-        ox0 = max(0, px)
-        oy0 = max(0, py)
-        ox1 = min(cw, px + tw)
-        oy1 = min(ch, py + th)
+        ox0 = max(0, int(math.floor(px)))
+        oy0 = max(0, int(math.floor(py)))
+        ox1 = min(cw, int(math.ceil(px + tw)))
+        oy1 = min(ch, int(math.ceil(py + th)))
         if ox1 <= ox0 or oy1 <= oy0:
             return
 
-        sx0 = (ox0 - px) * (sw / float(tw))
-        sy0 = (oy0 - py) * (sh / float(th))
-        sx1 = (ox1 - px) * (sw / float(tw))
-        sy1 = (oy1 - py) * (sh / float(th))
+        sx0 = (ox0 - px) * (sw / tw)
+        sy0 = (oy0 - py) * (sh / th)
+        sx1 = (ox1 - px) * (sw / tw)
+        sy1 = (oy1 - py) * (sh / th)
 
-        if dst_w is None and dst_h is None:
-            sub = src_rgba[:, :, int(round(sy0)) : int(round(sy1)), int(round(sx0)) : int(round(sx1))]
+        is_int_aligned = (
+            dst_w is None
+            and dst_h is None
+            and abs(px - round(px)) < 1e-3
+            and abs(py - round(py)) < 1e-3
+        )
+        if is_int_aligned:
+            ix0, iy0 = int(round(sx0)), int(round(sy0))
+            sub = src_rgba[:, :, iy0 : iy0 + (oy1 - oy0), ix0 : ix0 + (ox1 - ox0)]
             if sub.shape[2] != (oy1 - oy0) or sub.shape[3] != (ox1 - ox0):
                 sub = self._warp_extents_batch(src_rgba, (ox1 - ox0, oy1 - oy0), [(sx0, sy0, sx1, sy1)])
         else:
             sub = self._warp_extents_batch(src_rgba, (ox1 - ox0, oy1 - oy0), [(sx0, sy0, sx1, sy1)])
 
-        a = sub[:, 3:4] / 255.0
+        a = (sub[:, 3:4] / 255.0) * float(alpha_mul)
         roi = canvas_slice[:, :, oy0:oy1, ox0:ox1]
         canvas_slice[:, :, oy0:oy1, ox0:ox1] = roi * (1.0 - a) + sub[:, :3] * a
 
@@ -721,7 +802,7 @@ class MPSPhotoCompositor:
         w, h = self.width, self.height
         sf = self.scale_factor
         batch_n = len(t_norms)
-        eased_list = [_ease_in_out_cubic(t) for t in t_norms]
+        eased_list = [_ease_in_out_quintic(t) for t in t_norms]
 
         s_zoom, e_zoom = float(ctx["s_zoom"]), float(ctx["e_zoom"])
         sx, sy, ex, ey = float(ctx["sx"]), float(ctx["sy"]), float(ctx["ex"]), float(ctx["ey"])
@@ -733,12 +814,12 @@ class MPSPhotoCompositor:
             cys = [0.50] * batch_n
             canvas = self._crop_plane_batch(tex["bg_plane"], (w, h), zooms, cxs, cys)
             c1, c2 = tex["fg_card_1"], tex["fg_card_2"]
-            left_cx, right_cx = int(w * 0.28), int(w * 0.72)
-            mid_cy = int(h * card_cy_ratio)
+            left_cx, right_cx = w * 0.28, w * 0.72
+            mid_cy = h * card_cy_ratio
             for b, eased in enumerate(eased_list):
-                drift_px = int(round((eased - 0.5) * 24.0 * sf))
-                self._paste_rgba_single(canvas[b : b + 1], c1, left_cx - int(c1.shape[3]) // 2, mid_cy - int(c1.shape[2]) // 2 - drift_px)
-                self._paste_rgba_single(canvas[b : b + 1], c2, right_cx - int(c2.shape[3]) // 2, mid_cy - int(c2.shape[2]) // 2 + drift_px)
+                drift_px = (eased - 0.5) * 24.0 * sf
+                self._paste_rgba_single(canvas[b : b + 1], c1, left_cx - float(c1.shape[3]) * 0.5, mid_cy - float(c1.shape[2]) * 0.5 - drift_px)
+                self._paste_rgba_single(canvas[b : b + 1], c2, right_cx - float(c2.shape[3]) * 0.5, mid_cy - float(c2.shape[2]) * 0.5 + drift_px)
             return canvas
 
         if mode == "triptych_cinematic":
@@ -746,20 +827,21 @@ class MPSPhotoCompositor:
             cxs = [0.50 - 0.03 * (e - 0.5) for e in eased_list]
             canvas = self._crop_plane_batch(tex["bg_plane"], (w, h), zooms, cxs, [0.50] * batch_n)
             panels: list[torch.Tensor] = tex["triptych_panels"]
-            centers_x = [int(w * 0.20), int(w * 0.50), int(w * 0.80)]
-            mid_cy = int(h * card_cy_ratio)
+            centers_x = [w * 0.20, w * 0.50, w * 0.80]
+            mid_cy = h * card_cy_ratio
             drift_dirs = [-1.0, 0.85, -1.0]
             for b, (t_norm, eased) in enumerate(zip(t_norms, eased_list)):
                 for p_i, p_card in enumerate(panels):
                     stagger_start = p_i * 0.06
-                    enter_p = _ease_out_cubic((t_norm - stagger_start) / 0.18) if t_norm > stagger_start else 0.0
-                    if enter_p <= 0.02:
+                    enter_p = _ease_in_out_quintic((t_norm - stagger_start) / 0.28) if t_norm > stagger_start else 0.0
+                    alpha_m = min(1.0, enter_p * 1.45)
+                    if alpha_m <= 0.01:
                         continue
-                    slide_in_y = int(round((1.0 - enter_p) * 38.0 * sf))
-                    drift_y = int(round((eased - 0.5) * 20.0 * sf * drift_dirs[p_i]))
-                    px = centers_x[p_i] - int(p_card.shape[3]) // 2
-                    py = max(8, mid_cy - int(p_card.shape[2]) // 2 + drift_y + slide_in_y)
-                    self._paste_rgba_single(canvas[b : b + 1], p_card, px, py)
+                    slide_in_y = (1.0 - enter_p) * 32.0 * sf
+                    drift_y = (eased - 0.5) * 20.0 * sf * drift_dirs[p_i]
+                    px = centers_x[p_i] - float(p_card.shape[3]) * 0.5
+                    py = max(8.0, mid_cy - float(p_card.shape[2]) * 0.5 + drift_y + slide_in_y)
+                    self._paste_rgba_single(canvas[b : b + 1], p_card, px, py, alpha_mul=alpha_m)
             return canvas
 
         if mode == "polaroid_scrapbook":
@@ -767,25 +849,26 @@ class MPSPhotoCompositor:
             cxs = [0.50 + 0.03 * (e - 0.5) for e in eased_list]
             canvas = self._crop_plane_batch(tex["bg_plane"], (w, h), zooms, cxs, [0.50] * batch_n)
             p1, p2 = tex["polaroid_1"], tex["polaroid_2"]
-            mid_cy = int(h * card_cy_ratio)
+            mid_cy = h * card_cy_ratio
             for b, (t_norm, eased) in enumerate(zip(t_norms, eased_list)):
                 if p2 is not None:
-                    drift = int(round((eased - 0.5) * 18.0 * sf))
-                    x1 = int(w * 0.33) - int(p1.shape[3]) // 2
-                    y1 = max(8, mid_cy - int(p1.shape[2]) // 2 - drift)
+                    drift = (eased - 0.5) * 18.0 * sf
+                    x1 = w * 0.33 - float(p1.shape[3]) * 0.5
+                    y1 = max(8.0, mid_cy - float(p1.shape[2]) * 0.5 - drift)
                     self._paste_rgba_single(canvas[b : b + 1], p1, x1, y1)
-                    enter_2 = _ease_out_cubic((t_norm - 0.08) / 0.24) if t_norm > 0.08 else 0.0
-                    if enter_2 > 0.02:
-                        slide_x = int(round((1.0 - enter_2) * 52.0 * sf))
-                        x2 = int(w * 0.67) - int(p2.shape[3]) // 2 + slide_x
-                        y2 = max(8, mid_cy - int(p2.shape[2]) // 2 + drift)
-                        self._paste_rgba_single(canvas[b : b + 1], p2, x2, y2)
+                    enter_2 = _ease_in_out_quintic((t_norm - 0.08) / 0.30) if t_norm > 0.08 else 0.0
+                    alpha_2 = min(1.0, enter_2 * 1.45)
+                    if alpha_2 > 0.01:
+                        slide_x = (1.0 - enter_2) * 44.0 * sf
+                        x2 = w * 0.67 - float(p2.shape[3]) * 0.5 + slide_x
+                        y2 = max(8.0, mid_cy - float(p2.shape[2]) * 0.5 + drift)
+                        self._paste_rgba_single(canvas[b : b + 1], p2, x2, y2, alpha_mul=alpha_2)
                 else:
                     scale_p = 0.96 + 0.05 * eased
-                    cw = max(1, int(round(int(p1.shape[3]) * scale_p)))
-                    ch = max(1, int(round(int(p1.shape[2]) * scale_p)))
-                    px = (w - cw) // 2 + int(round((eased - 0.5) * 22.0 * sf))
-                    py = max(8, mid_cy - ch // 2)
+                    cw = max(1.0, float(p1.shape[3]) * scale_p)
+                    ch = max(1.0, float(p1.shape[2]) * scale_p)
+                    px = (w - cw) * 0.5 + (eased - 0.5) * 22.0 * sf
+                    py = max(8.0, mid_cy - ch * 0.5)
                     self._paste_rgba_single(canvas[b : b + 1], p1, px, py, dst_w=cw, dst_h=ch)
             return canvas
 
@@ -852,7 +935,7 @@ class MPSPhotoCompositor:
 
             masks_b: list[torch.Tensor] = []
             for t_norm, z, cx, cy in zip(t_norms, zooms, cxs, cys):
-                focus_p = _ease_in_out_cubic(min(1.0, t_norm / 0.85))
+                focus_p = _ease_in_out_quintic(min(1.0, t_norm / 0.85))
                 focus_d = f_start + (f_end - f_start) * focus_p
                 dist = (rf_depth_q - focus_d).abs()
                 lin = ((dist - 0.06) / 0.24).clamp(0.0, 1.0)
@@ -884,7 +967,7 @@ class MPSPhotoCompositor:
 
             masks_b = []
             for t_norm, z, cx, cy in zip(t_norms, zooms, cxs, cys):
-                bloom_p = _ease_in_out_cubic(min(1.0, t_norm / 0.88))
+                bloom_p = _ease_in_out_quintic(min(1.0, t_norm / 0.88))
                 thresh = 1.06 - 1.26 * bloom_p
                 soft_k = ((bloom_depth_q - thresh) / 0.32).clamp(0.0, 1.0)
                 color_w_q = soft_k * soft_k * (3.0 - 2.0 * soft_k)
@@ -963,31 +1046,26 @@ class MPSPhotoCompositor:
             cys = [0.5 - (ey - sy) * e * 0.22 for e in eased_list]
             canvas = self._crop_plane_batch(tex["bg_plane"], (w, h), zooms, cxs, cys)
             fg_card = tex["fg_card_1"]
-            fh_orig, fw_orig = int(fg_card.shape[2]), int(fg_card.shape[3])
+            fh_orig, fw_orig = float(fg_card.shape[2]), float(fg_card.shape[3])
             for b, eased in enumerate(eased_list):
                 fg_dx = (ex - sx) * eased
                 fg_dy = (ey - sy) * eased
                 fg_scale = 0.982 + 0.030 * eased
-                cw = max(1, int(round(fw_orig * fg_scale)))
-                ch = max(1, int(round(fh_orig * fg_scale)))
-                px = (w - cw) // 2 + int(round(fg_dx * w * 0.06))
-                py = max(10, int(h * card_cy_ratio) - ch // 2 + int(round(fg_dy * h * 0.045)))
+                cw = max(1.0, fw_orig * fg_scale)
+                ch = max(1.0, fh_orig * fg_scale)
+                px = (w - cw) * 0.5 + fg_dx * w * 0.06
+                py = max(10.0, h * card_cy_ratio - ch * 0.5 + fg_dy * h * 0.045)
                 self._paste_rgba_single(canvas[b : b + 1], fg_card, px, py, dst_w=cw, dst_h=ch)
             return canvas
 
         if mode == "contact_sheet_zoom":
             hcx, hcy = ctx["contact_hero_xy"]
             zooms, cxs, cys = [], [], []
-            for t_norm in t_norms:
-                if t_norm <= 0.14:
-                    zooms.append(1.00 + 0.04 * (t_norm / 0.14))
-                    cxs.append(0.50)
-                    cys.append(0.50)
-                else:
-                    push_p = _ease_in_out_cubic(min(1.0, (t_norm - 0.14) / 0.86))
-                    zooms.append(1.04 + 1.48 * push_p)
-                    cxs.append(0.50 + (hcx - 0.50) * push_p)
-                    cys.append(0.50 + (hcy - 0.50) * push_p)
+            for t_norm, eased in zip(t_norms, eased_list):
+                push_p = _ease_in_out_quintic(max(0.0, (t_norm - 0.05) / 0.95))
+                zooms.append(1.00 + 0.03 * eased + 1.48 * push_p)
+                cxs.append(0.50 + (hcx - 0.50) * push_p)
+                cys.append(0.50 + (hcy - 0.50) * push_p)
             return self._crop_plane_batch(tex["contact_sheet"], (w, h), zooms, cxs, cys)
 
         if mode == "split_diopter_focus":
@@ -1047,13 +1125,13 @@ class MPSPhotoCompositor:
             cxs = [0.50 + (ex - sx) * e * 0.35 for e in eased_list]
             canvas = self._crop_plane_batch(tex["bg_plane"], (w, h), zooms, cxs, [0.50] * batch_n)
             slide_card = tex["mf_slide_card"]
-            sh_orig, sw_orig = int(slide_card.shape[2]), int(slide_card.shape[3])
+            sh_orig, sw_orig = float(slide_card.shape[2]), float(slide_card.shape[3])
             for b, eased in enumerate(eased_list):
                 scale_s = 0.96 + 0.05 * eased
-                cw = max(1, int(round(sw_orig * scale_s)))
-                ch = max(1, int(round(sh_orig * scale_s)))
-                px = (w - cw) // 2 + int(round((eased - 0.5) * 18.0 * sf))
-                py = max(8, int(h * card_cy_ratio) - ch // 2)
+                cw = max(1.0, sw_orig * scale_s)
+                ch = max(1.0, sh_orig * scale_s)
+                px = (w - cw) * 0.5 + (eased - 0.5) * 18.0 * sf
+                py = max(8.0, h * card_cy_ratio - ch * 0.5)
                 self._paste_rgba_single(canvas[b : b + 1], slide_card, px, py, dst_w=cw, dst_h=ch)
             return canvas
 
@@ -1249,25 +1327,22 @@ class MPSPhotoCompositor:
             canvas = self._crop_plane_batch(tex["duo_bg_rgb"], (w, h), zooms, [0.50] * batch_n, [0.50] * batch_n)
             anc = tex["duo_anchor_rgba"]
             fg_c = tex["duo_fg_rgba"]
-            anc_h, anc_w = int(anc.shape[2]), int(anc.shape[3])
-            fg_h, fg_w = int(fg_c.shape[2]), int(fg_c.shape[3])
+            anc_h, anc_w = float(anc.shape[2]), float(anc.shape[3])
+            fg_h, fg_w = float(fg_c.shape[2]), float(fg_c.shape[3])
             has_card_f = bool(ctx.get("has_card"))
             for b, eased in enumerate(eased_list):
                 s1 = 0.990 + 0.020 * eased
-                w1 = max(1, int(round(anc_w * s1)))
-                h1 = max(1, int(round(anc_h * s1)))
-                x1 = int(w * 0.39) - w1 // 2 + int(round((0.5 - eased) * 18.0 * sf))
-                y1 = max(8, int(h * (0.42 if has_card_f else 0.46)) - h1 // 2)
+                w1 = max(1.0, anc_w * s1)
+                h1 = max(1.0, anc_h * s1)
+                x1 = w * 0.39 - w1 * 0.5 + (0.5 - eased) * 18.0 * sf
+                y1 = max(8.0, h * (0.42 if has_card_f else 0.46) - h1 * 0.5)
                 self._paste_rgba_single(canvas[b : b + 1], anc, x1, y1, dst_w=w1, dst_h=h1)
 
                 s2 = 0.975 + 0.038 * eased
-                w2 = max(1, int(round(fg_w * s2)))
-                h2 = max(1, int(round(fg_h * s2)))
-                x2 = int(w * 0.68) - w2 // 2 + int(round((eased - 0.5) * 32.0 * sf))
-                y2 = max(
-                    12,
-                    int(h * (0.53 if has_card_f else 0.58)) - h2 // 2 + int(round((0.5 - eased) * 12.0 * sf)),
-                )
+                w2 = max(1.0, fg_w * s2)
+                h2 = max(1.0, fg_h * s2)
+                x2 = w * 0.68 - w2 * 0.5 + (eased - 0.5) * 32.0 * sf
+                y2 = max(12.0, h * (0.53 if has_card_f else 0.58) - h2 * 0.5 + (0.5 - eased) * 12.0 * sf)
                 self._paste_rgba_single(canvas[b : b + 1], fg_c, x2, y2, dst_w=w2, dst_h=h2)
             return canvas
 
@@ -1281,16 +1356,14 @@ class MPSPhotoCompositor:
             reticle = tex["leica_reticle_rgba"]
             locked_idx: list[int] = []
             for b, t_norm in enumerate(t_norms):
-                lock_p = _ease_out_cubic(min(1.0, t_norm / 0.32))
+                lock_p = _ease_in_out_quintic(min(1.0, t_norm / 0.38))
                 if lock_p >= 0.999:
                     locked_idx.append(b)
                 else:
-                    ret_scale = 1.0 + 0.028 * (1.0 - lock_p)
-                    rw = max(1, int(round(w * ret_scale)))
-                    rh = max(1, int(round(h * ret_scale)))
-                    px = (w - rw) // 2
-                    py = (h - rh) // 2
-                    self._paste_rgba_single(canvas[b : b + 1], reticle, px, py, dst_w=rw, dst_h=rh)
+                    ret_scale = 1.0 + 0.026 * (1.0 - lock_p)
+                    rw = max(1.0, w * ret_scale)
+                    rh = max(1.0, h * ret_scale)
+                    self._paste_rgba_single(canvas[b : b + 1], reticle, (w - rw) * 0.5, (h - rh) * 0.5, dst_w=rw, dst_h=rh)
             if locked_idx:
                 ret_a = reticle[:, 3:4] / 255.0
                 ret_rgb = reticle[:, :3]
@@ -1299,6 +1372,362 @@ class MPSPhotoCompositor:
                 else:
                     idx_t = torch.tensor(locked_idx, device=self.device, dtype=torch.long)
                     canvas[idx_t] = canvas[idx_t] * (1.0 - ret_a) + ret_rgb * ret_a
+            return canvas
+
+        if mode == "swiss_monograph_grid":
+            sg = ctx["swiss_grid"]
+            hx, hy, hw, hh = int(sg["hx"]), int(sg["hy"]), int(sg["hw"]), int(sg["hh"])
+            dx, dy, dw, dh = int(sg["dx"]), int(sg["dy"]), int(sg["dw"]), int(sg["dh"])
+            canvas = tex["sw_page_rgb"].expand(batch_n, -1, -1, -1).clone()
+            h_crops = self._crop_plane_batch(
+                tex["sw_hero_over"], (hw, hh), [1.00 + 0.065 * e for e in eased_list], [0.49 + 0.02 * e for e in eased_list], [0.50] * batch_n
+            )
+            d_crops = self._crop_plane_batch(
+                tex["sw_det_over"], (dw, dh), [1.00 + 0.105 * e for e in eased_list], [0.50] * batch_n, [0.50 - 0.015 * e for e in eased_list]
+            )
+            canvas[:, :, hy : hy + hh, hx : hx + hw] = h_crops
+            canvas[:, :, dy : dy + dh, dx : dx + dw] = d_crops
+            return canvas
+
+        if mode == "editorial_bookspread":
+            bs = ctx["bookspread"]
+            x1, y1, w1, h1 = int(bs["x1"]), int(bs["y1"]), int(bs["w1"]), int(bs["h1"])
+            x2, y2, w2, h2 = int(bs["x2"]), int(bs["y2"]), int(bs["w2"]), int(bs["h2"])
+            board_batch = tex["bs_table_rgb"].expand(batch_n, -1, -1, -1).clone()
+            c1 = self._crop_plane_batch(tex["bs_p1_over"], (w1, h1), [1.00 + 0.052 * e for e in eased_list], [0.50] * batch_n, [0.47] * batch_n)
+            c2 = self._crop_plane_batch(tex["bs_p2_over"], (w2, h2), [1.052 - 0.044 * e for e in eased_list], [0.50] * batch_n, [0.50] * batch_n)
+            board_batch[:, :, y1 : y1 + h1, x1 : x1 + w1] = c1
+            board_batch[:, :, y2 : y2 + h2, x2 : x2 + w2] = c2
+            out = self._crop_plane_batch(
+                board_batch, (w, h), [1.00 + 0.032 * e for e in eased_list], [0.50 + 0.008 * (e - 0.5) for e in eased_list], [0.50] * batch_n
+            )
+            qw, qh = max(48, w // 4), max(27, h // 4)
+            ny_q = torch.linspace(0.0, 1.0, qh, device=self.device, dtype=torch.float32).view(1, 1, qh, 1)
+            nx_q = torch.linspace(0.0, 1.0, qw, device=self.device, dtype=torch.float32).view(1, 1, 1, qw)
+            e_t = torch.tensor(eased_list, device=self.device, dtype=torch.float32).view(batch_n, 1, 1, 1)
+            beam_q = torch.exp(-(((nx_q - (0.28 + 0.35 * e_t)) / 0.42) ** 2 + ((ny_q - 0.30) / 0.55) ** 2)) * 12.0
+            beam_full = F.interpolate(beam_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            return (out + beam_full).clamp(0.0, 255.0)
+
+        if mode == "gallery_wall_triptych":
+            gw = ctx["gallery_wall"]
+            ww_f, wh_f = float(gw["wall_w"]), float(gw["wall_h"])
+            boxes = []
+            for eased in eased_list:
+                view_h = wh_f * (0.96 - 0.035 * math.sin(math.pi * eased))
+                view_w = view_h * (float(w) / max(1.0, float(h)))
+                if view_w > ww_f:
+                    view_w = ww_f
+                    view_h = view_w * (float(h) / max(1.0, float(w)))
+                max_x0 = max(0.0, ww_f - view_w)
+                bx0 = max_x0 * (0.18 + 0.64 * eased)
+                by0 = max(0.0, (wh_f - view_h) * 0.50)
+                boxes.append((bx0, by0, bx0 + view_w, by0 + view_h))
+            return self._warp_extents_batch(tex["gw_wall_rgb"], (w, h), boxes)
+
+        if mode == "archival_lightbox_strip":
+            lb = ctx["lightbox_strip"]
+            sw_f, sh_f = float(lb["sw"]), float(lb["sh"])
+            boxes = []
+            for eased in eased_list:
+                view_h = sh_f * (0.96 - 0.13 * eased)
+                view_w = view_h * (float(w) / max(1.0, float(h)))
+                if view_w > sw_f:
+                    view_w = sw_f
+                    view_h = view_w * (float(h) / max(1.0, float(w)))
+                max_x0 = max(0.0, sw_f - view_w)
+                bx0 = max_x0 * (0.20 + 0.34 * eased)
+                by0 = max(0.0, (sh_f - view_h) * 0.49)
+                boxes.append((bx0, by0, bx0 + view_w, by0 + view_h))
+            return self._warp_extents_batch(tex["lb_strip_rgb"], (w, h), boxes)
+
+        if mode == "optical_tilt_shift":
+            zooms = [1.01 + 0.075 * e for e in eased_list]
+            cxs = [0.49 + 0.025 * e for e in eased_list]
+            cys = [0.51 - 0.025 * e for e in eased_list]
+            s_c = self._crop_plane_batch(tex["ts_sharp_over"], (w, h), zooms, cxs, cys)
+            b_c = self._crop_plane_batch(tex["ts_bokeh_over"], (w, h), zooms, cxs, cys)
+            qw, qh = max(48, w // 4), max(27, h // 4)
+            ny_q = torch.linspace(0.0, 1.0, qh, device=self.device, dtype=torch.float32).view(1, 1, qh, 1)
+            nx_q = torch.linspace(0.0, 1.0, qw, device=self.device, dtype=torch.float32).view(1, 1, 1, qw)
+            tilt_coord = ny_q * 0.992 - (nx_q - 0.5) * 0.122
+            e_t = torch.tensor(eased_list, device=self.device, dtype=torch.float32).view(batch_n, 1, 1, 1)
+            focus_y = 0.70 - 0.38 * e_t
+            dist = (tilt_coord - focus_y).abs()
+            lin = ((dist - 0.165 * 0.45) / (0.165 * 1.45)).clamp(0.0, 1.0)
+            blur_q = lin * lin * (3.0 - 2.0 * lin)
+            blur_w = F.interpolate(blur_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            return s_c * (1.0 - blur_w) + b_c * blur_w
+
+        if mode == "darkroom_developer_reveal":
+            dd = ctx["darkroom_dev"]
+            zooms = [1.01 + 0.065 * e for e in eased_list]
+            col_c = self._crop_plane_batch(tex["dd_color_over"], (w, h), zooms, [0.50] * batch_n, [0.49] * batch_n)
+            bw_c = self._crop_plane_batch(tex["dd_bw_over"], (w, h), zooms, [0.50] * batch_n, [0.49] * batch_n)
+            dev_ps = torch.tensor(
+                [_ease_in_out_quintic(min(1.0, tn / 0.34)) for tn in t_norms], device=self.device, dtype=torch.float32
+            ).view(batch_n, 1, 1, 1)
+            luma = (0.299 * bw_c[:, 0:1].float() + 0.587 * bw_c[:, 1:2].float() + 0.114 * bw_c[:, 2:3].float()) / 255.0
+            ink_rev = (dev_ps * 1.45 - luma * 0.45).clamp(0.0, 1.0).to(dtype=self.work_dtype)
+            stage1 = tex["dd_paper_rgb"] * (1.0 - ink_rev) + bw_c * ink_rev
+
+            col_ps = torch.tensor(
+                [_ease_in_out_quintic(max(0.0, min(1.0, (tn - 0.22) / 0.58))) for tn in t_norms],
+                device=self.device,
+                dtype=torch.float32,
+            ).view(batch_n, 1, 1, 1)
+            qw, qh = max(48, w // 4), max(27, h // 4)
+            ny_q = torch.linspace(0.0, 1.0, qh, device=self.device, dtype=torch.float32).view(1, 1, qh, 1)
+            nx_q = torch.linspace(0.0, 1.0, qw, device=self.device, dtype=torch.float32).view(1, 1, 1, qw)
+            fx_c, fy_c = dd["focal_xy"]
+            rad = torch.sqrt(((nx_q - fx_c) * 1.70) ** 2 + ((ny_q - fy_c) * 2.00) ** 2)
+            wave_r = col_ps * 1.85 - 0.18
+            cm_q = ((wave_r - rad) / 0.42).clamp(0.0, 1.0)
+            cm_q = cm_q * cm_q * (3.0 - 2.0 * cm_q)
+            cm_full = F.interpolate(cm_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            return stage1 * (1.0 - cm_full) + col_c * cm_full
+
+        if mode == "cinema_gate_reveal":
+            cg = ctx["cinema_gate"]
+            bar_h_target = int(cg["bar_h_target"])
+            canvas = self._crop_plane_batch(
+                tex["cg_photo_over"], (w, h), [1.00 + 0.075 * e for e in eased_list], [0.49 + 0.02 * e for e in eased_list], [0.50] * batch_n
+            )
+            sw_h, sh_h = max(48, w // 6), max(27, h // 6)
+            small = F.interpolate(canvas.float(), size=(sh_h, sw_h), mode="bilinear", align_corners=False)
+            luma = 0.299 * small[:, 0:1] + 0.587 * small[:, 1:2] + 0.114 * small[:, 2:3]
+            hi = ((luma - 205.0) / 50.0).clamp(0.0, 1.0).to(dtype=self.work_dtype)
+            hi_blur = self._gaussian_blur_2d(hi, sigma=4.0).clamp(0.0, 1.0)
+            hi_full = F.interpolate(hi_blur.float(), size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            hal_col = torch.tensor([255.0, 138.0, 74.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
+            canvas = (canvas + hi_full * hal_col * 0.18).clamp(0.0, 255.0)
+
+            bar_col = torch.tensor([8.0, 9.0, 12.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
+            txt_rgba = tex["cg_txt_rgba"]
+            txt_rgb = txt_rgba[:, :3]
+            txt_a = txt_rgba[:, 3:4] / 255.0
+            for b, t_norm in enumerate(t_norms):
+                curt_p = _ease_in_out_quintic(min(1.0, t_norm / 0.34))
+                cur_bar = int(round(bar_h_target + (h * 0.16) * (1.0 - curt_p)))
+                if cur_bar > 0:
+                    canvas[b : b + 1, :, :cur_bar, :] = bar_col
+                    canvas[b : b + 1, :, h - cur_bar :, :] = bar_col
+                t_alpha = _ease_in_out_quintic(max(0.0, min(1.0, (t_norm - 0.16) / 0.26)))
+                if t_alpha > 0.01:
+                    eff_a = txt_a * float(t_alpha)
+                    canvas[b : b + 1] = canvas[b : b + 1] * (1.0 - eff_a) + txt_rgb * eff_a
+            return canvas
+
+        if mode == "prism_glass_refraction":
+            base_c = self._crop_plane_batch(
+                tex["pg_base_over"], (w, h), [1.01 + 0.070 * e for e in eased_list], [0.49 + 0.02 * e for e in eased_list], [0.50] * batch_n
+            )
+            rr = self._crop_plane_batch(
+                tex["pg_soft_over"], (w, h), [1.04 + 0.070 * e for e in eased_list], [0.43 + 0.02 * e for e in eased_list], [0.50] * batch_n
+            )
+            rb = self._crop_plane_batch(
+                tex["pg_soft_over"], (w, h), [1.04 + 0.070 * e for e in eased_list], [0.45 + 0.02 * e for e in eased_list], [0.50] * batch_n
+            )
+            refr = torch.cat((rr[:, 0:1], (rr[:, 1:2] + rb[:, 1:2]) * 0.5, rb[:, 2:3]), dim=1)
+            qw, qh = max(48, w // 4), max(27, h // 4)
+            ny_q = torch.linspace(0.0, 1.0, qh, device=self.device, dtype=torch.float32).view(1, 1, qh, 1)
+            nx_q = torch.linspace(0.0, 1.0, qw, device=self.device, dtype=torch.float32).view(1, 1, 1, qw)
+            sin_e = torch.tensor([math.sin(math.pi * e) for e in eased_list], device=self.device, dtype=torch.float32).view(batch_n, 1, 1, 1)
+            edge_line = (0.85 - 0.055 * sin_e) - (ny_q - 0.5) * 0.24
+            fm_q = ((nx_q - edge_line) / 0.045).clamp(0.0, 1.0)
+            fm_q = fm_q * fm_q * (3.0 - 2.0 * fm_q)
+            bev_q = torch.exp(-(((nx_q - edge_line) / 0.012) ** 2))
+            fm = F.interpolate(fm_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            bev = F.interpolate(bev_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            spec = torch.tensor([255.0, 232.0, 198.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
+            out = base_c * (1.0 - fm * 0.50) + refr * (fm * 0.50) + bev * spec * 0.24
+            return out.clamp(0.0, 255.0)
+
+        if mode == "venetian_sunbeam_pan":
+            base_c = self._crop_plane_batch(
+                tex["vn_base_over"], (w, h), [1.00 + 0.070 * e for e in eased_list], [0.50] * batch_n, [0.52 - 0.03 * e for e in eased_list]
+            )
+            qw, qh = max(48, w // 4), max(27, h // 4)
+            ny_q = torch.linspace(0.0, 1.0, qh, device=self.device, dtype=torch.float32).view(1, 1, qh, 1)
+            nx_q = torch.linspace(0.0, 1.0, qw, device=self.device, dtype=torch.float32).view(1, 1, 1, qw)
+            e_t = torch.tensor(eased_list, device=self.device, dtype=torch.float32).view(batch_n, 1, 1, 1)
+            diag = nx_q * 0.72 + ny_q * 0.69 - 0.14 * e_t
+            slats = torch.pow((0.5 + 0.5 * torch.sin(diag * 26.0)).clamp(0.0, 1.0), 2.4)
+            win_env = torch.exp(-(((nx_q - 0.38) / 0.62) ** 2 + ((ny_q - 0.36) / 0.60) ** 2))
+            beam_q = slats * win_env * 0.22
+            shade_q = 1.0 - (1.0 - slats) * win_env * 0.12
+
+            # Vectorized microscopic dust motes at 1/4 res across entire batch
+            mx0 = tex["vn_mx0"].view(1, -1, 1, 1)
+            my0 = tex["vn_my0"].view(1, -1, 1, 1)
+            m_rad = tex["vn_m_rad"].view(1, -1, 1, 1)
+            m_ph = tex["vn_m_ph"].view(1, -1, 1, 1)
+            cx_m = mx0 + 0.022 * torch.sin(m_ph + e_t * 4.2)
+            cy_m = torch.remainder(my0 - 0.075 * e_t, 1.0)
+            twinkle = 0.65 + 0.35 * torch.sin(m_ph + e_t * 7.2)
+            aspect_r = float(w) / max(1.0, float(h))
+            motes_acc_list = []
+            for b in range(batch_n):
+                r2 = (((nx_q - cx_m[b : b + 1]) * aspect_r) ** 2) + ((ny_q - cy_m[b : b + 1]) ** 2)
+                m_sum = (torch.exp(-r2 / (m_rad * m_rad)) * twinkle[b : b + 1]).sum(dim=1, keepdim=True)
+                motes_acc_list.append(m_sum)
+            motes_q = torch.cat(motes_acc_list, dim=0).clamp(0.0, 1.2) * slats * win_env * 0.40
+
+            beam_f = F.interpolate(beam_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            shade_f = F.interpolate(shade_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            motes_f = F.interpolate(motes_q, size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            warm_sun = torch.tensor([255.0, 224.0, 168.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
+            out = base_c * shade_f
+            light = warm_sun * beam_f
+            out = out + light * (1.0 - out / 255.0) + motes_f * warm_sun
+            return out.clamp(0.0, 255.0)
+
+        if mode == "vintage_postcard_deck":
+            canvas = self._crop_plane_batch(
+                tex["pd_desk_rgb"], (w, h), [1.02 - 0.02 * e for e in eased_list], [0.50] * batch_n, [0.50] * batch_n
+            )
+            c1, c2 = tex["pd_c1_rgba"], tex["pd_c2_rgba"]
+            c1_w, c1_h = float(c1.shape[3]), float(c1.shape[2])
+            c2_w, c2_h = float(c2.shape[3]), float(c2.shape[2])
+            for b, (t_norm, eased) in enumerate(zip(t_norms, eased_list)):
+                slide = _ease_in_out_quintic(min(1.0, t_norm / 0.62))
+                x1 = w * (0.34 - 0.05 * slide) - c1_w * 0.5
+                y1 = h * (0.50 - 0.014 * eased) - c1_h * 0.5
+                x2 = w * (0.64 + 0.06 * slide) - c2_w * 0.5
+                y2 = h * (0.52 + 0.014 * eased) - c2_h * 0.5
+                self._paste_rgba_single(canvas[b : b + 1], c1, x1, y1)
+                self._paste_rgba_single(canvas[b : b + 1], c2, x2, y2)
+            return canvas
+
+        if mode == "viewfinder_shutter_snap":
+            canvas = torch.empty((batch_n, 3, h, w), device=self.device, dtype=self.work_dtype)
+            vf_rgba = tex["ss_vf_rgba"]
+            vf_a = vf_rgba[:, 3:4] / 255.0
+            vf_rgb = vf_rgba[:, :3]
+            shutter_col = torch.tensor([10.0, 11.0, 14.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
+            for b, t_norm in enumerate(t_norms):
+                if t_norm < 0.34:
+                    p = _ease_in_out_quintic(t_norm / 0.34)
+                    c = self._crop_plane_batch(tex["ss_live_over"], (w, h), [1.07 - 0.04 * p], [0.52 - 0.02 * p], [0.48 + 0.02 * p])
+                    canvas[b : b + 1] = c * (1.0 - vf_a) + vf_rgb * vf_a
+                elif t_norm < 0.368:
+                    canvas[b : b + 1] = shutter_col
+                else:
+                    p2 = _ease_in_out_quintic((t_norm - 0.368) / 0.632)
+                    canvas[b : b + 1] = self._crop_plane_batch(tex["ss_mat_rgb"], (w, h), [1.038 - 0.034 * p2], [0.50], [0.50])
+            return canvas
+
+        if mode == "accordion_leporello_fold":
+            lp = ctx["leporello"]
+            pw, ph = float(lp["pw"]), float(lp["ph"])
+            canvas = tex["lp_bg_rgb"].expand(batch_n, -1, -1, -1).clone()
+            src_pts = [(0.0, 0.0), (pw, 0.0), (pw, ph), (0.0, ph)]
+            panels_t: list[torch.Tensor] = tex["lp_panels_rgba"]
+            for i in range(3):
+                geom_i: list[tuple[float, float, float, float, float, float, int, int, int, int, float]] = []
+                for eased in eased_list:
+                    fold = (1.0 - eased) * 0.34 + 0.045
+                    eff_w = pw * math.cos(fold)
+                    persp_dy = ph * 0.055 * fold
+                    total_w = eff_w * 3.0
+                    x0 = (w - total_w) * 0.5
+                    cy_l = h * 0.50
+                    ys_top = [cy_l - ph * 0.5 + persp_dy, cy_l - ph * 0.5 - persp_dy, cy_l - ph * 0.5 + persp_dy, cy_l - ph * 0.5 - persp_dy]
+                    ys_bot = [cy_l + ph * 0.5 - persp_dy, cy_l + ph * 0.5 + persp_dy, cy_l + ph * 0.5 - persp_dy, cy_l + ph * 0.5 + persp_dy]
+                    shades = [1.0 - 0.14 * fold, 1.0 + 0.04 * fold, 1.0 - 0.12 * fold]
+                    lx, rx = x0 + i * eff_w, x0 + (i + 1) * eff_w
+                    bx0 = max(0, int(math.floor(lx)) - 2)
+                    bx1 = min(w, int(math.ceil(rx)) + 2)
+                    by0 = max(0, int(math.floor(min(ys_top[i], ys_top[i + 1]))) - 2)
+                    by1 = min(h, int(math.ceil(max(ys_bot[i], ys_bot[i + 1]))) + 2)
+                    geom_i.append((lx, rx, ys_top[i], ys_top[i + 1], ys_bot[i + 1], ys_bot[i], bx0, bx1, by0, by1, shades[i]))
+                ux0 = min(g[6] for g in geom_i)
+                ux1 = max(g[7] for g in geom_i)
+                uy0 = min(g[8] for g in geom_i)
+                uy1 = max(g[9] for g in geom_i)
+                if ux1 > ux0 + 2 and uy1 > uy0 + 2:
+                    coeffs_list = [
+                        _solve_perspective_coeffs(
+                            [(g[0] - ux0, g[2] - uy0), (g[1] - ux0, g[3] - uy0), (g[1] - ux0, g[4] - uy0), (g[0] - ux0, g[5] - uy0)],
+                            src_pts,
+                        )
+                        for g in geom_i
+                    ]
+                    warped = self._warp_perspective_batch(panels_t[i], ux1 - ux0, uy1 - uy0, coeffs_list)
+                    shade_t = torch.tensor([g[10] for g in geom_i], device=self.device, dtype=self.work_dtype).view(batch_n, 1, 1, 1)
+                    w_rgb = (warped[:, :3] * shade_t).clamp(0.0, 255.0)
+                    a = warped[:, 3:4] / 255.0
+                    roi = canvas[:, :, uy0:uy1, ux0:ux1]
+                    canvas[:, :, uy0:uy1, ux0:ux1] = roi * (1.0 - a) + w_rgb * a
+            return canvas
+
+        if mode == "film_strip_sprocket_glide":
+            strip_h = float(ctx["film_sprocket"]["strip_h"])
+            boxes = []
+            for eased in eased_list:
+                view_zoom = 1.00 + 0.055 * eased
+                vh = float(h) / view_zoom
+                vw = float(w) / view_zoom
+                max_y0 = max(0.0, strip_h - vh)
+                y0 = max_y0 * (0.20 + 0.32 * eased)
+                x0 = (float(w) - vw) * 0.5
+                boxes.append((x0, y0, x0 + vw, y0 + vh))
+            return self._warp_extents_batch(tex["fs_strip_rgb"], (w, h), boxes)
+
+        if mode == "museum_acrylic_float":
+            af = ctx["acrylic_float"]
+            px0, py0, pw, ph, sm = int(af["px0"]), int(af["py0"]), int(af["pw"]), int(af["ph"]), int(af["sm"])
+            board_batch = tex["af_wall_rgb"].expand(batch_n, -1, -1, -1).clone()
+            sh_t, acr_t = tex["af_shadow_rgba"], tex["af_acrylic_rgba"]
+            acr_a = acr_t[:, 3:4] / 255.0
+            acr_rgb = acr_t[:, :3]
+            for b, eased in enumerate(eased_list):
+                sh_dx = (26.0 - 52.0 * eased) * sf
+                sh_dy = (20.0 + 5.0 * math.sin(math.pi * eased)) * sf
+                self._paste_rgba_single(board_batch[b : b + 1], sh_t, float(px0 - sm) + sh_dx, float(py0 - sm) + sh_dy)
+            roi = board_batch[:, :, py0 : py0 + ph, px0 : px0 + pw]
+            board_batch[:, :, py0 : py0 + ph, px0 : px0 + pw] = roi * (1.0 - acr_a) + acr_rgb * acr_a
+
+            qw_a, qh_a = max(24, pw // 4), max(24, ph // 4)
+            ny_a = torch.linspace(0.0, 1.0, qh_a, device=self.device, dtype=torch.float32).view(1, 1, qh_a, 1)
+            nx_a = torch.linspace(0.0, 1.0, qw_a, device=self.device, dtype=torch.float32).view(1, 1, 1, qw_a)
+            e_t = torch.tensor(eased_list, device=self.device, dtype=torch.float32).view(batch_n, 1, 1, 1)
+            diag = (nx_a - (-0.25 + 1.50 * e_t)) + (ny_a - 0.5) * 0.38
+            sheen_q = torch.exp(-((diag / 0.085) ** 2)) * 36.0
+            sheen_full = F.interpolate(sheen_q, size=(ph, pw), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            board_batch[:, :, py0 : py0 + ph, px0 : px0 + pw] = (
+                board_batch[:, :, py0 : py0 + ph, px0 : px0 + pw] + sheen_full
+            ).clamp(0.0, 255.0)
+            return self._crop_plane_batch(board_batch, (w, h), [1.00 + 0.028 * e for e in eased_list], [0.50] * batch_n, [0.50] * batch_n)
+
+        if mode == "kinetic_triptych_reveal":
+            kt = ctx["kinetic_triptych"]
+            col_ws: list[int] = kt["col_ws"]
+            xs: list[int] = kt["xs"]
+            cols_t: list[torch.Tensor] = tex["kt_cols_over"]
+            canvas = torch.empty((batch_n, 3, h, w), device=self.device, dtype=self.work_dtype)
+            canvas[:, 0] = 16.0
+            canvas[:, 1] = 18.0
+            canvas[:, 2] = 22.0
+            starts = [0.0, 0.10, 0.20]
+            for i in range(3):
+                zooms_i = (
+                    [1.00 + 0.085 * e for e in eased_list]
+                    if i == 0
+                    else ([1.085 - 0.075 * e for e in eased_list] if i == 1 else [1.01 + 0.075 * e for e in eased_list])
+                )
+                patches = self._crop_plane_batch(cols_t[i], (col_ws[i], h), zooms_i, [0.50] * batch_n, [0.50] * batch_n)
+                x_s = xs[i]
+                cw = col_ws[i]
+                for b, t_norm in enumerate(t_norms):
+                    p = _ease_in_out_quintic(max(0.0, min(1.0, (t_norm - starts[i]) / 0.36)))
+                    if p <= 0.005:
+                        continue
+                    vis_h = max(2, int(round(h * p)))
+                    if i == 1:
+                        canvas[b, :, :vis_h, x_s : x_s + cw] = patches[b, :, h - vis_h :, :]
+                    else:
+                        canvas[b, :, h - vis_h :, x_s : x_s + cw] = patches[b, :, :vis_h, :]
             return canvas
 
         # gallery_frame & full_bleed (and any default)
@@ -1322,17 +1751,23 @@ class MPSPhotoCompositor:
         batch_n = len(t_norms)
         w, h = self.width, self.height
 
+        e_fx_list = [_ease_in_out_quintic(t) for t in t_norms]
+
         if fx_type == "golden_light_leak":
+            # Black-preserving optical screen blend matching CPU reference
+            leak = tex["fx_leak"]
+            screened = canvas + leak - (canvas * leak) / 255.0
             weights = torch.tensor(
-                [0.12 + 0.10 * math.sin(math.pi * t) for t in t_norms], device=self.device, dtype=self.work_dtype
+                [0.22 + 0.14 * math.sin(math.pi * e) for e in e_fx_list], device=self.device, dtype=self.work_dtype
             ).view(batch_n, 1, 1, 1)
-            return canvas * (1.0 - weights) + tex["fx_leak"] * weights
+            return canvas * (1.0 - weights) + screened * weights
 
         if fx_type == "museum_spotlight":
             m = tex["fx_spot_mask"]
             return canvas * (1.0 - m) + tex["fx_spot_dark"] * m
 
         if fx_type == "champagne_bokeh":
+            # Soft elliptical anamorphic optical bokeh disks with black-preserving screen blend
             sw, sh = max(64, w // 4), max(36, h // 4)
             orbs = (self.ctx.get("fx_assets") or {}).get("orbs") or []
             if not orbs:
@@ -1342,33 +1777,24 @@ class MPSPhotoCompositor:
                 torch.arange(sw, device=self.device, dtype=torch.float32),
                 indexing="ij",
             )
-            fill_rgb = torch.tensor([255.0, 222.0, 138.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
-            rim_rgb = torch.tensor([255.0, 240.0, 190.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
-            overlay_small = torch.zeros((batch_n, 4, sh, sw), device=self.device, dtype=self.work_dtype)
-            for b, t_norm in enumerate(t_norms):
-                acc_rgb = torch.zeros((1, 3, sh, sw), device=self.device, dtype=self.work_dtype)
-                acc_a = torch.zeros((1, 1, sh, sw), device=self.device, dtype=self.work_dtype)
+            acc_batch = torch.zeros((batch_n, 1, sh, sw), device=self.device, dtype=torch.float32)
+            for b, e_fx in enumerate(e_fx_list):
+                acc = torch.zeros((sh, sw), device=self.device, dtype=torch.float32)
                 for ox, oy, rad, alpha, phase in orbs:
-                    cx = ((ox + 0.03 * math.sin(phase + t_norm * 4.0)) % 1.0) * sw
-                    cy = ((oy - 0.10 * t_norm) % 1.0) * sh
-                    r_small = max(3.0, float(rad // 4))
-                    pulse_fill = min(1.0, (alpha * (0.75 + 0.25 * math.sin(phase + t_norm * 6.0))) / 255.0)
-                    pulse_rim = min(1.0, (alpha * (0.75 + 0.25 * math.sin(phase + t_norm * 6.0)) + 25.0) / 255.0)
-                    dist = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2 + 1e-4)
-                    in_fill = (dist <= r_small).to(self.work_dtype)
-                    in_rim = ((dist > r_small - 1.2) & (dist <= r_small + 0.8)).to(self.work_dtype)
-                    orb_a = (in_fill * pulse_fill).maximum(in_rim * pulse_rim).unsqueeze(0).unsqueeze(0)
-                    orb_col = torch.where(in_rim.unsqueeze(0).unsqueeze(0) > 0, rim_rgb, fill_rgb)
-                    acc_rgb = orb_col * orb_a + acc_rgb * (1.0 - orb_a)
-                    acc_a = orb_a + acc_a * (1.0 - orb_a)
-                overlay_small[b : b + 1, :3] = acc_rgb
-                overlay_small[b : b + 1, 3:4] = acc_a
-            overlay_blur = self._gaussian_blur_2d(overlay_small, sigma=3.0)
-            overlay_full = F.interpolate(
-                overlay_blur.float(), size=(h, w), mode="bilinear", align_corners=False
-            ).to(dtype=self.work_dtype)
-            a = overlay_full[:, 3:4].clamp(0.0, 1.0)
-            return canvas * (1.0 - a) + overlay_full[:, :3] * a
+                    cx = ((ox + 0.028 * math.sin(phase + e_fx * 3.6)) % 1.0) * sw
+                    cy = ((oy - 0.085 * e_fx) % 1.0) * sh
+                    rx_s = max(3.0, float(rad) / 4.2)
+                    ry_s = rx_s * 1.24
+                    pulse = (alpha / 255.0) * (0.72 + 0.28 * math.sin(phase + e_fx * 5.2))
+                    r2 = ((xx - cx) / rx_s) ** 2 + ((yy - cy) / ry_s) ** 2
+                    disk = (1.0 - r2).clamp(0.0, 1.0)
+                    acc = acc + (disk * disk) * pulse * 0.85
+                acc_batch[b, 0] = acc.clamp(0.0, 1.0)
+            tint = torch.tensor([255.0, 224.0, 150.0], device=self.device, dtype=self.work_dtype).view(1, 3, 1, 1)
+            bokeh_small = (acc_batch.to(dtype=self.work_dtype) * tint).clamp(0.0, 255.0)
+            bokeh_blur = self._gaussian_blur_2d(bokeh_small, sigma=2.0)
+            bokeh_full = F.interpolate(bokeh_blur.float(), size=(h, w), mode="bilinear", align_corners=False).to(dtype=self.work_dtype)
+            return canvas + bokeh_full - (canvas * bokeh_full) / 255.0
 
         if fx_type == "nostalgic_film_grain":
             grains: list[torch.Tensor] = tex["fx_grains"]
@@ -1443,10 +1869,16 @@ class MPSPhotoCompositor:
             return canvas * (1.0 - weights) + screened * weights
 
         if fx_type == "caustic_water_shimmer":
-            shimmer = tex["fx_shimmer"]
-            screened = canvas + shimmer - (canvas * shimmer) / 255.0
+            fx = self.ctx.get("fx_assets") or {}
+            dw = float(fx.get("dw", w))
+            boxes_a = [((dw - w) * e, 0.0, (dw - w) * e + float(w), float(h)) for e in e_fx_list]
+            boxes_b = [((dw - w) * (1.0 - e), 0.0, (dw - w) * (1.0 - e) + float(w), float(h)) for e in e_fx_list]
+            crop_a = self._warp_extents_batch(tex["fx_shimmer_over"], (w, h), boxes_a)
+            crop_b = self._warp_extents_batch(tex["fx_shimmer_over"], (w, h), boxes_b)
+            anim_shimmer = crop_a * 0.62 + crop_b * 0.38
+            screened = canvas + anim_shimmer - (canvas * anim_shimmer) / 255.0
             weights = torch.tensor(
-                [0.09 + 0.045 * math.sin(math.pi * t) for t in t_norms], device=self.device, dtype=self.work_dtype
+                [0.11 + 0.055 * math.sin(math.pi * e) for e in e_fx_list], device=self.device, dtype=self.work_dtype
             ).view(batch_n, 1, 1, 1)
             return canvas * (1.0 - weights) + screened * weights
 
@@ -1454,8 +1886,8 @@ class MPSPhotoCompositor:
             fx = self.ctx.get("fx_assets") or {}
             dw = float(fx.get("dw", w))
             boxes = []
-            for t_norm in t_norms:
-                x0 = (dw - w) * (1.0 - _ease_in_out_cubic(t_norm))
+            for e_fx in e_fx_list:
+                x0 = (dw - w) * (1.0 - e_fx)
                 boxes.append((x0, 0.0, x0 + float(w), float(h)))
             sun_m = self._warp_extents_batch(tex["fx_dapple_sun_over"], (w, h), boxes)
             shade_m = self._warp_extents_batch(tex["fx_dapple_shade_over"], (w, h), boxes)
@@ -1491,8 +1923,8 @@ class MPSPhotoCompositor:
         for b, f_idx in enumerate(frame_indices):
             t_sec = f_idx / max(1.0, float(fps))
             rem_sec = max(0.0, duration - t_sec)
-            entry_prog = _ease_out_cubic((t_sec - 0.15) / 0.50) if t_sec > 0.15 else 0.0
-            exit_prog = min(1.0, rem_sec / 0.40)
+            entry_prog = _ease_in_out_quintic((t_sec - 0.15) / 0.55) if t_sec > 0.15 else 0.0
+            exit_prog = _ease_in_out_quintic(min(1.0, rem_sec / 0.45))
             alpha_mult = min(entry_prog, exit_prog)
             if alpha_mult <= 0.04:
                 continue

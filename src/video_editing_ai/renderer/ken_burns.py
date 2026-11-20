@@ -50,10 +50,17 @@ from .depth_parallax import (
 
 def _ease_in_out_cubic(t: float) -> float:
     """Smooth cubic S-curve easing for natural camera & parallax motion."""
-    if t < 0.5:
-        return 4.0 * t * t * t
-    p = 2.0 * t - 2.0
+    t_c = max(0.0, min(1.0, t))
+    if t_c < 0.5:
+        return 4.0 * t_c * t_c * t_c
+    p = 2.0 * t_c - 2.0
     return 0.5 * p * p * p + 1.0
+
+
+def _ease_in_out_quintic(t: float) -> float:
+    """C2-continuous quintic smootherstep (zero velocity & zero acceleration at endpoints and midpoint)."""
+    t_c = max(0.0, min(1.0, t))
+    return t_c * t_c * t_c * (t_c * (t_c * 6.0 - 15.0) + 10.0)
 
 
 def _ease_out_cubic(t: float) -> float:
@@ -222,6 +229,59 @@ def _crop_plane_clamped(
         (bx0, by0, bx0 + crop_w, by0 + crop_h),
         resample=safe_resample,
     )
+
+
+def _paste_rgba_subpixel_pil(
+    canvas_rgb: Image.Image,
+    src_rgba: Image.Image,
+    px: float,
+    py: float,
+    dst_w: Optional[float] = None,
+    dst_h: Optional[float] = None,
+    alpha_mul: float = 1.0,
+) -> None:
+    """Alpha-composite `src_rgba` onto `canvas_rgb` at floating-point `(px, py)` with sub-pixel resampling."""
+    if alpha_mul <= 1e-4:
+        return
+    cw, ch = canvas_rgb.size
+    sw, sh = src_rgba.size
+    tw = float(sw) if dst_w is None else max(1.0, float(dst_w))
+    th = float(sh) if dst_h is None else max(1.0, float(dst_h))
+
+    ox0 = max(0, int(math.floor(px)))
+    oy0 = max(0, int(math.floor(py)))
+    ox1 = min(cw, int(math.ceil(px + tw)))
+    oy1 = min(ch, int(math.ceil(py + th)))
+    if ox1 <= ox0 or oy1 <= oy0:
+        return
+
+    sx0 = (ox0 - px) * (sw / tw)
+    sy0 = (oy0 - py) * (sh / th)
+    sx1 = (ox1 - px) * (sw / tw)
+    sy1 = (oy1 - py) * (sh / th)
+
+    is_int_aligned = (
+        dst_w is None
+        and dst_h is None
+        and abs(px - round(px)) < 1e-3
+        and abs(py - round(py)) < 1e-3
+    )
+    if is_int_aligned and ox0 >= 0 and oy0 >= 0:
+        ix0, iy0 = int(round(sx0)), int(round(sy0))
+        sub = src_rgba.crop((ix0, iy0, ix0 + (ox1 - ox0), iy0 + (oy1 - oy0)))
+    else:
+        sub = src_rgba.transform(
+            (ox1 - ox0, oy1 - oy0),
+            Image.Transform.EXTENT,
+            (sx0, sy0, sx1, sy1),
+            resample=Image.Resampling.BILINEAR,
+        )
+
+    alpha = sub.getchannel("A")
+    if alpha_mul < 0.999:
+        a_arr = np.clip(np.asarray(alpha, dtype=np.float32) * float(alpha_mul), 0.0, 255.0).astype(np.uint8)
+        alpha = Image.fromarray(a_arr, mode="L")
+    canvas_rgb.paste(sub.convert("RGB"), (ox0, oy0), alpha)
 
 
 def _solve_perspective_coeffs(
@@ -2529,6 +2589,750 @@ def _build_leica_frame_finder_assets(
     }
 
 
+def _load_companion_photos(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+    count: int = 3,
+) -> list[Image.Image]:
+    """Return `count` (2 or 3) harmonized RGB photos using secondary/tertiary sources or compositional crops."""
+    max_dim = max(512, (max(width, height) * 5) // 4)
+    sec_img = (
+        _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=max_dim)
+        if (kb.secondary_source and Path(kb.secondary_source).exists())
+        else None
+    )
+    tert_img = (
+        _load_graded_photo_rgb(kb.tertiary_source, color_grade_fx, max_dim=max_dim)
+        if (kb.tertiary_source and Path(kb.tertiary_source).exists())
+        else None
+    )
+    sw, sh = raw_primary.size
+    fx, fy = focal_uv if focal_uv is not None else kb.start_center
+
+    def _subcrop(cx_p: float, cy_p: float, frac: float = 0.64) -> Image.Image:
+        cw = max(32, int(round(sw * frac)))
+        ch = max(32, int(round(sh * frac)))
+        x0 = int(round(min(max(0.0, cx_p * sw - cw * 0.5), max(0.0, float(sw - cw)))))
+        y0 = int(round(min(max(0.0, cy_p * sh - ch * 0.5), max(0.0, float(sh - ch)))))
+        return raw_primary.crop((x0, y0, x0 + cw, y0 + ch))
+
+    if count <= 2:
+        p2 = sec_img if sec_img is not None else _subcrop(fx, fy, 0.58)
+        return [raw_primary, p2]
+
+    if sec_img is not None and tert_img is not None:
+        return [raw_primary, sec_img, tert_img]
+    if sec_img is not None:
+        return [raw_primary, sec_img, _subcrop(fx, fy, 0.58)]
+    return [_subcrop(0.26, 0.50, 0.68), _subcrop(fx, fy, 0.66), _subcrop(0.74, 0.46, 0.68)]
+
+
+def _build_swiss_monograph_grid_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    pal: dict[str, Any],
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#01 Taschen / Mack Books 64/36 Swiss architectural spread + live synchronized macro detail inset."""
+    page = _make_textured_surface_rgb(width, height, pal["bg"], seed=1101, grad_top=3.0, grad_bot=-4.0, grain_std=1.5)
+    draw = ImageDraw.Draw(page)
+    split_x = int(round(width * 0.63))
+    pad = max(16, int(round(36 * scale_factor)))
+    rule_w = max(1, int(round(1.5 * scale_factor)))
+
+    hx, hy = pad, pad
+    hw = max(32, split_x - pad * 2)
+    hh = max(32, height - pad * 2)
+    draw.rectangle([hx - 2, hy - 2, hx + hw + 1, hy + hh + 1], outline=pal["rule"], width=1)
+    draw.line([(split_x, pad), (split_x, height - pad)], fill=pal["rule"], width=rule_w)
+
+    tx = split_x + pad
+    tw = max(48, width - tx - pad)
+    cur_y = pad + max(4, int(round(12 * scale_factor)))
+
+    badge_str = _clean_editorial_badge(kb.camera_badge or "") or "MONOGRAPH  ·  PLATE 01"
+    f_eyebrow = _load_editorial_font(max(9, int(round(12 * scale_factor))), bold=True, serif=False, text=badge_str)
+    draw.text((tx, cur_y), badge_str, font=f_eyebrow, fill=pal["ink_muted"])
+    cur_y += max(12, int(round(22 * scale_factor)))
+    draw.line([(tx, cur_y), (tx + min(tw, int(round(72 * scale_factor))), cur_y)], fill=pal["rule"], width=rule_w)
+    cur_y += max(10, int(round(18 * scale_factor)))
+
+    title_str = (kb.caption_title or "Architectural Monograph").strip()
+    f_title = _load_editorial_font(max(13, int(round(28 * scale_factor))), bold=True, serif=True, text=title_str)
+    for ln in _wrap_editorial_text(draw, title_str, f_title, tw, max_lines=3):
+        draw.text((tx, cur_y), ln, font=f_title, fill=pal["ink_primary"])
+        cur_y += max(15, int(round(36 * scale_factor)))
+
+    sub_str = (kb.caption_subtitle or "").strip()
+    if sub_str:
+        cur_y += max(4, int(round(8 * scale_factor)))
+        f_sub = _load_editorial_font(max(10, int(round(15 * scale_factor))), bold=False, serif=False, text=sub_str)
+        for ln in _wrap_editorial_text(draw, sub_str, f_sub, tw, max_lines=3):
+            if cur_y > int(height * 0.44):
+                break
+            draw.text((tx, cur_y), ln, font=f_sub, fill=pal["ink_secondary"])
+            cur_y += max(12, int(round(22 * scale_factor)))
+
+    dx = tx
+    dw = tw
+    dh = max(32, int(height * 0.41))
+    dy = max(int(height * 0.47), height - pad - dh - max(12, int(round(24 * scale_factor))))
+    dh = max(32, min(dh, height - pad - max(12, int(round(24 * scale_factor))) - dy))
+    draw.rectangle([dx - 2, dy - 2, dx + dw + 1, dy + dh + 1], outline=pal["rule"], width=1)
+    detail_lbl = "DETAIL STUDY"
+    f_det = _load_editorial_font(max(9, int(round(11 * scale_factor))), bold=False, serif=False, text=detail_lbl)
+    draw.text((dx, dy + dh + max(4, int(round(8 * scale_factor)))), detail_lbl, font=f_det, fill=pal["ink_muted"])
+
+    hero_over = ImageOps.fit(
+        raw_primary, (max(32, int(round(hw * 1.12))), max(32, int(round(hh * 1.12)))), method=Image.Resampling.LANCZOS
+    )
+    if kb.secondary_source and Path(kb.secondary_source).exists():
+        sec_im = _load_graded_photo_rgb(kb.secondary_source, color_grade_fx, max_dim=max(512, max(width, height)))
+        det_over = ImageOps.fit(
+            sec_im, (max(32, int(round(dw * 1.16))), max(32, int(round(dh * 1.16)))), method=Image.Resampling.LANCZOS
+        )
+    else:
+        sw, sh = raw_primary.size
+        fx, fy = focal_uv if focal_uv is not None else kb.start_center
+        crop_w = max(32.0, sw * 0.56)
+        crop_h = max(32.0, crop_w * (dh / max(1.0, float(dw))))
+        if crop_h > sh * 0.84:
+            crop_h = sh * 0.84
+            crop_w = crop_h * (dw / max(1.0, float(dh)))
+        x0 = min(max(0.0, fx * sw - crop_w * 0.5), max(0.0, sw - crop_w))
+        y0 = min(max(0.0, fy * sh - crop_h * 0.5), max(0.0, sh - crop_h))
+        det_over = raw_primary.transform(
+            (max(32, int(round(dw * 1.16))), max(32, int(round(dh * 1.16)))),
+            Image.Transform.EXTENT,
+            (x0, y0, x0 + crop_w, y0 + crop_h),
+            resample=Image.Resampling.BICUBIC,
+        )
+
+    return {
+        "page_rgb": page,
+        "hero_over": hero_over,
+        "det_over": det_over,
+        "hx": hx,
+        "hy": hy,
+        "hw": hw,
+        "hh": hh,
+        "dx": dx,
+        "dy": dy,
+        "dw": dw,
+        "dh": dh,
+    }
+
+
+def _build_editorial_bookspread_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#02 Open hardcover coffee-table book spread with 3D concave center-spine gutter lighting."""
+    p1, p2 = _load_companion_photos(raw_primary, kb, width, height, color_grade_fx, focal_uv, count=2)
+    table = _make_textured_surface_rgb(width, height, (24, 26, 30), seed=1202, grad_top=3.0, grad_bot=-4.0, grain_std=1.6)
+
+    bm_x, bm_y = int(round(width * 0.065)), int(round(height * 0.08))
+    bw = max(64, width - bm_x * 2)
+    bh = max(64, height - bm_y * 2)
+    sh_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(sh_layer).rectangle(
+        [bm_x - 6, bm_y + max(4, int(round(10 * scale_factor))), bm_x + bw + 6, bm_y + bh + max(8, int(round(18 * scale_factor)))],
+        fill=(0, 0, 0, 175),
+    )
+    sh_layer = sh_layer.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(20 * scale_factor)))))
+    table.paste(sh_layer, (0, 0), sh_layer)
+
+    # Cream cotton-rag open pages with physically inspired concave 3D center-spine shading
+    pages = _make_textured_surface_rgb(bw, bh, (230, 226, 218), seed=1203, grad_top=3.0, grad_bot=-3.0, grain_std=1.4)
+    parr = np.asarray(pages, dtype=np.float32)
+    xx = np.linspace(-1.0, 1.0, bw, dtype=np.float32)[None, :]
+    dist_spine = np.abs(xx)
+    spine_shade = (
+        1.0
+        - 0.25 * np.exp(-((dist_spine / 0.045) ** 1.6))
+        + 0.032 * np.exp(-(((dist_spine - 0.075) / 0.05) ** 2))
+    )
+    parr = np.clip(parr * spine_shade[:, :, None], 8.0, 240.0).astype(np.uint8)
+    pages = Image.fromarray(parr, mode="RGB")
+    pd = ImageDraw.Draw(pages)
+    mid = bw // 2
+    pd.line([(mid, 0), (mid, bh)], fill=(122, 116, 108), width=max(1, int(round(1.5 * scale_factor))))
+    pd.rectangle([0, 0, bw - 1, bh - 1], outline=(186, 180, 170), width=max(1, int(round(1.5 * scale_factor))))
+
+    m_out = max(14, int(round(56 * scale_factor)))
+    m_in = max(12, int(round(48 * scale_factor)))
+    top_m = max(14, int(round(58 * scale_factor)))
+    bot_m = max(28, int(round(104 * scale_factor)))
+    slot_w = max(32, mid - m_out - m_in)
+    slot_h = max(32, bh - top_m - bot_m)
+
+    def _fit_box(im: Image.Image, sw_b: int, sh_b: int) -> tuple[int, int]:
+        a = im.width / max(1.0, float(im.height))
+        if sw_b / max(1.0, float(sh_b)) >= a:
+            return max(16, int(round(sh_b * a))), sh_b
+        return sw_b, max(16, int(round(sw_b / max(0.2, a))))
+
+    w1, h1 = _fit_box(p1, slot_w, slot_h)
+    w2, h2 = _fit_box(p2, slot_w, slot_h)
+    x1, y1 = bm_x + m_out + (slot_w - w1) // 2, bm_y + top_m + (slot_h - h1) // 2
+    x2, y2 = bm_x + mid + m_in + (slot_w - w2) // 2, bm_y + top_m + (slot_h - h2) // 2
+
+    pd.rectangle([x1 - bm_x - 2, y1 - bm_y - 2, x1 - bm_x + w1 + 1, y1 - bm_y + h1 + 1], outline=(178, 172, 162), width=1)
+    pd.rectangle([x2 - bm_x - 2, y2 - bm_y - 2, x2 - bm_x + w2 + 1, y2 - bm_y + h2 + 1], outline=(178, 172, 162), width=1)
+
+    f_fol = _load_editorial_font(max(9, int(round(12 * scale_factor))), bold=False, serif=False)
+    pd.text((m_out, bh - max(12, int(round(38 * scale_factor)))), "01", font=f_fol, fill=(134, 128, 118))
+    pd.text((bw - m_out - max(14, int(round(22 * scale_factor))), bh - max(12, int(round(38 * scale_factor)))), "02", font=f_fol, fill=(134, 128, 118))
+
+    t_left = (kb.caption_title or "").strip()
+    t_right = (kb.caption_subtitle or "").strip()
+    if t_left:
+        f_cap = _load_editorial_font(max(10, int(round(16 * scale_factor))), bold=True, serif=True, text=t_left)
+        lines_l = _wrap_editorial_text(pd, t_left, f_cap, slot_w, max_lines=1)
+        if lines_l:
+            pd.text((x1 - bm_x, y1 - bm_y + h1 + max(6, int(round(14 * scale_factor)))), lines_l[0], font=f_cap, fill=(36, 34, 32))
+    if t_right:
+        f_sub = _load_editorial_font(max(9, int(round(13 * scale_factor))), bold=False, serif=False, text=t_right)
+        lines_r = _wrap_editorial_text(pd, t_right, f_sub, slot_w, max_lines=2)
+        cy_r = y2 - bm_y + h2 + max(6, int(round(14 * scale_factor)))
+        for ln in lines_r:
+            pd.text((x2 - bm_x, cy_r), ln, font=f_sub, fill=(84, 80, 74))
+            cy_r += max(11, int(round(18 * scale_factor)))
+
+    table.paste(pages, (bm_x, bm_y))
+    p1_over = ImageOps.fit(p1, (max(32, int(round(w1 * 1.10))), max(32, int(round(h1 * 1.10)))), method=Image.Resampling.LANCZOS)
+    p2_over = ImageOps.fit(p2, (max(32, int(round(w2 * 1.10))), max(32, int(round(h2 * 1.10)))), method=Image.Resampling.LANCZOS)
+
+    return {
+        "table_rgb": table,
+        "p1_over": p1_over,
+        "p2_over": p2_over,
+        "x1": x1,
+        "y1": y1,
+        "w1": w1,
+        "h1": h1,
+        "x2": x2,
+        "y2": y2,
+        "w2": w2,
+        "h2": h2,
+    }
+
+
+def _build_gallery_wall_triptych_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    pal: dict[str, Any],
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#03 Tate Modern exhibition hanging-wall trio with 3 directional overhead track-light cones."""
+    imgs = _load_companion_photos(raw_primary, kb, width, height, color_grade_fx, focal_uv, count=3)
+    wall_w = int(round(width * 1.24))
+    wall_w -= wall_w % 2
+    wall_h = int(round(height * 1.06))
+    wall_h -= wall_h % 2
+
+    wall_base = (34, 36, 42) if not pal["is_light"] else pal["bg"]
+    wall = _make_textured_surface_rgb(wall_w, wall_h, wall_base, seed=1303, grad_top=4.0, grad_bot=-5.0, grain_std=1.8)
+
+    slot_w = int(round(width * 0.30))
+    slot_h = int(round(height * 0.55))
+    b_px = max(8, int(round(14 * scale_factor)))
+    cards = [_build_double_matte_card(im, max_w=slot_w, max_h=slot_h, scale_factor=scale_factor, border_px=b_px) for im in imgs]
+    gutter = max(14, int(round(34 * scale_factor)))
+    row_w = sum(c.width for c in cards) + gutter * 2
+    sx = max(16, (wall_w - row_w) // 2)
+    cy = int(wall_h * 0.49)
+
+    # Paint 3 soft overhead radial gallery track-light cones onto the wall before hanging prints
+    warr = np.asarray(wall, dtype=np.float32)
+    sw_q, sh_q = max(48, wall_w // 4), max(27, wall_h // 4)
+    yy_q, xx_q = np.mgrid[0:sh_q, 0:sw_q].astype(np.float32)
+    cone_q = np.zeros((sh_q, sw_q), dtype=np.float32)
+    x_cur = sx
+    for c in cards:
+        cx_i = (x_cur + c.width * 0.5) * (sw_q / max(1.0, float(wall_w)))
+        sig_x = max(4.0, c.width * 0.62 * (sw_q / max(1.0, float(wall_w))))
+        sig_y = max(4.0, sh_q * 0.44)
+        cone_q += np.exp(-(((xx_q - cx_i) / sig_x) ** 2) - (((yy_q - sh_q * 0.32) / sig_y) ** 2))
+        x_cur += c.width + gutter
+    cone_full = np.asarray(
+        Image.fromarray(np.clip(cone_q * 180.0, 0, 255).astype(np.uint8), mode="L").resize(
+            (wall_w, wall_h), Image.Resampling.BILINEAR
+        ),
+        dtype=np.float32,
+    ) / 180.0
+    amp_light = 22.0 if pal["is_light"] else 42.0
+    warr[:, :, 0] += cone_full * amp_light
+    warr[:, :, 1] += cone_full * (amp_light * 0.90)
+    warr[:, :, 2] += cone_full * (amp_light * 0.72)
+    wall = Image.fromarray(np.clip(warr, 6.0, 244.0).astype(np.uint8), mode="RGB")
+
+    wd = ImageDraw.Draw(wall)
+    rail_y = int(wall_h * 0.08)
+    rail_col = (140, 136, 130) if pal["is_light"] else (78, 82, 90)
+    wire_col = (156, 152, 146) if pal["is_light"] else (92, 96, 104)
+    wd.line([(0, rail_y), (wall_w, rail_y)], fill=rail_col, width=max(1, int(round(2.5 * scale_factor))))
+    x_cur = sx
+    max_card_bot = cy
+    for c in cards:
+        py = max(rail_y + 8, cy - c.height // 2)
+        for wx_off in (int(c.width * 0.22), int(c.width * 0.78)):
+            wd.line([(x_cur + wx_off, rail_y), (x_cur + wx_off, py + max(8, int(round(28 * scale_factor))))], fill=wire_col, width=1)
+        wall.paste(c, (x_cur, py), c)
+        max_card_bot = max(max_card_bot, py + c.height)
+        x_cur += c.width + gutter
+
+    t_str = (kb.caption_title or "").strip()
+    s_str = (kb.caption_subtitle or "").strip()
+    ink_hi = pal["ink_primary"] if pal["is_light"] else (234, 230, 222)
+    ink_lo = pal["ink_secondary"] if pal["is_light"] else (168, 166, 160)
+    cap_y = min(int(wall_h * 0.87), max_card_bot + max(8, int(round(16 * scale_factor))))
+    if t_str:
+        f_tit = _load_editorial_font(max(11, int(round(18 * scale_factor))), bold=True, serif=True, text=t_str)
+        tb = wd.textbbox((0, 0), t_str, font=f_tit)
+        wd.text(((wall_w - (tb[2] - tb[0])) // 2, cap_y), t_str, font=f_tit, fill=ink_hi)
+        cap_y += (tb[3] - tb[1]) + max(4, int(round(8 * scale_factor)))
+    if s_str and cap_y < int(wall_h * 0.94):
+        f_sub = _load_editorial_font(max(9, int(round(13 * scale_factor))), bold=False, serif=False, text=s_str)
+        disp_s = s_str if len(s_str) <= 84 else (s_str[:81].rstrip() + "...")
+        sb = wd.textbbox((0, 0), disp_s, font=f_sub)
+        wd.text(((wall_w - (sb[2] - sb[0])) // 2, cap_y), disp_s, font=f_sub, fill=ink_lo)
+
+    return {"wall_rgb": wall, "wall_w": wall_w, "wall_h": wall_h}
+
+
+def _build_archival_lightbox_strip_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#04 Backlit 120 medium-format positive film strip on a 5000K transilluminated darkroom light table."""
+    imgs = _load_companion_photos(raw_primary, kb, width, height, color_grade_fx, focal_uv, count=3)
+    sw_strip = int(round(width * 1.46))
+    sw_strip -= sw_strip % 2
+    sh_strip = int(round(height * 1.06))
+    sh_strip -= sh_strip % 2
+
+    # Build 5000K transilluminated diffuser glow bed on matte obsidian darkroom bench at 1/4 res -> smooth upscale
+    qw, qh = max(48, sw_strip // 4), max(27, sh_strip // 4)
+    yy_q, xx_q = np.mgrid[0:qh, 0:qw].astype(np.float32)
+    bx0, bx1 = qw * 0.06, qw * 0.94
+    by0, by1 = qh * 0.16, qh * 0.80
+    dx = np.maximum(0.0, np.maximum(bx0 - xx_q, xx_q - bx1))
+    dy = np.maximum(0.0, np.maximum(by0 - yy_q, yy_q - by1))
+    sig = max(4.0, 20.0 * scale_factor)
+    glow = np.exp(-((dx * dx + dy * dy) / (sig * sig)))
+    bg_q = np.empty((qh, qw, 3), dtype=np.float32)
+    bg_q[:, :, 0] = 13.0 + glow * 204.0
+    bg_q[:, :, 1] = 14.0 + glow * 196.0
+    bg_q[:, :, 2] = 18.0 + glow * 182.0
+    table = Image.fromarray(np.clip(bg_q, 6.0, 236.0).astype(np.uint8), mode="RGB").resize(
+        (sw_strip, sh_strip), Image.Resampling.BILINEAR
+    )
+    td = ImageDraw.Draw(table)
+
+    strip_y0 = int(sh_strip * 0.19)
+    strip_y1 = int(sh_strip * 0.77)
+    strip_x0 = int(sw_strip * 0.08)
+    strip_x1 = int(sw_strip * 0.92)
+    td.rectangle([strip_x0, strip_y0, strip_x1, strip_y1], fill=(10, 11, 14))
+
+    f_reb = _load_editorial_font(max(9, int(round(12 * scale_factor))), bold=True, serif=False)
+    frame_gap = max(12, int(round(32 * scale_factor)))
+    pad_top = max(16, int(round(40 * scale_factor)))
+    pad_bot = max(16, int(round(40 * scale_factor)))
+    inner_h = max(32, (strip_y1 - strip_y0) - pad_top - pad_bot)
+    inner_w = max(32, ((strip_x1 - strip_x0) - frame_gap * 4) // 3)
+
+    for i, im in enumerate(imgs):
+        fx0 = strip_x0 + frame_gap + i * (inner_w + frame_gap)
+        fy0 = strip_y0 + pad_top
+        fit_im = ImageOps.fit(im, (inner_w, inner_h), method=Image.Resampling.LANCZOS)
+        mask = Image.new("L", (inner_w, inner_h), 0)
+        md = ImageDraw.Draw(mask)
+        md.rounded_rectangle([0, 0, inner_w - 1, inner_h - 1], radius=max(2, int(round(5 * scale_factor))), fill=255)
+        n_sz = max(2, int(round(4 * scale_factor)))
+        for ny_r in (0.16, 0.24):
+            ny_p = int(inner_h * ny_r)
+            md.polygon([(0, ny_p - n_sz), (n_sz + 2, ny_p), (0, ny_p + n_sz)], fill=0)
+        table.paste(fit_im, (fx0, fy0), mask)
+        td.text((fx0 + 4, strip_y0 + max(4, int(round(12 * scale_factor)))), f"120 POSITIVE   ·   0{i + 1}A", font=f_reb, fill=(210, 174, 98))
+        td.text((fx0 + max(4, inner_w - int(round(92 * scale_factor))), strip_y1 - max(12, int(round(26 * scale_factor)))), f"6x7  #{i + 1:02d}", font=f_reb, fill=(142, 146, 156))
+
+    cap_txt = (kb.caption_title or "").strip()
+    if cap_txt:
+        f_cap = _load_editorial_font(max(11, int(round(18 * scale_factor))), bold=True, serif=True, text=cap_txt)
+        cb = td.textbbox((0, 0), cap_txt, font=f_cap)
+        td.text(((sw_strip - (cb[2] - cb[0])) // 2, int(sh_strip * 0.85)), cap_txt, font=f_cap, fill=(224, 220, 212))
+
+    return {"strip_rgb": table, "sw": sw_strip, "sh": sh_strip}
+
+
+def _build_optical_tilt_shift_assets(
+    raw_primary: Image.Image,
+    width: int,
+    height: int,
+    scale_factor: float,
+) -> dict[str, Any]:
+    """#05 Zero-artifact 4x5 large-format Scheimpflug optical plane-of-focus sweep."""
+    ov_w, ov_h = max(64, int(round(width * 1.12))), max(64, int(round(height * 1.12)))
+    sharp = ImageOps.fit(raw_primary, (ov_w, ov_h), method=Image.Resampling.LANCZOS)
+    bokeh = sharp.filter(ImageFilter.GaussianBlur(radius=max(4, int(round(10 * scale_factor)))))
+    sharp_pop = ImageEnhance.Contrast(sharp).enhance(1.05)
+    return {"sharp_over": sharp_pop, "bokeh_over": bokeh}
+
+
+def _build_darkroom_developer_assets(
+    raw_primary: Image.Image,
+    width: int,
+    height: int,
+    focal_uv: tuple[float, float],
+) -> dict[str, Any]:
+    """#06 Two-stage wet darkroom silver-gelatin emergence -> radial warm living color bloom."""
+    ov_w, ov_h = max(64, int(round(width * 1.10))), max(64, int(round(height * 1.10)))
+    col_over = ImageOps.fit(raw_primary, (ov_w, ov_h), method=Image.Resampling.LANCZOS)
+    bw_l = ImageEnhance.Contrast(col_over.convert("L")).enhance(1.12)
+    ba = np.asarray(bw_l, dtype=np.float32)
+    bw_rgb = np.stack(
+        [np.clip(ba * 1.03, 0, 255), np.clip(ba * 1.00, 0, 255), np.clip(ba * 0.94, 0, 255)],
+        axis=-1,
+    ).astype(np.uint8)
+    fx_c = max(0.22, min(0.78, float(focal_uv[0])))
+    fy_c = max(0.22, min(0.78, float(focal_uv[1])))
+    return {
+        "color_over": col_over,
+        "bw_over": Image.fromarray(bw_rgb, mode="RGB"),
+        "paper_rgb": (224.0, 218.0, 206.0),
+        "focal_xy": (fx_c, fy_c),
+    }
+
+
+def _build_cinema_gate_reveal_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+) -> dict[str, Any]:
+    """#07 35mm Panavision velvet 2.39:1 matte-box curtain opening + native lower-letterbox typography."""
+    ov_w, ov_h = max(64, int(round(width * 1.12))), max(64, int(round(height * 1.12)))
+    photo_over = ImageOps.fit(raw_primary, (ov_w, ov_h), method=Image.Resampling.LANCZOS)
+    bar_h_target = max(24, int(round((height - width / 2.39) * 0.5)))
+
+    txt_bar = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    td = ImageDraw.Draw(txt_bar)
+    t_s = (kb.caption_title or "").strip()
+    s_s = (kb.caption_subtitle or "").strip()
+    y_mid = height - bar_h_target // 2
+    if t_s:
+        disp_t = t_s.upper() if not _contains_cjk(t_s) else t_s
+        f_tit = _load_editorial_font(max(11, int(round(24 * scale_factor))), bold=True, serif=True, text=disp_t)
+        tb = td.textbbox((0, 0), disp_t, font=f_tit)
+        ty = y_mid - (tb[3] - tb[1]) - max(4, int(round(8 * scale_factor))) if s_s else y_mid - (tb[3] - tb[1]) // 2
+        td.text(((width - (tb[2] - tb[0])) // 2, ty), disp_t, font=f_tit, fill=(240, 236, 228, 245))
+        if s_s:
+            line_y = y_mid + max(2, int(round(2 * scale_factor)))
+            half_l = max(16, int(round(34 * scale_factor)))
+            td.line([(width // 2 - half_l, line_y), (width // 2 + half_l, line_y)], fill=(210, 180, 118, 210), width=max(1, int(round(1.4 * scale_factor))))
+            disp_s = s_s if len(s_s) <= 84 else (s_s[:81].rstrip() + "...")
+            f_sub = _load_editorial_font(max(9, int(round(13 * scale_factor))), bold=False, serif=False, text=disp_s)
+            sb = td.textbbox((0, 0), disp_s, font=f_sub)
+            td.text(((width - (sb[2] - sb[0])) // 2, line_y + max(5, int(round(8 * scale_factor)))), disp_s, font=f_sub, fill=(176, 174, 168, 225))
+    return {
+        "photo_over": photo_over,
+        "txt_rgba": txt_bar,
+        "bar_h_target": bar_h_target,
+    }
+
+
+def _build_prism_glass_refraction_assets(
+    raw_primary: Image.Image,
+    width: int,
+    height: int,
+    scale_factor: float,
+) -> dict[str, Any]:
+    """#08 Handheld K9 crystal prism subtle outer-edge optical refraction bevel (center 80% untouched)."""
+    ov_w, ov_h = max(64, int(round(width * 1.12))), max(64, int(round(height * 1.12)))
+    base_over = ImageOps.fit(raw_primary, (ov_w, ov_h), method=Image.Resampling.LANCZOS)
+    soft_over = base_over.filter(ImageFilter.GaussianBlur(radius=max(3, int(round(6 * scale_factor)))))
+    return {"base_over": base_over, "soft_over": soft_over}
+
+
+def _build_venetian_sunbeam_assets(
+    raw_primary: Image.Image,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    """#09 Architectural golden-hour diagonal slatted sunbeams + microscopic floating dust motes."""
+    ov_w, ov_h = max(64, int(round(width * 1.10))), max(64, int(round(height * 1.10)))
+    base_over = ImageOps.fit(raw_primary, (ov_w, ov_h), method=Image.Resampling.LANCZOS)
+    rng = np.random.default_rng(909)
+    n_motes = 36
+    motes = {
+        "mx0": rng.uniform(0.08, 0.92, n_motes).astype(np.float32),
+        "my0": rng.uniform(0.10, 0.90, n_motes).astype(np.float32),
+        "m_rad": rng.uniform(0.0024, 0.0054, n_motes).astype(np.float32),
+        "m_ph": rng.uniform(0.0, 6.2831853, n_motes).astype(np.float32),
+    }
+    return {"base_over": base_over, "motes": motes}
+
+
+def _build_vintage_postcard_deck_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#10 Playful tactile European linen travel postcards sliding apart smoothly with margin postmark."""
+    p1, p2 = _load_companion_photos(raw_primary, kb, width, height, color_grade_fx, focal_uv, count=2)
+    desk = _make_textured_surface_rgb(width, height, (38, 34, 30), seed=1010, grad_top=4.0, grad_bot=-5.0, grain_std=2.0)
+
+    def _make_card(im: Image.Image, caption: str, angle_deg: float, stamp_tag: str) -> Image.Image:
+        pw = max(64, int(round(width * 0.44)))
+        ph = max(64, int(round(height * 0.58)))
+        b_side = max(6, int(round(16 * scale_factor)))
+        b_bot = max(18, int(round(48 * scale_factor)))
+        fg = ImageOps.fit(im, (max(16, pw - b_side * 2), max(16, ph - b_side - b_bot)), method=Image.Resampling.LANCZOS)
+        card = _make_textured_surface_rgb(pw, ph, (236, 230, 216), seed=1011, grad_top=2.0, grad_bot=-2.0, grain_std=1.4).convert("RGBA")
+        cd = ImageDraw.Draw(card)
+        cd.rectangle([0, 0, pw - 1, ph - 1], outline=(190, 180, 162, 255), width=max(1, int(round(1.5 * scale_factor))))
+        cd.rectangle([b_side - 1, b_side - 1, b_side + fg.width, b_side + fg.height], outline=(168, 158, 142, 220), width=1)
+        card.paste(fg.convert("RGBA"), (b_side, b_side))
+        if caption:
+            f_ct = _load_editorial_font(max(9, int(round(15 * scale_factor))), bold=True, serif=True, text=caption)
+            disp_c = caption if len(caption) <= 34 else (caption[:31].rstrip() + "...")
+            cd.text((b_side, ph - b_bot + max(4, int(round(14 * scale_factor)))), disp_c, font=f_ct, fill=(52, 46, 40, 235))
+        # Subtle miniature circular postmark strictly in lower-right margin (zero overlap on photo)
+        rx = pw - b_side - max(10, int(round(20 * scale_factor)))
+        ry = ph - b_bot // 2
+        rr = max(7, int(round(15 * scale_factor)))
+        cd.ellipse([rx - rr, ry - rr, rx + rr, ry + rr], outline=(156, 78, 66, 175), width=max(1, int(round(1.4 * scale_factor))))
+        f_pm = _load_editorial_font(max(8, int(round(10 * scale_factor))), bold=True, serif=False, text=stamp_tag)
+        sb = cd.textbbox((0, 0), stamp_tag, font=f_pm)
+        cd.text((rx - (sb[2] - sb[0]) // 2, ry - (sb[3] - sb[1]) // 2 - 1), stamp_tag, font=f_pm, fill=(156, 78, 66, 185))
+        sm = max(12, int(round(36 * scale_factor)))
+        wrap = Image.new("RGBA", (pw + sm * 2, ph + sm * 2), (0, 0, 0, 0))
+        ImageDraw.Draw(wrap).rectangle([sm + 3, sm + max(4, int(round(10 * scale_factor))), sm + pw - 3, sm + ph + max(4, int(round(10 * scale_factor)))], fill=(0, 0, 0, 150))
+        wrap = wrap.filter(ImageFilter.GaussianBlur(radius=max(5, int(round(15 * scale_factor)))))
+        wrap.paste(card, (sm, sm), card)
+        return wrap.rotate(angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
+
+    c1_cap = (kb.caption_title or "").strip()
+    c2_cap = (kb.caption_subtitle or "").strip()
+    return {
+        "desk_rgb": desk,
+        "card1_rgba": _make_card(p1, c1_cap, -2.5, "01"),
+        "card2_rgba": _make_card(p2, c2_cap, 2.7, "02"),
+    }
+
+
+def _build_viewfinder_shutter_snap_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    pal: dict[str, Any],
+) -> dict[str, Any]:
+    """#11 Optical camera viewfinder framing lock -> 85ms dark mechanical shutter snap -> gallery matted print."""
+    ov_w, ov_h = max(64, int(round(width * 1.14))), max(64, int(round(height * 1.14)))
+    live_over = ImageOps.fit(raw_primary, (ov_w, ov_h), method=Image.Resampling.LANCZOS)
+
+    vf = Image.new("RGBA", (width, height), (238, 240, 244, 0))
+    vd = ImageDraw.Draw(vf)
+    mx, my = int(round(width * 0.07)), int(round(height * 0.08))
+    cl = max(12, int(round(30 * scale_factor)))
+    col = (242, 244, 248, 220)
+    lw = max(1, int(round(2.0 * scale_factor)))
+    for x, y, dx, dy in [(mx, my, 1, 1), (width - mx, my, -1, 1), (mx, height - my, 1, -1), (width - mx, height - my, -1, -1)]:
+        vd.line([(x, y), (x + dx * cl, y)], fill=col, width=lw)
+        vd.line([(x, y), (x, y + dy * cl)], fill=col, width=lw)
+    fcx, fcy = width // 2, int(height * 0.47)
+    fr = max(10, int(round(24 * scale_factor)))
+    vd.rectangle([fcx - fr, fcy - fr, fcx + fr, fcy + fr], outline=(110, 232, 165, 225), width=lw)
+    hud_txt = "M   1/500   f/2.8   ISO 100   [ AF-S LOCKED ]"
+    f_hud = _load_editorial_font(max(9, int(round(14 * scale_factor))), bold=True, serif=False, text=hud_txt)
+    hb = vd.textbbox((0, 0), hud_txt, font=f_hud)
+    vd.text(((width - (hb[2] - hb[0])) // 2, height - my + max(4, int(round(12 * scale_factor)))), hud_txt, font=f_hud, fill=(238, 240, 244, 230))
+
+    mat_bg = pal["bg"] if pal["is_light"] else (224, 220, 212)
+    mat = _make_textured_surface_rgb(width, height, mat_bg, seed=1111, grad_top=3.0, grad_bot=-4.0, grain_std=1.5)
+    card = _build_double_matte_card(
+        raw_primary,
+        max_w=int(width * 0.72),
+        max_h=int(height * 0.76),
+        scale_factor=scale_factor,
+        border_px=max(8, int(round(16 * scale_factor))),
+    )
+    mat.paste(card, ((width - card.width) // 2, max(8, int(height * 0.47) - card.height // 2)), card)
+    cap_txt = (kb.caption_title or "").strip()
+    if cap_txt:
+        md = ImageDraw.Draw(mat)
+        f_tit = _load_editorial_font(max(11, int(round(20 * scale_factor))), bold=True, serif=True, text=cap_txt)
+        cb = md.textbbox((0, 0), cap_txt, font=f_tit)
+        md.text(((width - (cb[2] - cb[0])) // 2, int(height * 0.89)), cap_txt, font=f_tit, fill=(38, 36, 34))
+
+    return {"live_over": live_over, "vf_rgba": vf, "mat_rgb": mat}
+
+
+def _build_accordion_leporello_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#12 Japanese/Swiss 3-panel concertina Leporello folding photo book unfolding smoothly in 3D."""
+    imgs = _load_companion_photos(raw_primary, kb, width, height, color_grade_fx, focal_uv, count=3)
+    bg = _make_textured_surface_rgb(width, height, (26, 28, 34), seed=1212, grad_top=3.0, grad_bot=-4.0, grain_std=1.6)
+    pw = max(48, int(round(width * 0.27)))
+    ph = max(48, int(round(height * 0.66)))
+    b = max(6, int(round(14 * scale_factor)))
+    panels: list[Image.Image] = []
+    for im in imgs:
+        fg = ImageOps.fit(im, (max(16, pw - b * 2), max(16, ph - b * 2)), method=Image.Resampling.LANCZOS)
+        p = _make_textured_surface_rgb(pw, ph, (236, 232, 224), seed=1213, grad_top=2.0, grad_bot=-2.0, grain_std=1.2).convert("RGBA")
+        ImageDraw.Draw(p).rectangle([0, 0, pw - 1, ph - 1], outline=(184, 178, 168, 255), width=max(1, int(round(1.5 * scale_factor))))
+        p.paste(fg.convert("RGBA"), (b, b))
+        panels.append(p)
+    return {"bg_rgb": bg, "panels_rgba": panels, "pw": pw, "ph": ph}
+
+
+def _build_film_strip_sprocket_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#13 Vertical 35mm cinema film strip with rounded dual-side sprockets gliding through a projector gate."""
+    imgs = _load_companion_photos(raw_primary, kb, width, height, color_grade_fx, focal_uv, count=3)
+    strip_w = max(96, int(round(width * 0.72)))
+    sproc_w = max(24, int(round(78 * scale_factor)))
+    inner_w = max(48, strip_w - sproc_w * 2)
+    frame_h = max(36, int(round(inner_w * 0.66)))
+    gap_h = max(14, int(round(32 * scale_factor)))
+    strip_h = len(imgs) * (frame_h + gap_h) + gap_h
+
+    strip = Image.new("RGB", (strip_w, strip_h), (12, 13, 17))
+    sd = ImageDraw.Draw(strip)
+    sp_w = max(8, int(round(24 * scale_factor)))
+    sp_h = max(12, int(round(34 * scale_factor)))
+    sp_pitch = max(22, int(round(68 * scale_factor)))
+    for sy_p in range(max(6, int(round(16 * scale_factor))), max(1, strip_h - sp_h), sp_pitch):
+        for sx_p in (max(4, int(round(20 * scale_factor))), strip_w - max(4, int(round(20 * scale_factor))) - sp_w):
+            sd.rounded_rectangle(
+                [sx_p, sy_p, sx_p + sp_w, sy_p + sp_h],
+                radius=max(2, int(round(5 * scale_factor))),
+                fill=(38, 40, 46),
+                outline=(58, 60, 68),
+                width=1,
+            )
+
+    f_code = _load_editorial_font(max(8, int(round(12 * scale_factor))), bold=True, serif=False)
+    for i, im in enumerate(imgs):
+        fy = gap_h + i * (frame_h + gap_h)
+        fit_im = ImageOps.fit(im, (inner_w, frame_h), method=Image.Resampling.LANCZOS)
+        strip.paste(fit_im, (sproc_w, fy))
+        sd.rectangle([sproc_w - 1, fy - 1, sproc_w + inner_w, fy + frame_h], outline=(48, 50, 58), width=1)
+        sd.text((sproc_w + 6, fy - max(10, int(round(22 * scale_factor)))), f"KODAK VISION3 500T   ·   FRAME {34 + i}A", font=f_code, fill=(214, 162, 74))
+
+    full_strip = Image.new("RGB", (width, strip_h), (9, 10, 14))
+    full_strip.paste(strip, ((width - strip_w) // 2, 0))
+    return {"strip_rgb": full_strip, "strip_h": strip_h}
+
+
+def _build_museum_acrylic_float_assets(
+    raw_primary: Image.Image,
+    width: int,
+    height: int,
+    scale_factor: float,
+    pal: dict[str, Any],
+) -> dict[str, Any]:
+    """#14 Frameless Diasec gallery Perspex acrylic float mount with brass standoffs & swinging cast shadow."""
+    wall_col = pal["bg"] if pal["is_light"] else (218, 214, 206)
+    wall = _make_textured_surface_rgb(width, height, wall_col, seed=1414, grad_top=4.0, grad_bot=-5.0, grain_std=1.8)
+    fg = raw_primary.copy()
+    fg.thumbnail((max(48, int(round(width * 0.64))), max(48, int(round(height * 0.74)))), Image.Resampling.LANCZOS)
+    pw, ph = fg.width, fg.height
+
+    acrylic = fg.convert("RGBA")
+    ad = ImageDraw.Draw(acrylic)
+    ad.rectangle([0, 0, pw - 1, ph - 1], outline=(244, 244, 244, 175), width=max(1, int(round(2.2 * scale_factor))))
+    st_off = max(6, int(round(16 * scale_factor)))
+    st_r = max(2, int(round(4.5 * scale_factor)))
+    for sx_p, sy_p in [(st_off, st_off), (pw - st_off, st_off), (st_off, ph - st_off), (pw - st_off, ph - st_off)]:
+        ad.ellipse([sx_p - st_r, sy_p - st_r, sx_p + st_r, sy_p + st_r], fill=(198, 178, 134, 235), outline=(92, 82, 62, 220), width=1)
+
+    sm = max(14, int(round(44 * scale_factor)))
+    sh_im = Image.new("RGBA", (pw + sm * 2, ph + sm * 2), (0, 0, 0, 0))
+    ImageDraw.Draw(sh_im).rectangle([sm, sm, sm + pw, sm + ph], fill=(12, 12, 16, 148))
+    sh_im = sh_im.filter(ImageFilter.GaussianBlur(radius=max(6, int(round(19 * scale_factor)))))
+
+    return {
+        "wall_rgb": wall,
+        "acrylic_rgba": acrylic,
+        "shadow_rgba": sh_im,
+        "px0": (width - pw) // 2,
+        "py0": (height - ph) // 2,
+        "pw": pw,
+        "ph": ph,
+        "sm": sm,
+    }
+
+
+def _build_kinetic_triptych_reveal_assets(
+    raw_primary: Image.Image,
+    kb: KenBurnsConfig,
+    width: int,
+    height: int,
+    scale_factor: float,
+    color_grade_fx: Optional[EffectTrackItem | dict[str, Any]] = None,
+    focal_uv: Optional[tuple[float, float]] = None,
+) -> dict[str, Any]:
+    """#15 Energetic 3-beat staggered vertical editorial column reveal with counter-directional motion."""
+    imgs = _load_companion_photos(raw_primary, kb, width, height, color_grade_fx, focal_uv, count=3)
+    gutter = max(4, int(round(9 * scale_factor)))
+    w1 = max(24, int(round((width - gutter * 2) * 0.36)))
+    w2 = max(24, int(round((width - gutter * 2) * 0.32)))
+    w3 = max(24, width - gutter * 2 - w1 - w2)
+    col_ws = [w1, w2, w3]
+    xs = [0, w1 + gutter, w1 + gutter + w2 + gutter]
+    cols_over = [
+        ImageOps.fit(im, (max(32, int(round(cw * 1.14))), max(32, int(round(height * 1.14)))), method=Image.Resampling.LANCZOS)
+        for im, cw in zip(imgs, col_ws)
+    ]
+    return {"cols_over": cols_over, "col_ws": col_ws, "xs": xs}
+
+
 def _prepare_overlay_fx_assets(
     overlay_fx: str,
     width: int,
@@ -2695,21 +3499,27 @@ def _prepare_overlay_fx_assets(
         return {"type": "halation_bloom_35mm"}
 
     if overlay_fx == "caustic_water_shimmer":
-        # Smooth upper-corner diagonal sun rays & coastal shimmer profile (low-contrast archival grade)
-        ray1 = np.exp(-((nx * 0.72 + ny * 0.69 - 0.34) ** 2) / 0.018)
-        ray2 = np.exp(-((nx * 0.68 + ny * 0.73 - 0.56) ** 2) / 0.024) * 0.75
-        falloff = np.clip(1.0 - ny * 0.92, 0.0, 1.0) * np.clip(0.25 + nx * 0.75, 0.0, 1.0)
-        beams = np.clip((ray1 + ray2) * falloff, 0.0, 1.0)
-        c_rgb = np.zeros((small_h, small_w, 3), dtype=np.uint8)
+        # Oversampled dual-band sunlit water caustic shimmer for animated dual-phase lateral drift
+        dw = int(round(width * 1.24))
+        csw, csh = max(64, dw // 4), max(36, height // 4)
+        yy_c, xx_c = np.mgrid[0:csh, 0:csw].astype(np.float32)
+        nx_c = xx_c / max(1.0, float(csw - 1))
+        ny_c = yy_c / max(1.0, float(csh - 1))
+        ray1 = np.exp(-((nx_c * 0.72 + ny_c * 0.69 - 0.34) ** 2) / 0.018)
+        ray2 = np.exp(-((nx_c * 0.68 + ny_c * 0.73 - 0.58) ** 2) / 0.024) * 0.78
+        ripple = 0.72 + 0.28 * np.sin(nx_c * math.pi * 6.5 + ny_c * 3.4) * np.cos(ny_c * math.pi * 4.2 - nx_c * 2.2)
+        falloff = np.clip(1.0 - ny_c * 0.88, 0.0, 1.0) * np.clip(0.28 + nx_c * 0.72, 0.0, 1.0)
+        beams = np.clip((ray1 + ray2) * ripple * falloff, 0.0, 1.0)
+        c_rgb = np.zeros((csh, csw, 3), dtype=np.uint8)
         c_rgb[:, :, 0] = (beams * 255.0).astype(np.uint8)
         c_rgb[:, :, 1] = (beams * 228.0).astype(np.uint8)
         c_rgb[:, :, 2] = (beams * 176.0).astype(np.uint8)
-        shimmer_img = (
+        shimmer_over = (
             Image.fromarray(c_rgb, mode="RGB")
             .filter(ImageFilter.GaussianBlur(radius=6))
-            .resize((width, height), Image.Resampling.BILINEAR)
+            .resize((dw, height), Image.Resampling.BILINEAR)
         )
-        return {"type": "caustic_water_shimmer", "shimmer_img": shimmer_img}
+        return {"type": "caustic_water_shimmer", "shimmer_over": shimmer_over, "dw": dw}
 
     if overlay_fx == "architectural_window_dapple":
         dw = int(round(width * 1.20))
@@ -2757,32 +3567,43 @@ def _apply_overlay_fx(
     if fx_type == "none":
         return frame_rgb
 
+    e_fx = _ease_in_out_quintic(t_norm)
     if fx_type == "golden_light_leak":
-        weight = 0.12 + 0.10 * math.sin(math.pi * t_norm)
-        return Image.blend(frame_rgb, fx_assets["leak_img"], weight)
+        # Black-preserving optical screen blend (shadows stay deep, warm amber glows naturally)
+        screened = ImageChops.screen(frame_rgb, fx_assets["leak_img"])
+        weight = 0.22 + 0.14 * math.sin(math.pi * e_fx)
+        return Image.blend(frame_rgb, screened, weight)
 
     if fx_type == "museum_spotlight":
         frame_rgb.paste(fx_assets["dark_rgb"], (0, 0), fx_assets["mask_l"])
         return frame_rgb
 
     if fx_type == "champagne_bokeh":
+        # Soft elliptical anamorphic optical bokeh disks (zero harsh outline strokes, black-preserving screen blend)
         w, h = frame_rgb.size
         sw, sh = max(64, w // 4), max(36, h // 4)
-        overlay = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
-        d = ImageDraw.Draw(overlay)
+        yy_b, xx_b = np.mgrid[0:sh, 0:sw].astype(np.float32)
+        acc = np.zeros((sh, sw), dtype=np.float32)
         for ox, oy, rad, alpha, phase in fx_assets["orbs"]:
-            cx = int(((ox + 0.03 * math.sin(phase + t_norm * 4.0)) % 1.0) * sw)
-            cy = int(((oy - 0.10 * t_norm) % 1.0) * sh)
-            r_small = max(3, rad // 4)
-            pulse = int(alpha * (0.75 + 0.25 * math.sin(phase + t_norm * 6.0)))
-            d.ellipse(
-                [cx - r_small, cy - r_small, cx + r_small, cy + r_small],
-                fill=(255, 222, 138, pulse),
-                outline=(255, 240, 190, min(255, pulse + 25)),
-            )
-        overlay = overlay.filter(ImageFilter.GaussianBlur(radius=3)).resize((w, h), Image.Resampling.BILINEAR)
-        frame_rgb.paste(overlay.convert("RGB"), (0, 0), overlay.split()[3])
-        return frame_rgb
+            cx = ((ox + 0.028 * math.sin(phase + e_fx * 3.6)) % 1.0) * sw
+            cy = ((oy - 0.085 * e_fx) % 1.0) * sh
+            rx_s = max(3.0, float(rad) / 4.2)
+            ry_s = rx_s * 1.24  # subtle Cooke anamorphic oval aperture ratio
+            pulse = (alpha / 255.0) * (0.72 + 0.28 * math.sin(phase + e_fx * 5.2))
+            r2 = ((xx_b - cx) / rx_s) ** 2 + ((yy_b - cy) / ry_s) ** 2
+            disk = np.clip(1.0 - r2, 0.0, 1.0)
+            acc += (disk * disk) * pulse * 0.85
+        acc = np.clip(acc, 0.0, 1.0)
+        bokeh_rgb = np.zeros((sh, sw, 3), dtype=np.uint8)
+        bokeh_rgb[:, :, 0] = np.clip(acc * 255.0, 0, 255).astype(np.uint8)
+        bokeh_rgb[:, :, 1] = np.clip(acc * 224.0, 0, 255).astype(np.uint8)
+        bokeh_rgb[:, :, 2] = np.clip(acc * 150.0, 0, 255).astype(np.uint8)
+        bokeh_full = (
+            Image.fromarray(bokeh_rgb, mode="RGB")
+            .filter(ImageFilter.GaussianBlur(radius=2))
+            .resize((w, h), Image.Resampling.BILINEAR)
+        )
+        return ImageChops.screen(frame_rgb, bokeh_full)
 
     if fx_type == "nostalgic_film_grain":
         grains = fx_assets["grain_frames"]
@@ -2850,14 +3671,22 @@ def _apply_overlay_fx(
         return Image.blend(frame_rgb, screened, weight)
 
     if fx_type == "caustic_water_shimmer":
-        screened = ImageChops.screen(frame_rgb, fx_assets["shimmer_img"])
-        weight = 0.09 + 0.045 * math.sin(math.pi * t_norm)
+        w, h = frame_rgb.size
+        dw = int(fx_assets["dw"])
+        sh_over = fx_assets["shimmer_over"]
+        x0_a = (dw - w) * e_fx
+        x0_b = (dw - w) * (1.0 - e_fx)
+        crop_a = sh_over.transform((w, h), Image.Transform.EXTENT, (x0_a, 0.0, x0_a + float(w), float(h)), resample=Image.Resampling.BILINEAR)
+        crop_b = sh_over.transform((w, h), Image.Transform.EXTENT, (x0_b, 0.0, x0_b + float(w), float(h)), resample=Image.Resampling.BILINEAR)
+        anim_shimmer = Image.blend(crop_a, crop_b, 0.38)
+        screened = ImageChops.screen(frame_rgb, anim_shimmer)
+        weight = 0.11 + 0.055 * math.sin(math.pi * e_fx)
         return Image.blend(frame_rgb, screened, weight)
 
     if fx_type == "architectural_window_dapple":
         w, h = frame_rgb.size
         dw = int(fx_assets["dw"])
-        x0 = (dw - w) * (1.0 - _ease_in_out_cubic(t_norm))
+        x0 = (dw - w) * (1.0 - e_fx)
         sun_m = fx_assets["sun_mask_over"].transform(
             (w, h),
             Image.Transform.EXTENT,
@@ -2898,10 +3727,21 @@ def _prepare_photo_scene_context(
         s_zoom = 1.0
         e_zoom = min(1.018, max(1.0, e_zoom))
         sx, sy, ex, ey = 0.5, 0.5, 0.5, 0.5
-    # editorial_magazine, links_white_matte, kinfolk_linen_folio, and passepartout_shadowbox never overlay floating dark lower-third cards
-    has_card = bool(kb.caption_title and kb.caption_title.strip()) and (
-        mode not in ("editorial_magazine", "links_white_matte", "kinfolk_linen_folio", "passepartout_shadowbox")
+    # Modes with native integrated editorial/museum typography never overlay floating dark lower-third cards
+    _integrated_caption_modes = (
+        "editorial_magazine",
+        "links_white_matte",
+        "kinfolk_linen_folio",
+        "passepartout_shadowbox",
+        "swiss_monograph_grid",
+        "editorial_bookspread",
+        "gallery_wall_triptych",
+        "archival_lightbox_strip",
+        "cinema_gate_reveal",
+        "vintage_postcard_deck",
+        "viewfinder_shutter_snap",
     )
+    has_card = bool(kb.caption_title and kb.caption_title.strip()) and (mode not in _integrated_caption_modes)
     card_fg: Optional[Image.Image] = None
     card_mask: Optional[Image.Image] = None
     card_tint: Optional[Image.Image] = None
@@ -3268,6 +4108,190 @@ def _prepare_photo_scene_context(
             scale_factor=scale_factor,
         )
 
+    elif mode == "swiss_monograph_grid":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["swiss_grid"] = _build_swiss_monograph_grid_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            pal=pal,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "editorial_bookspread":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["bookspread"] = _build_editorial_bookspread_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "gallery_wall_triptych":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["gallery_wall"] = _build_gallery_wall_triptych_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            pal=pal,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "archival_lightbox_strip":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["lightbox_strip"] = _build_archival_lightbox_strip_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "optical_tilt_shift":
+        ctx["tilt_shift"] = _build_optical_tilt_shift_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+        )
+
+    elif mode == "darkroom_developer_reveal":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["darkroom_dev"] = _build_darkroom_developer_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "cinema_gate_reveal":
+        ctx["cinema_gate"] = _build_cinema_gate_reveal_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+        )
+
+    elif mode == "prism_glass_refraction":
+        ctx["prism_glass"] = _build_prism_glass_refraction_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+        )
+
+    elif mode == "venetian_sunbeam_pan":
+        ctx["venetian"] = _build_venetian_sunbeam_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+        )
+
+    elif mode == "vintage_postcard_deck":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["postcard_deck"] = _build_vintage_postcard_deck_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "viewfinder_shutter_snap":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        ctx["shutter_snap"] = _build_viewfinder_shutter_snap_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            pal=pal,
+        )
+
+    elif mode == "accordion_leporello_fold":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["leporello"] = _build_accordion_leporello_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "film_strip_sprocket_glide":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["film_sprocket"] = _build_film_strip_sprocket_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
+    elif mode == "museum_acrylic_float":
+        pal = _resolve_surface_palette(raw_primary, kb)
+        ctx["surface_palette"] = pal["name"]
+        ctx["acrylic_float"] = _build_museum_acrylic_float_assets(
+            raw_primary=raw_primary,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            pal=pal,
+        )
+
+    elif mode == "kinetic_triptych_reveal":
+        salient_uv = _detect_photo_salient_point(
+            raw_primary, kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
+        )
+        ctx["kinetic_triptych"] = _build_kinetic_triptych_reveal_assets(
+            raw_primary=raw_primary,
+            kb=kb,
+            width=width,
+            height=height,
+            scale_factor=scale_factor,
+            color_grade_fx=color_grade_fx,
+            focal_uv=salient_uv,
+        )
+
     else:
         oversample = 1.02 if mode == "links_white_matte" else (1.10 if width >= 3840 else 1.20)
         work_w = int(round(width * oversample))
@@ -3309,7 +4333,7 @@ def _render_photo_frame_from_context(
     bg_plane = ctx["bg_plane"]
     bg_w, bg_h = ctx["bg_w"], ctx["bg_h"]
     card_cy_ratio = ctx["card_cy_ratio"]
-    eased = _ease_in_out_cubic(t_norm)
+    eased = _ease_in_out_quintic(t_norm)
 
     if mode == "diptych_frame":
         fg_card_1 = ctx["fg_card_1"]
@@ -3327,16 +4351,12 @@ def _render_photo_frame_from_context(
             (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
             resample=resample_mode,
         )
-        drift_px = int(round((eased - 0.5) * 24.0 * scale_factor))
-        left_cx = int(width * 0.28)
-        right_cx = int(width * 0.72)
-        mid_cy = int(height * card_cy_ratio)
-        lx = left_cx - fg_card_1.width // 2
-        ly = mid_cy - fg_card_1.height // 2 - drift_px
-        rx = right_cx - fg_card_2.width // 2
-        ry = mid_cy - fg_card_2.height // 2 + drift_px
-        frame.paste(fg_card_1, (lx, ly), fg_card_1)
-        frame.paste(fg_card_2, (rx, ry), fg_card_2)
+        drift_px = (eased - 0.5) * 24.0 * scale_factor
+        left_cx = width * 0.28
+        right_cx = width * 0.72
+        mid_cy = height * card_cy_ratio
+        _paste_rgba_subpixel_pil(frame, fg_card_1, left_cx - fg_card_1.width * 0.5, mid_cy - fg_card_1.height * 0.5 - drift_px)
+        _paste_rgba_subpixel_pil(frame, fg_card_2, right_cx - fg_card_2.width * 0.5, mid_cy - fg_card_2.height * 0.5 + drift_px)
 
     elif mode == "triptych_cinematic":
         panels: list[Image.Image] = ctx["triptych_panels"]
@@ -3352,20 +4372,21 @@ def _render_photo_frame_from_context(
             (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
             resample=resample_mode,
         )
-        centers_x = [int(width * 0.20), int(width * 0.50), int(width * 0.80)]
-        mid_cy = int(height * card_cy_ratio)
+        centers_x = [width * 0.20, width * 0.50, width * 0.80]
+        mid_cy = height * card_cy_ratio
         drift_dirs = [-1.0, 0.85, -1.0]
         for p_i, p_card in enumerate(panels):
-            # Staggered entrance cascade over the first 25% of the clip
+            # Velvet C2 quintic staggered entrance + soft alpha materialize (zero harsh pop-in)
             stagger_start = p_i * 0.06
-            enter_p = _ease_out_cubic((t_norm - stagger_start) / 0.18) if t_norm > stagger_start else 0.0
-            if enter_p <= 0.02:
+            enter_p = _ease_in_out_quintic((t_norm - stagger_start) / 0.28) if t_norm > stagger_start else 0.0
+            alpha_m = min(1.0, enter_p * 1.45)
+            if alpha_m <= 0.01:
                 continue
-            slide_in_y = int(round((1.0 - enter_p) * 38.0 * scale_factor))
-            drift_y = int(round((eased - 0.5) * 20.0 * scale_factor * drift_dirs[p_i]))
-            px = centers_x[p_i] - p_card.width // 2
-            py = mid_cy - p_card.height // 2 + drift_y + slide_in_y
-            frame.paste(p_card, (px, max(8, py)), p_card)
+            slide_in_y = (1.0 - enter_p) * 32.0 * scale_factor
+            drift_y = (eased - 0.5) * 20.0 * scale_factor * drift_dirs[p_i]
+            px = centers_x[p_i] - p_card.width * 0.5
+            py = max(8.0, mid_cy - p_card.height * 0.5 + drift_y + slide_in_y)
+            _paste_rgba_subpixel_pil(frame, p_card, px, py, alpha_mul=alpha_m)
 
     elif mode == "polaroid_scrapbook":
         p1: Image.Image = ctx["polaroid_1"]
@@ -3382,28 +4403,28 @@ def _render_photo_frame_from_context(
             (bx0, by0, bx0 + bw_crop, by0 + bh_crop),
             resample=resample_mode,
         )
-        mid_cy = int(height * card_cy_ratio)
+        mid_cy = height * card_cy_ratio
         if p2 is not None:
-            # Dual Polaroid Scrapbook Stack
-            drift = int(round((eased - 0.5) * 18.0 * scale_factor))
-            x1 = int(width * 0.33) - p1.width // 2
-            y1 = mid_cy - p1.height // 2 - drift
-            frame.paste(p1, (x1, max(8, y1)), p1)
+            # Dual Polaroid Scrapbook Stack with sub-pixel float drift & velvety C2 entrance
+            drift = (eased - 0.5) * 18.0 * scale_factor
+            x1 = width * 0.33 - p1.width * 0.5
+            y1 = max(8.0, mid_cy - p1.height * 0.5 - drift)
+            _paste_rgba_subpixel_pil(frame, p1, x1, y1)
 
-            enter_2 = _ease_out_cubic((t_norm - 0.08) / 0.24) if t_norm > 0.08 else 0.0
-            if enter_2 > 0.02:
-                slide_x = int(round((1.0 - enter_2) * 52.0 * scale_factor))
-                x2 = int(width * 0.67) - p2.width // 2 + slide_x
-                y2 = mid_cy - p2.height // 2 + drift
-                frame.paste(p2, (x2, max(8, y2)), p2)
+            enter_2 = _ease_in_out_quintic((t_norm - 0.08) / 0.30) if t_norm > 0.08 else 0.0
+            alpha_2 = min(1.0, enter_2 * 1.45)
+            if alpha_2 > 0.01:
+                slide_x = (1.0 - enter_2) * 44.0 * scale_factor
+                x2 = width * 0.67 - p2.width * 0.5 + slide_x
+                y2 = max(8.0, mid_cy - p2.height * 0.5 + drift)
+                _paste_rgba_subpixel_pil(frame, p2, x2, y2, alpha_mul=alpha_2)
         else:
             scale_p = 0.96 + 0.05 * eased
-            cw = max(1, int(round(p1.width * scale_p)))
-            ch = max(1, int(round(p1.height * scale_p)))
-            scaled_p1 = p1.resize((cw, ch), resample=resample_mode)
-            px = (width - cw) // 2 + int(round((eased - 0.5) * 22.0 * scale_factor))
-            py = mid_cy - ch // 2
-            frame.paste(scaled_p1, (px, max(8, py)), scaled_p1)
+            cw = max(1.0, p1.width * scale_p)
+            ch = max(1.0, p1.height * scale_p)
+            px = (width - cw) * 0.5 + (eased - 0.5) * 22.0 * scale_factor
+            py = max(8.0, mid_cy - ch * 0.5)
+            _paste_rgba_subpixel_pil(frame, p1, px, py, dst_w=cw, dst_h=ch)
 
     elif mode == "cinematic_depth_3d":
         mpi_layers: list[Image.Image] = ctx["mpi_layers"]
@@ -3490,7 +4511,7 @@ def _render_photo_frame_from_context(
         sharp_crop = rf_sharp.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
         bokeh_crop = rf_bokeh.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
 
-        focus_p = _ease_in_out_cubic(min(1.0, t_norm / 0.85))
+        focus_p = _ease_in_out_quintic(min(1.0, t_norm / 0.85))
         focus_d = f_start + (f_end - f_start) * focus_p
         dist = np.abs(rf_depth_q - focus_d)
         lin = np.clip((dist - 0.06) / 0.24, 0.0, 1.0)
@@ -3526,7 +4547,7 @@ def _render_photo_frame_from_context(
         bw_crop = bloom_bw.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
         col_crop = bloom_color.transform((width, height), Image.Transform.EXTENT, (x0, y0, x0 + cw, y0 + ch), resample=resample_mode)
 
-        bloom_p = _ease_in_out_cubic(min(1.0, t_norm / 0.88))
+        bloom_p = _ease_in_out_quintic(min(1.0, t_norm / 0.88))
         thresh = 1.06 - 1.26 * bloom_p
         soft_k = np.clip((bloom_depth_q - thresh) / 0.32, 0.0, 1.0)
         color_w_q = soft_k * soft_k * (3.0 - 2.0 * soft_k)
@@ -3628,26 +4649,20 @@ def _render_photo_frame_from_context(
             bg_plane, (width, height), 1.07 - 0.025 * eased, 0.5 - fg_dx * 0.22, 0.5 - fg_dy * 0.22, resample_mode
         )
         fg_scale = 0.982 + 0.030 * eased
-        cw = max(1, int(round(fg_card_1.width * fg_scale)))
-        ch = max(1, int(round(fg_card_1.height * fg_scale)))
-        scaled_card = fg_card_1.resize((cw, ch), resample=resample_mode)
-        pan_px_x = int(round(fg_dx * width * 0.06))
-        pan_px_y = int(round(fg_dy * height * 0.045))
-        px = (width - cw) // 2 + pan_px_x
-        py = int(height * card_cy_ratio) - ch // 2 + pan_px_y
-        frame.paste(scaled_card, (px, max(10, py)), scaled_card)
+        cw = max(1.0, fg_card_1.width * fg_scale)
+        ch = max(1.0, fg_card_1.height * fg_scale)
+        px = (width - cw) * 0.5 + fg_dx * width * 0.06
+        py = max(10.0, height * card_cy_ratio - ch * 0.5 + fg_dy * height * 0.045)
+        _paste_rgba_subpixel_pil(frame, fg_card_1, px, py, dst_w=cw, dst_h=ch)
 
     elif mode == "contact_sheet_zoom":
         sheet: Image.Image = ctx["contact_sheet"]
         hcx, hcy = ctx["contact_hero_xy"]
-        if t_norm <= 0.14:
-            cur_zoom = 1.00 + 0.04 * (t_norm / 0.14)
-            cx, cy = 0.50, 0.50
-        else:
-            push_p = _ease_in_out_cubic(min(1.0, (t_norm - 0.14) / 0.86))
-            cur_zoom = 1.04 + 1.48 * push_p
-            cx = 0.50 + (hcx - 0.50) * push_p
-            cy = 0.50 + (hcy - 0.50) * push_p
+        # Continuous C2 quintic push-in with zero piecewise velocity kink
+        push_p = _ease_in_out_quintic(max(0.0, (t_norm - 0.05) / 0.95))
+        cur_zoom = 1.00 + 0.03 * eased + 1.48 * push_p
+        cx = 0.50 + (hcx - 0.50) * push_p
+        cy = 0.50 + (hcy - 0.50) * push_p
         frame = _crop_plane_clamped(sheet, (width, height), cur_zoom, cx, cy, resample_mode)
 
     elif mode == "split_diopter_focus":
@@ -3710,12 +4725,11 @@ def _render_photo_frame_from_context(
             bg_plane, (width, height), 1.10 - 0.04 * eased, 0.50 + fg_dx * 0.35, 0.50, resample_mode
         )
         scale_s = 0.96 + 0.05 * eased
-        cw = max(1, int(round(slide_card.width * scale_s)))
-        ch = max(1, int(round(slide_card.height * scale_s)))
-        scaled_s = slide_card.resize((cw, ch), resample=resample_mode)
-        px = (width - cw) // 2 + int(round((eased - 0.5) * 18.0 * scale_factor))
-        py = max(8, int(height * card_cy_ratio) - ch // 2)
-        frame.paste(scaled_s, (px, py), scaled_s)
+        cw = max(1.0, slide_card.width * scale_s)
+        ch = max(1.0, slide_card.height * scale_s)
+        px = (width - cw) * 0.5 + (eased - 0.5) * 18.0 * scale_factor
+        py = max(8.0, height * card_cy_ratio - ch * 0.5)
+        _paste_rgba_subpixel_pil(frame, slide_card, px, py, dst_w=cw, dst_h=ch)
 
     elif mode == "floating_tilt_plate":
         framed_rgba: Image.Image = ctx["tilt_framed_rgba"]
@@ -3873,20 +4887,18 @@ def _render_photo_frame_from_context(
         has_card_f = bool(ctx.get("has_card"))
 
         s1 = 0.990 + 0.020 * eased
-        w1 = max(1, int(round(anc.width * s1)))
-        h1 = max(1, int(round(anc.height * s1)))
-        anc_scaled = anc.resize((w1, h1), resample=resample_mode)
-        x1 = int(width * 0.39) - w1 // 2 + int(round((0.5 - eased) * 18.0 * scale_factor))
-        y1 = max(8, int(height * (0.42 if has_card_f else 0.46)) - h1 // 2)
-        frame.paste(anc_scaled, (x1, y1), anc_scaled)
+        w1 = max(1.0, anc.width * s1)
+        h1 = max(1.0, anc.height * s1)
+        x1 = width * 0.39 - w1 * 0.5 + (0.5 - eased) * 18.0 * scale_factor
+        y1 = max(8.0, height * (0.42 if has_card_f else 0.46) - h1 * 0.5)
+        _paste_rgba_subpixel_pil(frame, anc, x1, y1, dst_w=w1, dst_h=h1)
 
         s2 = 0.975 + 0.038 * eased
-        w2 = max(1, int(round(fg_c.width * s2)))
-        h2 = max(1, int(round(fg_c.height * s2)))
-        fg_scaled = fg_c.resize((w2, h2), resample=resample_mode)
-        x2 = int(width * 0.68) - w2 // 2 + int(round((eased - 0.5) * 32.0 * scale_factor))
-        y2 = max(12, int(height * (0.53 if has_card_f else 0.58)) - h2 // 2 + int(round((0.5 - eased) * 12.0 * scale_factor)))
-        frame.paste(fg_scaled, (x2, y2), fg_scaled)
+        w2 = max(1.0, fg_c.width * s2)
+        h2 = max(1.0, fg_c.height * s2)
+        x2 = width * 0.68 - w2 * 0.5 + (eased - 0.5) * 32.0 * scale_factor
+        y2 = max(12.0, height * (0.53 if has_card_f else 0.58) - h2 * 0.5 + (0.5 - eased) * 12.0 * scale_factor)
+        _paste_rgba_subpixel_pil(frame, fg_c, x2, y2, dst_w=w2, dst_h=h2)
 
     elif mode == "leica_frame_finder":
         lf = ctx["leica_finder"]
@@ -3899,18 +4911,344 @@ def _render_photo_frame_from_context(
             resample_mode,
         )
         frame.paste(lf["dim_rgb"], (0, 0), lf["surround_mask"])
-        lock_p = _ease_out_cubic(min(1.0, t_norm / 0.32))
+        lock_p = _ease_in_out_quintic(min(1.0, t_norm / 0.38))
         reticle: Image.Image = lf["reticle_rgba"]
         if lock_p >= 0.999:
             frame.paste(reticle, (0, 0), reticle)
         else:
-            ret_scale = 1.0 + 0.028 * (1.0 - lock_p)
-            rw = max(1, int(round(width * ret_scale)))
-            rh = max(1, int(round(height * ret_scale)))
-            scaled_ret = reticle.resize((rw, rh), resample=Image.Resampling.BILINEAR)
-            px = (width - rw) // 2
-            py = (height - rh) // 2
-            frame.paste(scaled_ret, (px, py), scaled_ret)
+            ret_scale = 1.0 + 0.026 * (1.0 - lock_p)
+            rw = max(1.0, width * ret_scale)
+            rh = max(1.0, height * ret_scale)
+            _paste_rgba_subpixel_pil(frame, reticle, (width - rw) * 0.5, (height - rh) * 0.5, dst_w=rw, dst_h=rh)
+
+    elif mode == "swiss_monograph_grid":
+        sg = ctx["swiss_grid"]
+        frame = sg["page_rgb"].copy()
+        h_crop = _crop_plane_clamped(
+            sg["hero_over"], (sg["hw"], sg["hh"]), 1.00 + 0.065 * eased, 0.49 + 0.02 * eased, 0.50, resample_mode
+        )
+        d_crop = _crop_plane_clamped(
+            sg["det_over"], (sg["dw"], sg["dh"]), 1.00 + 0.105 * eased, 0.50, 0.50 - 0.015 * eased, resample_mode
+        )
+        frame.paste(h_crop, (sg["hx"], sg["hy"]))
+        frame.paste(d_crop, (sg["dx"], sg["dy"]))
+
+    elif mode == "editorial_bookspread":
+        bs = ctx["bookspread"]
+        board = bs["table_rgb"].copy()
+        c1 = _crop_plane_clamped(bs["p1_over"], (bs["w1"], bs["h1"]), 1.00 + 0.052 * eased, 0.50, 0.47, resample_mode)
+        c2 = _crop_plane_clamped(bs["p2_over"], (bs["w2"], bs["h2"]), 1.052 - 0.044 * eased, 0.50, 0.50, resample_mode)
+        board.paste(c1, (bs["x1"], bs["y1"]))
+        board.paste(c2, (bs["x2"], bs["y2"]))
+        frame = _crop_plane_clamped(
+            board, (width, height), 1.00 + 0.032 * eased, 0.50 + 0.008 * (eased - 0.5), 0.50, resample_mode
+        )
+        # Subtle warm moving daylight wash across open book pages
+        qw, qh = max(48, width // 4), max(27, height // 4)
+        yy_g, xx_g = np.mgrid[0:qh, 0:qw].astype(np.float32)
+        nx_g = xx_g / max(1.0, float(qw - 1))
+        ny_g = yy_g / max(1.0, float(qh - 1))
+        beam = np.exp(-(((nx_g - (0.28 + 0.35 * eased)) / 0.42) ** 2 + ((ny_g - 0.30) / 0.55) ** 2))
+        beam_u8 = (np.clip(beam * 12.0, 0.0, 255.0)).astype(np.uint8)
+        beam_full = np.asarray(Image.fromarray(beam_u8, mode="L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32)
+        f_arr = np.clip(np.asarray(frame, dtype=np.float32) + beam_full[:, :, None], 0.0, 255.0).astype(np.uint8)
+        frame = Image.fromarray(f_arr, mode="RGB")
+
+    elif mode == "gallery_wall_triptych":
+        gw = ctx["gallery_wall"]
+        ww_f, wh_f = float(gw["wall_w"]), float(gw["wall_h"])
+        # Zero-clamp C2 quintic gallery walk keeping all 3 framed prints cleanly framed
+        view_h = wh_f * (0.96 - 0.035 * math.sin(math.pi * eased))
+        view_w = view_h * (float(width) / max(1.0, float(height)))
+        if view_w > ww_f:
+            view_w = ww_f
+            view_h = view_w * (float(height) / max(1.0, float(width)))
+        max_x0 = max(0.0, ww_f - view_w)
+        bx0 = max_x0 * (0.18 + 0.64 * eased)
+        by0 = max(0.0, (wh_f - view_h) * 0.50)
+        frame = gw["wall_rgb"].transform(
+            (width, height), Image.Transform.EXTENT, (bx0, by0, bx0 + view_w, by0 + view_h), resample=resample_mode
+        )
+
+    elif mode == "archival_lightbox_strip":
+        lb = ctx["lightbox_strip"]
+        sw_f, sh_f = float(lb["sw"]), float(lb["sh"])
+        # Single unified C2 quintic smooth dolly (zero edge clamp, zero piecewise velocity jerk!)
+        view_h = sh_f * (0.96 - 0.13 * eased)
+        view_w = view_h * (float(width) / max(1.0, float(height)))
+        if view_w > sw_f:
+            view_w = sw_f
+            view_h = view_w * (float(height) / max(1.0, float(width)))
+        max_x0 = max(0.0, sw_f - view_w)
+        bx0 = max_x0 * (0.20 + 0.34 * eased)
+        by0 = max(0.0, (sh_f - view_h) * 0.49)
+        frame = lb["strip_rgb"].transform(
+            (width, height), Image.Transform.EXTENT, (bx0, by0, bx0 + view_w, by0 + view_h), resample=resample_mode
+        )
+
+    elif mode == "optical_tilt_shift":
+        ts = ctx["tilt_shift"]
+        cur_z = 1.01 + 0.075 * eased
+        cx_t, cy_t = 0.49 + 0.025 * eased, 0.51 - 0.025 * eased
+        sharp_c = _crop_plane_clamped(ts["sharp_over"], (width, height), cur_z, cx_t, cy_t, resample_mode)
+        bokeh_c = _crop_plane_clamped(ts["bokeh_over"], (width, height), cur_z, cx_t, cy_t, resample_mode)
+        qw, qh = max(48, width // 4), max(27, height // 4)
+        yy_q, xx_q = np.mgrid[0:qh, 0:qw].astype(np.float32)
+        nx_q = xx_q / max(1.0, float(qw - 1))
+        ny_q = yy_q / max(1.0, float(qh - 1))
+        tilt_coord = ny_q * 0.992 - (nx_q - 0.5) * 0.122
+        focus_y = 0.70 - 0.38 * eased
+        band_half = 0.165
+        dist = np.abs(tilt_coord - focus_y)
+        lin = np.clip((dist - band_half * 0.45) / (band_half * 1.45), 0.0, 1.0)
+        blur_w = lin * lin * (3.0 - 2.0 * lin)
+        mask_img = Image.fromarray(np.clip(blur_w * 255.0, 0, 255).astype(np.uint8), mode="L").resize(
+            (width, height), Image.Resampling.BILINEAR
+        )
+        frame = sharp_c.copy()
+        frame.paste(bokeh_c, (0, 0), mask_img)
+
+    elif mode == "darkroom_developer_reveal":
+        dd = ctx["darkroom_dev"]
+        cur_z = 1.01 + 0.065 * eased
+        col_c = _crop_plane_clamped(dd["color_over"], (width, height), cur_z, 0.50, 0.49, resample_mode)
+        bw_c = _crop_plane_clamped(dd["bw_over"], (width, height), cur_z, 0.50, 0.49, resample_mode)
+        col_arr = np.asarray(col_c, dtype=np.float32)
+        bw_arr = np.asarray(bw_c, dtype=np.float32)
+        pap = np.array(dd["paper_rgb"], dtype=np.float32).reshape(1, 1, 3)
+
+        dev_p = _ease_in_out_quintic(min(1.0, t_norm / 0.34))
+        luma = (0.299 * bw_arr[:, :, 0] + 0.587 * bw_arr[:, :, 1] + 0.114 * bw_arr[:, :, 2]) / 255.0
+        ink_rev = np.clip(dev_p * 1.45 - luma * 0.45, 0.0, 1.0)[:, :, None]
+        stage1 = pap * (1.0 - ink_rev) + bw_arr * ink_rev
+
+        col_p = _ease_in_out_quintic(max(0.0, min(1.0, (t_norm - 0.22) / 0.58)))
+        qw, qh = max(48, width // 4), max(27, height // 4)
+        yy_q, xx_q = np.mgrid[0:qh, 0:qw].astype(np.float32)
+        nx_q = xx_q / max(1.0, float(qw - 1))
+        ny_q = yy_q / max(1.0, float(qh - 1))
+        fx_c, fy_c = dd["focal_xy"]
+        rad = np.sqrt(((nx_q - fx_c) * 1.70) ** 2 + ((ny_q - fy_c) * 2.00) ** 2)
+        wave_r = col_p * 1.85 - 0.18
+        cm_q = np.clip((wave_r - rad) / 0.42, 0.0, 1.0)
+        cm_q = cm_q * cm_q * (3.0 - 2.0 * cm_q)
+        cm_full = (
+            np.asarray(
+                Image.fromarray(np.clip(cm_q * 255.0, 0, 255).astype(np.uint8), mode="L").resize(
+                    (width, height), Image.Resampling.BILINEAR
+                ),
+                dtype=np.float32,
+            )[:, :, None]
+            / 255.0
+        )
+        out_arr = np.clip(stage1 * (1.0 - cm_full) + col_arr * cm_full, 0.0, 255.0).astype(np.uint8)
+        frame = Image.fromarray(out_arr, mode="RGB")
+
+    elif mode == "cinema_gate_reveal":
+        cg = ctx["cinema_gate"]
+        frame = _crop_plane_clamped(cg["photo_over"], (width, height), 1.00 + 0.075 * eased, 0.49 + 0.02 * eased, 0.50, resample_mode)
+        # Subtle 35mm highlight halation glow
+        sw_h, sh_h = max(48, width // 6), max(27, height // 6)
+        s_arr = np.asarray(frame.resize((sw_h, sh_h), Image.Resampling.BILINEAR), dtype=np.float32)
+        luma = 0.299 * s_arr[:, :, 0] + 0.587 * s_arr[:, :, 1] + 0.114 * s_arr[:, :, 2]
+        hi = np.clip((luma - 205.0) / 50.0, 0.0, 1.0)
+        hi_blur = np.asarray(
+            Image.fromarray(np.clip(hi * 255.0, 0, 255).astype(np.uint8), mode="L")
+            .filter(ImageFilter.GaussianBlur(radius=4))
+            .resize((width, height), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        ) / 255.0
+        f_arr = np.asarray(frame, dtype=np.float32)
+        f_arr[:, :, 0] += hi_blur * 255.0 * 0.18
+        f_arr[:, :, 1] += hi_blur * 138.0 * 0.18
+        f_arr[:, :, 2] += hi_blur * 74.0 * 0.18
+        frame = Image.fromarray(np.clip(f_arr, 0.0, 255.0).astype(np.uint8), mode="RGB")
+
+        # Smooth C2 quintic velvet matte-box curtains opening cleanly to 2.39:1
+        curt_p = _ease_in_out_quintic(min(1.0, t_norm / 0.34))
+        cur_bar = int(round(cg["bar_h_target"] + (height * 0.16) * (1.0 - curt_p)))
+        dr = ImageDraw.Draw(frame)
+        dr.rectangle([0, 0, width, cur_bar], fill=(8, 9, 12))
+        dr.rectangle([0, height - cur_bar, width, height], fill=(8, 9, 12))
+
+        t_alpha = _ease_in_out_quintic(max(0.0, min(1.0, (t_norm - 0.16) / 0.26)))
+        if t_alpha > 0.01:
+            _paste_rgba_subpixel_pil(frame, cg["txt_rgba"], 0.0, 0.0, alpha_mul=t_alpha)
+
+    elif mode == "prism_glass_refraction":
+        pg = ctx["prism_glass"]
+        base_c = _crop_plane_clamped(pg["base_over"], (width, height), 1.01 + 0.070 * eased, 0.49 + 0.02 * eased, 0.50, resample_mode)
+        rr = _crop_plane_clamped(pg["soft_over"], (width, height), 1.04 + 0.070 * eased, 0.43 + 0.02 * eased, 0.50, resample_mode)
+        rb = _crop_plane_clamped(pg["soft_over"], (width, height), 1.04 + 0.070 * eased, 0.45 + 0.02 * eased, 0.50, resample_mode)
+        b_arr = np.asarray(base_c, dtype=np.float32)
+        rr_arr = np.asarray(rr, dtype=np.float32)
+        rb_arr = np.asarray(rb, dtype=np.float32)
+        refr = np.stack([rr_arr[:, :, 0], 0.5 * (rr_arr[:, :, 1] + rb_arr[:, :, 1]), rb_arr[:, :, 2]], axis=-1)
+
+        qw, qh = max(48, width // 4), max(27, height // 4)
+        yy_q, xx_q = np.mgrid[0:qh, 0:qw].astype(np.float32)
+        nx_q = xx_q / max(1.0, float(qw - 1))
+        ny_q = yy_q / max(1.0, float(qh - 1))
+        edge_line = (0.85 - 0.055 * math.sin(math.pi * eased)) - (ny_q - 0.5) * 0.24
+        fm_q = np.clip((nx_q - edge_line) / 0.045, 0.0, 1.0)
+        fm_q = fm_q * fm_q * (3.0 - 2.0 * fm_q)
+        bev_q = np.exp(-(((nx_q - edge_line) / 0.012) ** 2))
+        fm = np.asarray(Image.fromarray(np.clip(fm_q * 255.0, 0, 255).astype(np.uint8), mode="L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32)[:, :, None] / 255.0
+        bev = np.asarray(Image.fromarray(np.clip(bev_q * 255.0, 0, 255).astype(np.uint8), mode="L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32)[:, :, None] / 255.0
+        spec = np.array([255.0, 232.0, 198.0], dtype=np.float32).reshape(1, 1, 3)
+        out_arr = b_arr * (1.0 - fm * 0.50) + refr * (fm * 0.50) + bev * spec * 0.24
+        frame = Image.fromarray(np.clip(out_arr, 0.0, 255.0).astype(np.uint8), mode="RGB")
+
+    elif mode == "venetian_sunbeam_pan":
+        vn = ctx["venetian"]
+        base_c = _crop_plane_clamped(vn["base_over"], (width, height), 1.00 + 0.070 * eased, 0.50, 0.52 - 0.03 * eased, resample_mode)
+        f_arr = np.asarray(base_c, dtype=np.float32)
+        qw, qh = max(48, width // 4), max(27, height // 4)
+        yy_q, xx_q = np.mgrid[0:qh, 0:qw].astype(np.float32)
+        nx_q = xx_q / max(1.0, float(qw - 1))
+        ny_q = yy_q / max(1.0, float(qh - 1))
+        diag = nx_q * 0.72 + ny_q * 0.69 - 0.14 * eased
+        slats = np.power(np.clip(0.5 + 0.5 * np.sin(diag * 26.0), 0.0, 1.0), 2.4)
+        win_env = np.exp(-(((nx_q - 0.38) / 0.62) ** 2 + ((ny_q - 0.36) / 0.60) ** 2))
+        beam_q = slats * win_env * 0.22
+        shade_q = 1.0 - (1.0 - slats) * win_env * 0.12
+
+        # Vectorized microscopic sunlit dust motes glowing strictly inside the sunbeams
+        m = vn["motes"]
+        cx_m = (m["mx0"] + 0.022 * np.sin(m["m_ph"] + eased * 4.2))[:, None, None]
+        cy_m = ((m["my0"] - 0.075 * eased) % 1.0)[:, None, None]
+        r_m = m["m_rad"][:, None, None]
+        twinkle = (0.65 + 0.35 * np.sin(m["m_ph"] + eased * 7.2))[:, None, None]
+        aspect_r = float(width) / max(1.0, float(height))
+        r2 = (((nx_q[None, :, :] - cx_m) * aspect_r) ** 2) + ((ny_q[None, :, :] - cy_m) ** 2)
+        motes_acc = np.sum(np.exp(-r2 / (r_m * r_m)) * twinkle, axis=0)
+        motes_q = np.clip(motes_acc, 0.0, 1.2) * slats * win_env * 0.40
+
+        beam_f = np.asarray(Image.fromarray(np.clip(beam_q * 255.0, 0, 255).astype(np.uint8), mode="L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32)[:, :, None] / 255.0
+        shade_f = np.asarray(Image.fromarray(np.clip(shade_q * 255.0, 0, 255).astype(np.uint8), mode="L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32)[:, :, None] / 255.0
+        motes_f = np.asarray(Image.fromarray(np.clip(motes_q * 255.0, 0, 255).astype(np.uint8), mode="L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32)[:, :, None] / 255.0
+        warm_sun = np.array([255.0, 224.0, 168.0], dtype=np.float32).reshape(1, 1, 3)
+        out_arr = f_arr * shade_f
+        light = warm_sun * beam_f
+        out_arr = out_arr + light * (1.0 - out_arr / 255.0) + motes_f * warm_sun
+        frame = Image.fromarray(np.clip(out_arr, 0.0, 255.0).astype(np.uint8), mode="RGB")
+
+    elif mode == "vintage_postcard_deck":
+        pd_ctx = ctx["postcard_deck"]
+        frame = _crop_plane_clamped(pd_ctx["desk_rgb"], (width, height), 1.02 - 0.02 * eased, 0.50, 0.50, resample_mode)
+        c1, c2 = pd_ctx["card1_rgba"], pd_ctx["card2_rgba"]
+        # Smooth C2 quintic fan-apart using sub-pixel floating-point placement (zero harsh frame-0 snap!)
+        slide = _ease_in_out_quintic(min(1.0, t_norm / 0.62))
+        x1 = width * (0.34 - 0.05 * slide) - c1.width * 0.5
+        y1 = height * (0.50 - 0.014 * eased) - c1.height * 0.5
+        x2 = width * (0.64 + 0.06 * slide) - c2.width * 0.5
+        y2 = height * (0.52 + 0.014 * eased) - c2.height * 0.5
+        _paste_rgba_subpixel_pil(frame, c1, x1, y1)
+        _paste_rgba_subpixel_pil(frame, c2, x2, y2)
+
+    elif mode == "viewfinder_shutter_snap":
+        ss = ctx["shutter_snap"]
+        if t_norm < 0.34:
+            p = _ease_in_out_quintic(t_norm / 0.34)
+            frame = _crop_plane_clamped(ss["live_over"], (width, height), 1.07 - 0.04 * p, 0.52 - 0.02 * p, 0.48 + 0.02 * p, resample_mode)
+            frame.paste(ss["vf_rgba"], (0, 0), ss["vf_rgba"])
+        elif t_norm < 0.368:
+            # Crisp ~85ms dark mechanical shutter curtain blink (rich charcoal, never blinding white)
+            frame = Image.new("RGB", (width, height), (10, 11, 14))
+        else:
+            p2 = _ease_in_out_quintic((t_norm - 0.368) / 0.632)
+            frame = _crop_plane_clamped(ss["mat_rgb"], (width, height), 1.038 - 0.034 * p2, 0.50, 0.50, resample_mode)
+
+    elif mode == "accordion_leporello_fold":
+        lp = ctx["leporello"]
+        frame = lp["bg_rgb"].copy()
+        pw, ph = float(lp["pw"]), float(lp["ph"])
+        fold = (1.0 - eased) * 0.34 + 0.045
+        eff_w = pw * math.cos(fold)
+        persp_dy = ph * 0.055 * fold
+        total_w = eff_w * 3.0
+        x0 = (width - total_w) * 0.5
+        cy_l = height * 0.50
+        ys_top = [cy_l - ph * 0.5 + persp_dy, cy_l - ph * 0.5 - persp_dy, cy_l - ph * 0.5 + persp_dy, cy_l - ph * 0.5 - persp_dy]
+        ys_bot = [cy_l + ph * 0.5 - persp_dy, cy_l + ph * 0.5 + persp_dy, cy_l + ph * 0.5 - persp_dy, cy_l + ph * 0.5 + persp_dy]
+        shades = [1.0 - 0.14 * fold, 1.0 + 0.04 * fold, 1.0 - 0.12 * fold]
+        src_pts = [(0.0, 0.0), (pw, 0.0), (pw, ph), (0.0, ph)]
+        for i, pan in enumerate(lp["panels_rgba"]):
+            lx = x0 + i * eff_w
+            rx = lx + eff_w
+            bx0 = max(0, int(math.floor(lx)) - 2)
+            bx1 = min(width, int(math.ceil(rx)) + 2)
+            by0 = max(0, int(math.floor(min(ys_top[i], ys_top[i + 1]))) - 2)
+            by1 = min(height, int(math.ceil(max(ys_bot[i], ys_bot[i + 1]))) + 2)
+            if bx1 <= bx0 + 2 or by1 <= by0 + 2:
+                continue
+            dst_pts = [
+                (lx - bx0, ys_top[i] - by0),
+                (rx - bx0, ys_top[i + 1] - by0),
+                (rx - bx0, ys_bot[i + 1] - by0),
+                (lx - bx0, ys_bot[i] - by0),
+            ]
+            coeffs = _solve_perspective_coeffs(dst_pts, src_pts)
+            warped = pan.transform((bx1 - bx0, by1 - by0), Image.Transform.PERSPECTIVE, coeffs, resample=resample_mode)
+            w_arr = np.asarray(warped, dtype=np.float32)
+            w_arr[:, :, :3] = np.clip(w_arr[:, :, :3] * shades[i], 0.0, 255.0)
+            w_shaded = Image.fromarray(w_arr.astype(np.uint8), mode="RGBA")
+            frame.paste(w_shaded.convert("RGB"), (bx0, by0), w_shaded.split()[3])
+
+    elif mode == "film_strip_sprocket_glide":
+        fs = ctx["film_sprocket"]
+        strip_h = float(fs["strip_h"])
+        # Single continuous C2 quintic vertical film-gate glide (zero piecewise zoom kink, strictly >= 1.0x!)
+        view_zoom = 1.00 + 0.055 * eased
+        vh = float(height) / view_zoom
+        vw = float(width) / view_zoom
+        max_y0 = max(0.0, strip_h - vh)
+        y0 = max_y0 * (0.20 + 0.32 * eased)
+        x0 = (float(width) - vw) * 0.5
+        frame = fs["strip_rgb"].transform(
+            (width, height), Image.Transform.EXTENT, (x0, y0, x0 + vw, y0 + vh), resample=resample_mode
+        )
+
+    elif mode == "museum_acrylic_float":
+        af = ctx["acrylic_float"]
+        board = af["wall_rgb"].copy()
+        px0, py0, pw, ph, sm = af["px0"], af["py0"], af["pw"], af["ph"], af["sm"]
+        sh_dx = (26.0 - 52.0 * eased) * scale_factor
+        sh_dy = (20.0 + 5.0 * math.sin(math.pi * eased)) * scale_factor
+        _paste_rgba_subpixel_pil(board, af["shadow_rgba"], float(px0 - sm) + sh_dx, float(py0 - sm) + sh_dy)
+        board.paste(af["acrylic_rgba"].convert("RGB"), (px0, py0), af["acrylic_rgba"].split()[3])
+        # Diagonal glass specular sheen gliding smoothly across the acrylic face
+        qw_a, qh_a = max(24, pw // 4), max(24, ph // 4)
+        yy_a, xx_a = np.mgrid[0:qh_a, 0:qw_a].astype(np.float32)
+        nx_a = xx_a / max(1.0, float(qw_a - 1))
+        ny_a = yy_a / max(1.0, float(qh_a - 1))
+        sweep_x = -0.25 + 1.50 * eased
+        diag = (nx_a - sweep_x) + (ny_a - 0.5) * 0.38
+        sheen_q = np.exp(-((diag / 0.085) ** 2)) * 36.0
+        sheen_full = np.asarray(
+            Image.fromarray(np.clip(sheen_q, 0.0, 255.0).astype(np.uint8), mode="L").resize((pw, ph), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        )[:, :, None]
+        roi = np.asarray(board.crop((px0, py0, px0 + pw, py0 + ph)), dtype=np.float32)
+        board.paste(Image.fromarray(np.clip(roi + sheen_full, 0.0, 255.0).astype(np.uint8), mode="RGB"), (px0, py0))
+        frame = _crop_plane_clamped(board, (width, height), 1.00 + 0.028 * eased, 0.50, 0.50, resample_mode)
+
+    elif mode == "kinetic_triptych_reveal":
+        kt = ctx["kinetic_triptych"]
+        frame = Image.new("RGB", (width, height), (16, 18, 22))
+        starts = [0.0, 0.10, 0.20]
+        zooms = [1.00 + 0.085 * eased, 1.085 - 0.075 * eased, 1.01 + 0.075 * eased]
+        for i in range(3):
+            p = _ease_in_out_quintic(max(0.0, min(1.0, (t_norm - starts[i]) / 0.36)))
+            if p <= 0.005:
+                continue
+            cw = kt["col_ws"][i]
+            vis_h = max(2, int(round(height * p)))
+            patch = _crop_plane_clamped(kt["cols_over"][i], (cw, height), zooms[i], 0.50, 0.50, resample_mode)
+            if i == 1:
+                frame.paste(patch.crop((0, height - vis_h, cw, height)), (kt["xs"][i], 0))
+            else:
+                frame.paste(patch.crop((0, 0, cw, vis_h)), (kt["xs"][i], height - vis_h))
 
     else:
         base_static_img: Image.Image = ctx["base_static_img"]
@@ -3945,12 +5283,12 @@ def _render_photo_frame_from_context(
         draw.rectangle([0, 0, width, bar_h], fill=(4, 5, 8))
         draw.rectangle([0, height - bar_h, width, height], fill=(4, 5, 8))
 
-    # Plane 3: Frosted-Glass Documentary Lower-Third Card (with smooth upward glide + fade)
+    # Plane 3: Frosted-Glass Documentary Lower-Third Card (with smooth C2 quintic upward glide + fade)
     if ctx["has_card"] and ctx["card_fg"] is not None and ctx["card_mask"] is not None and ctx["card_tint"] is not None:
         t_sec = f_idx / max(1.0, float(fps))
         rem_sec = max(0.0, duration - t_sec)
-        entry_prog = _ease_out_cubic((t_sec - 0.15) / 0.50) if t_sec > 0.15 else 0.0
-        exit_prog = min(1.0, rem_sec / 0.40)
+        entry_prog = _ease_in_out_quintic((t_sec - 0.15) / 0.55) if t_sec > 0.15 else 0.0
+        exit_prog = _ease_in_out_quintic(min(1.0, rem_sec / 0.45))
         alpha_mult = min(entry_prog, exit_prog)
         if alpha_mult > 0.04:
             slide_y = int(round((1.0 - entry_prog) * 16.0 * scale_factor))
@@ -4764,33 +6102,49 @@ def render_photo_effects_showcase_sheet(
     tert_str = str(tertiary_path) if (tertiary_path and Path(tertiary_path).exists()) else None
 
     showcase_specs: list[tuple[str, str, str, str]] = [
-        ("passepartout_shadowbox", "architectural_window_dapple", "1. Museum Shadow-Box + Window Dapple", "warm_linen"),
-        ("kinfolk_linen_folio", "fine_art_rag_texture", "2. Kinfolk Monograph Folio Spread", "warm_linen"),
-        ("panoramic_frieze_scroll", "none", "3. Continuous Gallery Frieze Glide", "gallery_white"),
-        ("atelier_layered_duo", "golden_light_leak", "4. Atelier Orthogonal Layered Duo", "obsidian_slate"),
-        ("leica_frame_finder", "nostalgic_film_grain", "5. Leica Rangefinder Brightline", "auto"),
-        ("archival_color_bloom", "caustic_water_shimmer", "6. Depth-Free Color Bloom + Caustics", "auto"),
-        ("parallax_gallery", "golden_light_leak", "7. Calmed Museum Parallax + Light Leak", "auto"),
-        ("floating_tilt_plate", "fine_art_rag_texture", "8. 3D Floating Tilt Plate + Rag Paper", "auto"),
-        ("glassmorphic_pedestal", "none", "9. Frosted Glassmorphic Vitrine", "auto"),
-        ("contact_sheet_zoom", "none", "10. Darkroom Contact Sheet Push-In", "auto"),
-        ("split_diopter_focus", "prism_chromatic_edge", "11. Optical Split Diopter + Prism Edge", "auto"),
-        ("medium_format_slide", "velvet_vignette_rembrandt", "12. 120 Medium-Format Lightbox Slide", "auto"),
-        ("criterion_atelier_split", "none", "13. Criterion 3-Viewport Atelier Grid", "auto"),
-        ("triptych_cinematic", "none", "14. 3-Panel Staggered Triptych", "auto"),
-        ("polaroid_scrapbook", "nostalgic_film_grain", "15. Vintage Polaroid + 35mm Grain", "auto"),
-        ("curator_loupe", "museum_spotlight", "16. 1.65x Optical Curator Loupe", "auto"),
-        ("editorial_magazine", "none", "17. 62/38 Editorial Magazine Spread", "auto"),
-        ("cinema_anamorphic", "anamorphic_streak", "18. 2.39:1 Anamorphic + Flare Streak", "auto"),
-        ("diptych_frame", "golden_light_leak", "19. Side-by-Side Diptych Split-Screen", "auto"),
-        ("gallery_frame", "champagne_bokeh", "20. Classic Gallery Frame + Bokeh", "auto"),
-        ("full_bleed", "halation_bloom_35mm", "21. Full-Bleed Ken Burns + Halation", "auto"),
-        ("links_white_matte", "none", "22. Soft Limestone Exhibition Matte", "gallery_white"),
-        ("passepartout_shadowbox", "none", "23. Shadow-Box (Gallery White Surface)", "gallery_white"),
-        ("kinfolk_linen_folio", "velvet_vignette_rembrandt", "24. Kinfolk Folio (Obsidian Slate)", "obsidian_slate"),
+        ("swiss_monograph_grid", "none", "1. Swiss Monograph Grid + Detail", "warm_linen"),
+        ("editorial_bookspread", "none", "2. Hardcover Bookspread (3D Spine)", "warm_linen"),
+        ("gallery_wall_triptych", "none", "3. Gallery Wall Triptych + Track Lights", "obsidian_slate"),
+        ("archival_lightbox_strip", "none", "4. Backlit 120 Film Lightbox Strip", "obsidian_slate"),
+        ("optical_tilt_shift", "none", "5. 4x5 Optical Tilt-Shift Focus Sweep", "auto"),
+        ("darkroom_developer_reveal", "none", "6. Darkroom Silver-Gelatin Emergence", "auto"),
+        ("cinema_gate_reveal", "none", "7. 35mm Cinema Gate + Letterbox Titles", "auto"),
+        ("prism_glass_refraction", "none", "8. Crystal Prism Edge Refraction", "auto"),
+        ("venetian_sunbeam_pan", "none", "9. Venetian Sunbeams & Dust Motes", "auto"),
+        ("vintage_postcard_deck", "none", "10. European Postcard Deck + Postmark", "warm_linen"),
+        ("viewfinder_shutter_snap", "none", "11. Optical Viewfinder -> Shutter Snap", "warm_linen"),
+        ("accordion_leporello_fold", "none", "12. 3D Accordion Leporello Unfold", "obsidian_slate"),
+        ("film_strip_sprocket_glide", "none", "13. 35mm Film Strip Sprocket Glide", "obsidian_slate"),
+        ("museum_acrylic_float", "none", "14. Acrylic Float Mount + Moving Shadow", "gallery_white"),
+        ("kinetic_triptych_reveal", "none", "15. Kinetic 3-Beat Column Reveal", "auto"),
+        ("passepartout_shadowbox", "architectural_window_dapple", "16. Museum Shadow-Box + Window Dapple", "warm_linen"),
+        ("kinfolk_linen_folio", "fine_art_rag_texture", "17. Kinfolk Monograph Folio Spread", "warm_linen"),
+        ("panoramic_frieze_scroll", "none", "18. Continuous Gallery Frieze Glide", "gallery_white"),
+        ("atelier_layered_duo", "golden_light_leak", "19. Atelier Layered Duo + Screen Leak", "obsidian_slate"),
+        ("leica_frame_finder", "nostalgic_film_grain", "20. Leica Rangefinder Brightline", "auto"),
+        ("archival_color_bloom", "caustic_water_shimmer", "21. Color Bloom + Animated Caustics", "auto"),
+        ("parallax_gallery", "golden_light_leak", "22. Calmed Museum Parallax", "auto"),
+        ("floating_tilt_plate", "fine_art_rag_texture", "23. 3D Floating Tilt Plate", "auto"),
+        ("glassmorphic_pedestal", "none", "24. Frosted Glassmorphic Vitrine", "auto"),
+        ("contact_sheet_zoom", "none", "25. Darkroom Contact Sheet Push-In", "auto"),
+        ("split_diopter_focus", "prism_chromatic_edge", "26. Optical Split Diopter + Prism Edge", "auto"),
+        ("medium_format_slide", "velvet_vignette_rembrandt", "27. 120 Medium-Format Slide", "auto"),
+        ("criterion_atelier_split", "none", "28. Criterion 3-Viewport Atelier Grid", "auto"),
+        ("triptych_cinematic", "none", "29. 3-Panel Staggered Triptych", "auto"),
+        ("polaroid_scrapbook", "nostalgic_film_grain", "30. Vintage Polaroid + 35mm Grain", "auto"),
+        ("curator_loupe", "museum_spotlight", "31. 1.65x Optical Curator Loupe", "auto"),
+        ("editorial_magazine", "none", "32. 62/38 Editorial Magazine Spread", "auto"),
+        ("cinema_anamorphic", "anamorphic_streak", "33. 2.39:1 Anamorphic + Flare Streak", "auto"),
+        ("diptych_frame", "golden_light_leak", "34. Side-by-Side Diptych Split-Screen", "auto"),
+        ("gallery_frame", "champagne_bokeh", "35. Classic Gallery Frame + Soft Bokeh", "auto"),
+        ("full_bleed", "halation_bloom_35mm", "36. Full-Bleed Ken Burns + Halation", "auto"),
+        ("links_white_matte", "none", "37. Soft Limestone Exhibition Matte", "gallery_white"),
+        ("passepartout_shadowbox", "none", "38. Shadow-Box (Gallery White)", "gallery_white"),
+        ("kinfolk_linen_folio", "velvet_vignette_rembrandt", "39. Kinfolk Folio (Obsidian Slate)", "obsidian_slate"),
+        ("swiss_monograph_grid", "none", "40. Swiss Monograph (Obsidian Slate)", "obsidian_slate"),
     ]
 
-    cols, rows = 4, 6
+    cols, rows = 5, 8
     pad = 18
     header_h = 68
     label_h = 36
@@ -4804,7 +6158,7 @@ def render_photo_effects_showcase_sheet(
 
     draw.text(
         (pad, 20),
-        "PREMIUM PHOTO EFFECTS SHOWCASE — 22 EXHIBITION & CINEMA MODES & 11 OPTICAL FINISHERS",
+        "PREMIUM PHOTO EFFECTS SHOWCASE — 37 EXHIBITION & CINEMA MODES + 11 OPTICAL FINISHERS",
         font=f_hdr,
         fill=(242, 238, 230),
     )

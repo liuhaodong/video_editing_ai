@@ -764,6 +764,21 @@ def test_premium_photo_effects_modes_and_finishers(tmp_path: Path) -> None:
         ("gallery_frame", "prism_chromatic_edge"),
         ("full_bleed", "caustic_water_shimmer"),
         ("links_white_matte", "none"),
+        ("swiss_monograph_grid", "none"),
+        ("editorial_bookspread", "fine_art_rag_texture"),
+        ("gallery_wall_triptych", "none"),
+        ("archival_lightbox_strip", "nostalgic_film_grain"),
+        ("optical_tilt_shift", "none"),
+        ("darkroom_developer_reveal", "none"),
+        ("cinema_gate_reveal", "none"),
+        ("prism_glass_refraction", "none"),
+        ("venetian_sunbeam_pan", "none"),
+        ("vintage_postcard_deck", "none"),
+        ("viewfinder_shutter_snap", "none"),
+        ("accordion_leporello_fold", "none"),
+        ("film_strip_sprocket_glide", "none"),
+        ("museum_acrylic_float", "none"),
+        ("kinetic_triptych_reveal", "none"),
     ]
     assert {m for m, _ in modes_and_finishers} == set(VALID_PHOTO_MODES)
     covered_fx = {fx for _, fx in modes_and_finishers}

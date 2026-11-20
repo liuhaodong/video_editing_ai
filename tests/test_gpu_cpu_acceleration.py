@@ -775,4 +775,104 @@ def test_intelligent_curator_loupe_targeting_and_bezel_bounds() -> None:
     assert kb_cfg.loupe_focus_point == (0.54, 0.46)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU not available")
+def test_15_new_photo_modes_and_finishers_cuda_fp16_parity(tmp_path: Path) -> None:
+    """Verify all 15 new GPU photo modes + 3 upgraded finishers match CPU reference (<6.0 MAE) on CUDA FP16."""
+    p1 = _make_sample_photo(tmp_path / "new15_p1.jpg", width=640, height=480)
+    p2 = _make_sample_photo(tmp_path / "new15_p2.jpg", width=480, height=640)
+    p3 = _make_sample_photo(tmp_path / "new15_p3.jpg", width=640, height=480)
+
+    cases: list[tuple[str, str, str, str]] = [
+        ("swiss_monograph_grid", "none", "warm_linen", "Mount Rigi Kulm · 瑞吉山"),
+        ("editorial_bookspread", "fine_art_rag_texture", "warm_linen", "ETH Zurich · Main Hall"),
+        ("gallery_wall_triptych", "none", "obsidian_slate", "Swiss National Museum"),
+        ("archival_lightbox_strip", "nostalgic_film_grain", "obsidian_slate", "Lake Lucerne 120 Strip"),
+        ("optical_tilt_shift", "none", "auto", "Alpine Valley Tilt-Shift"),
+        ("darkroom_developer_reveal", "none", "auto", "Limmat River Silver Print"),
+        ("cinema_gate_reveal", "none", "auto", "Lucerne · Vierwaldstättersee"),
+        ("prism_glass_refraction", "none", "auto", "Vitznau Prism Refraction"),
+        ("venetian_sunbeam_pan", "none", "auto", "Golden Hour Sunbeams"),
+        ("vintage_postcard_deck", "none", "warm_linen", "Zürich · Zeughauskeller"),
+        ("viewfinder_shutter_snap", "none", "warm_linen", "Captured Moment"),
+        ("accordion_leporello_fold", "none", "obsidian_slate", "Leporello Triptych"),
+        ("film_strip_sprocket_glide", "none", "obsidian_slate", "Kodak Vision3 500T"),
+        ("museum_acrylic_float", "none", "gallery_white", "Diasec Acrylic Float"),
+        ("kinetic_triptych_reveal", "none", "auto", "Kinetic Editorial Columns"),
+        # Verify the 3 upgraded finishers on existing modes
+        ("parallax_gallery", "golden_light_leak", "auto", "Screen-Blend Light Leak"),
+        ("gallery_frame", "champagne_bokeh", "auto", "Soft Elliptical Bokeh"),
+        ("full_bleed", "caustic_water_shimmer", "auto", "Animated Dual Caustics"),
+    ]
+
+    frame_indices = [2, 12, 22, 33]  # Covers viewfinder, shutter, mid-animation, and end settle
+    total_frames = 36
+    for mode_name, fx_name, pal_name, title_txt in cases:
+        kb = KenBurnsConfig(
+            mode=mode_name,  # type: ignore[arg-type]
+            overlay_fx=fx_name,  # type: ignore[arg-type]
+            surface_palette=pal_name,  # type: ignore[arg-type]
+            secondary_source=str(p2),
+            tertiary_source=str(p3),
+            caption_title=title_txt,
+            caption_subtitle="GPU CUDA FP16 Parity Verification",
+        )
+        ctx = _prepare_photo_scene_context(photo_path=p1, width=640, height=360, kb=kb)
+        comp = MPSPhotoCompositor(ctx=ctx, device_override="cuda")
+        try:
+            assert comp.device.type == "cuda"
+            assert comp.work_dtype == torch.float16
+            batch = comp.render_batch_rgb(frame_indices=frame_indices, total_frames=total_frames, duration=2.0, fps=18)
+            for b_i, f_idx in enumerate(frame_indices):
+                ref = _render_photo_frame_from_context(
+                    ctx=ctx, t_norm=f_idx / float(total_frames - 1), f_idx=f_idx, duration=2.0, fps=18
+                )
+                mae = float(np.mean(np.abs(batch[b_i].numpy().astype(np.float32) - np.asarray(ref, dtype=np.float32))))
+                assert mae < 6.0, f"CUDA FP16 parity MAE {mae:.2f} >= 6.0 for mode={mode_name} fx={fx_name} f={f_idx}"
+        finally:
+            comp.close()
+
+
+def test_smooth_c2_motion_zero_start_jerk_for_new_and_existing_modes(tmp_path: Path) -> None:
+    """Verify C2 quintic easing & smooth start motion (zero clamp freeze / start jerk) on #04 and existing modes."""
+    from video_editing_ai.renderer.ken_burns import _ease_in_out_quintic
+
+    # 1. C2 quintic smoothness invariants: zero start/end velocity & acceleration
+    assert _ease_in_out_quintic(0.0) == 0.0
+    assert _ease_in_out_quintic(1.0) == 1.0
+    assert _ease_in_out_quintic(0.5) == pytest.approx(0.5, abs=1e-6)
+    assert _ease_in_out_quintic(0.02) < 1e-4
+    assert 1.0 - _ease_in_out_quintic(0.98) < 1e-4
+
+    # 2. Verify #04 archival_lightbox_strip, contact_sheet_zoom, and vintage_postcard_deck accelerate smoothly
+    p1 = _make_sample_photo(tmp_path / "smooth_p1.jpg", width=640, height=480)
+    p2 = _make_sample_photo(tmp_path / "smooth_p2.jpg", width=640, height=480)
+    p3 = _make_sample_photo(tmp_path / "smooth_p3.jpg", width=640, height=480)
+
+    for mode_name in ("archival_lightbox_strip", "gallery_wall_triptych", "contact_sheet_zoom", "vintage_postcard_deck"):
+        kb = KenBurnsConfig(
+            mode=mode_name,  # type: ignore[arg-type]
+            secondary_source=str(p2),
+            tertiary_source=str(p3),
+            caption_title="Smooth Motion Check",
+        )
+        ctx = _prepare_photo_scene_context(photo_path=p1, width=480, height=270, kb=kb)
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        comp = MPSPhotoCompositor(ctx=ctx, device_override=dev)
+        try:
+            n_f = 30
+            batch = comp.render_batch_rgb(frame_indices=list(range(n_f)), total_frames=n_f, duration=2.0, fps=15)
+            arr = batch.numpy().astype(np.float32)
+            # Frame-to-frame mean absolute pixel velocity curve
+            diffs = [float(np.mean(np.abs(arr[i + 1] - arr[i]))) for i in range(n_f - 1)]
+            # First frame delta must be gentle (accelerated smoothly from rest, zero sudden launch!)
+            assert diffs[0] < max(diffs) * 0.45 + 0.5, f"Abrupt start velocity in {mode_name}: d0={diffs[0]:.3f}, max={max(diffs):.3f}"
+            # Mid-clip motion must actually move (not frozen)
+            assert max(diffs) > 0.25, f"Motion appeared frozen in {mode_name}: max_diff={max(diffs):.3f}"
+            # Final frame delta must decelerate gently back toward rest
+            assert diffs[-1] < max(diffs) * 0.45 + 0.5, f"Abrupt end stop in {mode_name}: d_end={diffs[-1]:.3f}, max={max(diffs):.3f}"
+        finally:
+            comp.close()
+
+
+
 

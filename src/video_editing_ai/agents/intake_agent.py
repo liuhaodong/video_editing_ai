@@ -282,6 +282,21 @@ def generate_intake_questions(
             id="photo_effects_suite",
             question="3. Premium Photo Presentation Effects Suite (Multi-Select — Pick all styles to choreograph across chapters)",
             options=[
+                "swiss_monograph_grid (Recommended) — Taschen / Mack Books 64/36 Swiss Architectural Spread + Live Synchronized Macro Detail Inset",
+                "editorial_bookspread (Recommended) — Open Hardcover Art-Book Spread with Realistic 3D Concave Center-Spine Lighting",
+                "gallery_wall_triptych (Recommended) — Tate Modern Museum Hanging-Wall Trio with 3 Directional Overhead Track-Light Cones",
+                "archival_lightbox_strip (Recommended) — Backlit 120 Medium-Format Positive Film Strip on 5000K Obsidian Darkroom Light Table",
+                "optical_tilt_shift (Recommended) — Zero-Artifact 4x5 Large-Format Scheimpflug Optical Plane-of-Focus Sweep",
+                "darkroom_developer_reveal (Recommended) — Silver-Gelatin Darkroom Emergence Transitioning into Radial Living Color Bloom",
+                "cinema_gate_reveal (Recommended) — 35mm Panavision 2.39:1 Velvet Gate Curtain + Native Lower-Letterbox Typography",
+                "prism_glass_refraction (Recommended) — Handheld Crystal Prism Subtle Outer-Edge Optical Refraction Bevel (Center 80% Sharp)",
+                "venetian_sunbeam_pan (Recommended) — Golden-Hour Diagonal Slatted Architectural Sunbeams + Floating Sunlit Dust Motes",
+                "vintage_postcard_deck (Recommended) — Tactile European Linen Travel Postcards Gliding Apart with Margin Postmark",
+                "viewfinder_shutter_snap (Recommended) — Live Optical Camera Viewfinder Lock -> 85ms Shutter Blink -> Museum Matted Print",
+                "accordion_leporello_fold (Recommended) — 3-Panel 3D Japanese/Swiss Concertina Leporello Folding Photo Book Unfold",
+                "film_strip_sprocket_glide (Recommended) — Vertical 35mm Kodak Vision3 Cinema Film Strip Gliding Through a Projector Gate",
+                "museum_acrylic_float (Recommended) — Frameless Diasec Gallery Acrylic Float Mount with Brass Standoffs & Moving Cast Shadow",
+                "kinetic_triptych_reveal (Recommended) — Energetic 3-Beat Counter-Directional Vertical Editorial Column Reveal",
                 "passepartout_shadowbox (Recommended) — Museum Cotton-Rag Shadow-Box with 45-Degree Mat Bevel & Recessed Inner Motion",
                 "kinfolk_linen_folio (Recommended) — Kinfolk / Mack Books Asymmetric 58/42 Linen Monograph Spread & Serif Folio",
                 "panoramic_frieze_scroll (Recommended) — Continuous Horizontal Gallery Frieze Glide Across Matted Exhibition Prints",
@@ -305,6 +320,10 @@ def generate_intake_questions(
                 "full_bleed — Full-Screen 16:9 Crop with Classic Ken Burns Pan/Zoom",
             ],
             default_answer=(
+                "swiss_monograph_grid,editorial_bookspread,gallery_wall_triptych,archival_lightbox_strip,"
+                "optical_tilt_shift,darkroom_developer_reveal,cinema_gate_reveal,prism_glass_refraction,"
+                "venetian_sunbeam_pan,vintage_postcard_deck,viewfinder_shutter_snap,accordion_leporello_fold,"
+                "film_strip_sprocket_glide,museum_acrylic_float,kinetic_triptych_reveal,"
                 "passepartout_shadowbox,kinfolk_linen_folio,panoramic_frieze_scroll,"
                 "atelier_layered_duo,leica_frame_finder,parallax_gallery,floating_tilt_plate,"
                 "glassmorphic_pedestal,archival_color_bloom,split_diopter_focus,contact_sheet_zoom,"
@@ -313,6 +332,21 @@ def generate_intake_questions(
             ),
             is_multi_select=True,
             recommended_options=[
+                "swiss_monograph_grid",
+                "editorial_bookspread",
+                "gallery_wall_triptych",
+                "archival_lightbox_strip",
+                "optical_tilt_shift",
+                "darkroom_developer_reveal",
+                "cinema_gate_reveal",
+                "prism_glass_refraction",
+                "venetian_sunbeam_pan",
+                "vintage_postcard_deck",
+                "viewfinder_shutter_snap",
+                "accordion_leporello_fold",
+                "film_strip_sprocket_glide",
+                "museum_acrylic_float",
+                "kinetic_triptych_reveal",
                 "passepartout_shadowbox",
                 "kinfolk_linen_folio",
                 "panoramic_frieze_scroll",
@@ -506,6 +540,21 @@ def _resolve_photo_suite_answers(
         q_by_id["photo_effects_suite"].recommended_options
         if "photo_effects_suite" in q_by_id
         else [
+            "swiss_monograph_grid",
+            "editorial_bookspread",
+            "gallery_wall_triptych",
+            "archival_lightbox_strip",
+            "optical_tilt_shift",
+            "darkroom_developer_reveal",
+            "cinema_gate_reveal",
+            "prism_glass_refraction",
+            "venetian_sunbeam_pan",
+            "vintage_postcard_deck",
+            "viewfinder_shutter_snap",
+            "accordion_leporello_fold",
+            "film_strip_sprocket_glide",
+            "museum_acrylic_float",
+            "kinetic_triptych_reveal",
             "passepartout_shadowbox",
             "kinfolk_linen_folio",
             "panoramic_frieze_scroll",

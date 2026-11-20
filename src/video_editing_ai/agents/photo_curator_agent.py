@@ -546,6 +546,21 @@ class PhotoCuratorAgent(BaseEditingAgent):
         # before passing all plates to the multimodal AI curator for full artistic overrides.
         active_selects = [it for it in selected_items if it.subclip_id not in absorbed_partner_ids]
         default_fx_map: dict[str, str] = {
+            "swiss_monograph_grid": "none",
+            "editorial_bookspread": "fine_art_rag_texture",
+            "gallery_wall_triptych": "none",
+            "archival_lightbox_strip": "nostalgic_film_grain",
+            "optical_tilt_shift": "none",
+            "darkroom_developer_reveal": "nostalgic_film_grain",
+            "cinema_gate_reveal": "none",
+            "prism_glass_refraction": "none",
+            "venetian_sunbeam_pan": "none",
+            "vintage_postcard_deck": "fine_art_rag_texture",
+            "viewfinder_shutter_snap": "none",
+            "accordion_leporello_fold": "fine_art_rag_texture",
+            "film_strip_sprocket_glide": "nostalgic_film_grain",
+            "museum_acrylic_float": "none",
+            "kinetic_triptych_reveal": "none",
             "passepartout_shadowbox": "architectural_window_dapple",
             "kinfolk_linen_folio": "fine_art_rag_texture",
             "panoramic_frieze_scroll": "none",
@@ -579,6 +594,21 @@ class PhotoCuratorAgent(BaseEditingAgent):
         client_modes = list(dict.fromkeys(m for m in client_modes if m not in disabled_set))
         if not client_modes:
             client_modes = [
+                "swiss_monograph_grid",
+                "editorial_bookspread",
+                "gallery_wall_triptych",
+                "archival_lightbox_strip",
+                "optical_tilt_shift",
+                "darkroom_developer_reveal",
+                "cinema_gate_reveal",
+                "prism_glass_refraction",
+                "venetian_sunbeam_pan",
+                "vintage_postcard_deck",
+                "viewfinder_shutter_snap",
+                "accordion_leporello_fold",
+                "film_strip_sprocket_glide",
+                "museum_acrylic_float",
+                "kinetic_triptych_reveal",
                 "passepartout_shadowbox",
                 "kinfolk_linen_folio",
                 "panoramic_frieze_scroll",
@@ -652,8 +682,12 @@ class PhotoCuratorAgent(BaseEditingAgent):
             # Objective structural/geometric affinity only (zero hardcoded subject keyword traps)
             if sel_sc.orientation == "portrait":
                 structural_prefs = [
+                    "editorial_bookspread",
                     "kinfolk_linen_folio",
+                    "museum_acrylic_float",
                     "passepartout_shadowbox",
+                    "viewfinder_shutter_snap",
+                    "vintage_postcard_deck",
                     "atelier_layered_duo",
                     "floating_tilt_plate",
                     "medium_format_slide",
@@ -663,6 +697,11 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 ]
             elif len(active_selects) >= 3 and idx_sel % 3 == 0:
                 structural_prefs = [
+                    "gallery_wall_triptych",
+                    "archival_lightbox_strip",
+                    "accordion_leporello_fold",
+                    "film_strip_sprocket_glide",
+                    "kinetic_triptych_reveal",
                     "panoramic_frieze_scroll",
                     "atelier_layered_duo",
                     "criterion_atelier_split",
@@ -673,11 +712,18 @@ class PhotoCuratorAgent(BaseEditingAgent):
                 ]
             else:
                 structural_prefs = [
+                    "swiss_monograph_grid",
+                    "cinema_gate_reveal",
+                    "optical_tilt_shift",
+                    "darkroom_developer_reveal",
+                    "prism_glass_refraction",
+                    "venetian_sunbeam_pan",
                     "passepartout_shadowbox",
                     "leica_frame_finder",
                     "kinfolk_linen_folio",
                     "atelier_layered_duo",
                     "panoramic_frieze_scroll",
+                    "museum_acrylic_float",
                     "split_diopter_focus",
                     "glassmorphic_pedestal",
                     "archival_color_bloom",
@@ -707,6 +753,13 @@ class PhotoCuratorAgent(BaseEditingAgent):
             prev_assigned_mode = chosen_mode
 
         multi_panel_modes = {
+            "editorial_bookspread",
+            "gallery_wall_triptych",
+            "archival_lightbox_strip",
+            "vintage_postcard_deck",
+            "accordion_leporello_fold",
+            "film_strip_sprocket_glide",
+            "kinetic_triptych_reveal",
             "triptych_cinematic",
             "contact_sheet_zoom",
             "criterion_atelier_split",
@@ -778,6 +831,21 @@ class PhotoCuratorAgent(BaseEditingAgent):
                     "panoramic_frieze_scroll",
                     "atelier_layered_duo",
                     "leica_frame_finder",
+                    "swiss_monograph_grid",
+                    "editorial_bookspread",
+                    "gallery_wall_triptych",
+                    "archival_lightbox_strip",
+                    "optical_tilt_shift",
+                    "darkroom_developer_reveal",
+                    "cinema_gate_reveal",
+                    "prism_glass_refraction",
+                    "venetian_sunbeam_pan",
+                    "vintage_postcard_deck",
+                    "viewfinder_shutter_snap",
+                    "accordion_leporello_fold",
+                    "film_strip_sprocket_glide",
+                    "museum_acrylic_float",
+                    "kinetic_triptych_reveal",
                 )
                 else "crossfade"
             )

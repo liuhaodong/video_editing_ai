@@ -34,6 +34,21 @@ PhotoModeType = Literal[
     "panoramic_frieze_scroll",
     "atelier_layered_duo",
     "leica_frame_finder",
+    "swiss_monograph_grid",
+    "editorial_bookspread",
+    "gallery_wall_triptych",
+    "archival_lightbox_strip",
+    "optical_tilt_shift",
+    "darkroom_developer_reveal",
+    "cinema_gate_reveal",
+    "prism_glass_refraction",
+    "venetian_sunbeam_pan",
+    "vintage_postcard_deck",
+    "viewfinder_shutter_snap",
+    "accordion_leporello_fold",
+    "film_strip_sprocket_glide",
+    "museum_acrylic_float",
+    "kinetic_triptych_reveal",
 ]
 
 PhotoOverlayFxType = Literal[
@@ -86,6 +101,21 @@ VALID_PHOTO_MODES: tuple[str, ...] = (
     "panoramic_frieze_scroll",
     "atelier_layered_duo",
     "leica_frame_finder",
+    "swiss_monograph_grid",
+    "editorial_bookspread",
+    "gallery_wall_triptych",
+    "archival_lightbox_strip",
+    "optical_tilt_shift",
+    "darkroom_developer_reveal",
+    "cinema_gate_reveal",
+    "prism_glass_refraction",
+    "venetian_sunbeam_pan",
+    "vintage_postcard_deck",
+    "viewfinder_shutter_snap",
+    "accordion_leporello_fold",
+    "film_strip_sprocket_glide",
+    "museum_acrylic_float",
+    "kinetic_triptych_reveal",
 )
 
 # Depth-warp photo modes disabled due to unnatural neural-depth cutout/bokeh artifacts
@@ -96,7 +126,7 @@ DISABLED_PHOTO_MODES: tuple[str, ...] = (
 )
 DISABLED_PHOTO_MODE_FALLBACKS: dict[str, str] = {
     "cinematic_depth_3d": "parallax_gallery",
-    "aperture_rack_focus": "floating_tilt_plate",
+    "aperture_rack_focus": "optical_tilt_shift",
     "dolly_zoom_vertigo": "cinema_anamorphic",
 }
 
@@ -488,6 +518,21 @@ class CreativeBrief(BaseModel):
     )
     enabled_photo_modes: list[PhotoModeType] = Field(
         default_factory=lambda: [
+            "swiss_monograph_grid",
+            "editorial_bookspread",
+            "gallery_wall_triptych",
+            "archival_lightbox_strip",
+            "optical_tilt_shift",
+            "darkroom_developer_reveal",
+            "cinema_gate_reveal",
+            "prism_glass_refraction",
+            "venetian_sunbeam_pan",
+            "vintage_postcard_deck",
+            "viewfinder_shutter_snap",
+            "accordion_leporello_fold",
+            "film_strip_sprocket_glide",
+            "museum_acrylic_float",
+            "kinetic_triptych_reveal",
             "passepartout_shadowbox",
             "kinfolk_linen_folio",
             "panoramic_frieze_scroll",
@@ -1144,8 +1189,23 @@ class KenBurnsConfig(BaseModel):
             "'criterion_atelier_split' (3-viewport asymmetric architectural bento grid), "
             "'diptych_frame' (side-by-side paired portrait split), "
             "'gallery_frame' (classic floating gallery frame), "
-            "'full_bleed' (full-screen 16:9 Ken Burns), or "
-            "'links_white_matte' (pure gallery-white exhibition matte)."
+            "'full_bleed' (full-screen 16:9 Ken Burns), "
+            "'links_white_matte' (pure gallery-white exhibition matte), "
+            "'swiss_monograph_grid' (64/36 Taschen architectural spread + live macro detail inset), "
+            "'editorial_bookspread' (open hardcover coffee-table spread with 3D concave spine lighting), "
+            "'gallery_wall_triptych' (museum hanging wall trio with 3 directional overhead track-light cones), "
+            "'archival_lightbox_strip' (backlit 120 medium-format positive film strip on 5000K darkroom light table), "
+            "'optical_tilt_shift' (zero-artifact 4x5 Scheimpflug optical plane-of-focus sweep), "
+            "'darkroom_developer_reveal' (two-stage silver-gelatin darkroom emergence -> warm radial color bloom), "
+            "'cinema_gate_reveal' (35mm 2.39:1 matte-box curtain opening + integrated lower-letterbox typography), "
+            "'prism_glass_refraction' (handheld crystal prism outer-edge optical refraction bevel), "
+            "'venetian_sunbeam_pan' (diagonal slatted architectural sunbeams + floating sunlit dust motes), "
+            "'vintage_postcard_deck' (tactile European linen travel postcards sliding apart with margin postmark), "
+            "'viewfinder_shutter_snap' (live optical viewfinder lock -> 85ms dark shutter blink -> gallery matte print), "
+            "'accordion_leporello_fold' (3-panel 3D Japanese/Swiss concertina accordion photo book unfolding), "
+            "'film_strip_sprocket_glide' (vertical 35mm cinema film strip with rounded sprockets rolling through gate), "
+            "'museum_acrylic_float' (frameless Diasec acrylic float mount with brass standoffs & swinging shadow), or "
+            "'kinetic_triptych_reveal' (staggered 3-beat counter-directional vertical editorial column reveal)."
         ),
     )
     overlay_fx: PhotoOverlayFxType = Field(
@@ -2106,6 +2166,10 @@ class MapWaypointSpec(BaseModel):
     alt_m: float = 0.0
     source: Literal["exif_gps", "gazetteer", "synthetic"] = "exif_gps"
     hero_thumbnail_path: Optional[str] = None
+    via_points: list[tuple[float, float]] = Field(
+        default_factory=list,
+        description="Optional intermediate (lat, lon) corridor points leading into this stop for authentic rail/scenic routing.",
+    )
 
 
 class TravelMapSegmentSpec(BaseModel):
