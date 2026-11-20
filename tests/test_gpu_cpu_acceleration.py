@@ -732,3 +732,47 @@ def test_paired_photo_diptych_pre_scales_before_grading(tmp_path: Path) -> None:
     assert "apply_color_grade_to_pil_image(" not in src
 
 
+def test_intelligent_curator_loupe_targeting_and_bezel_bounds() -> None:
+    """Verify multi-cue _detect_photo_salient_point avoids flat/tan clutter and _build_curator_loupe_assets keeps bezel inside frame."""
+    from video_editing_ai.models.schema import KenBurnsConfig
+    from video_editing_ai.renderer import ken_burns
+
+    # 1. Explicit curator hint takes priority
+    blank = Image.new("RGB", (480, 320), (40, 40, 40))
+    assert ken_burns._detect_photo_salient_point(blank, hint_uv=(0.31, 0.64), use_depth=False) == (0.31, 0.64)
+
+    # 2. Synthetic scene: smooth tan wood corner + flat green background + detailed golden subject at (0.36, 0.42)
+    scene = np.full((320, 480, 3), (65, 95, 55), dtype=np.uint8)
+    # Add a large smooth tan wood patch in top-right (previously fooled skin-blob detector!)
+    scene[10:150, 320:470] = (176, 138, 98)
+    # Draw a rich 2D detailed golden medallion subject centered at (x=175, y=135) -> (u=0.365, v=0.422)
+    yy, xx = np.mgrid[0:320, 0:480]
+    dist = np.hypot(xx - 175, yy - 135)
+    mask = dist < 44
+    pattern = ((np.sin(xx * 0.55) * np.cos(yy * 0.55)) * 55.0).astype(np.float32)
+    scene[mask, 0] = np.clip(215 + pattern[mask], 0, 255).astype(np.uint8)
+    scene[mask, 1] = np.clip(175 + pattern[mask], 0, 255).astype(np.uint8)
+    scene[mask, 2] = np.clip(60 + pattern[mask] * 0.4, 0, 255).astype(np.uint8)
+    u, v = ken_burns._detect_photo_salient_point(Image.fromarray(scene, mode="RGB"), use_depth=False)
+    assert abs(u - 0.365) < 0.12 and abs(v - 0.422) < 0.12, f"Expected near (0.365, 0.422), got ({u:.3f}, {v:.3f})"
+
+    # 3. Portrait photo bezel safety: lens radius proportionally bounded and stays inside canvas/frame
+    portrait = Image.new("RGB", (800, 1200), (140, 145, 150))
+    _dim, _sharp, _mask, _bezel, rad_px, s_xy, e_xy = ken_burns._build_curator_loupe_assets(
+        raw_primary=portrait,
+        width=1920,
+        height=1080,
+        has_card=True,
+        scale_factor=1.0,
+        focal_uv=(0.55, 0.10),  # Extreme top edge focal point
+    )
+    assert rad_px <= int(round(1080 * 0.20))
+    assert s_xy[1] - rad_px >= 0.0 and e_xy[1] - rad_px >= 0.0
+    assert s_xy[0] - rad_px >= 0.0 and e_xy[0] + rad_px <= 1920.0
+
+    # 4. Optional loupe_focus_point schema field round-trips cleanly
+    kb_cfg = KenBurnsConfig(mode="curator_loupe", loupe_focus_point=(0.54, 0.46))
+    assert kb_cfg.loupe_focus_point == (0.54, 0.46)
+
+
+

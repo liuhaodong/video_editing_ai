@@ -41,6 +41,7 @@ from ..models.schema import (
 )
 from .color_grading import apply_color_grade_to_pil_image, apply_color_grade_to_rgb
 from .depth_parallax import (
+    _load_depth_anything_model,
     build_mpi_depth_layers,
     build_rack_focus_assets,
     estimate_depth_map,
@@ -652,66 +653,240 @@ def build_links_white_matte_image(
     return canvas
 
 
+_SALIENT_FACE_LOCK = threading.Lock()
+_SALIENT_FACE_CASCADE: Optional[Any] = None
+
+
+def _norm_saliency_01(arr: np.ndarray, p_lo: float = 5.0, p_hi: float = 99.0) -> np.ndarray:
+    """Robustly normalize a float saliency channel into [0.0, 1.0]."""
+    lo = float(np.percentile(arr, p_lo))
+    hi = float(np.percentile(arr, p_hi))
+    if hi - lo < 1e-6:
+        return np.zeros_like(arr, dtype=np.float32)
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+
+
 def _detect_photo_salient_point(
     raw_img: Image.Image,
     hint_uv: Optional[tuple[float, float]] = None,
+    use_depth: bool = True,
 ) -> tuple[float, float]:
     """
     Locate the photograph's primary visual interest center `(u, v)` in normalized photo coordinates `[0..1]`.
-    Prefers detected human faces/upper heads first, then explicit non-default curator hints, then Sobel + chroma saliency.
+
+    Priority order:
+    1. Explicit non-default curator/director focal hint (`hint_uv`).
+    2. Verified frontal human face detection (strict Haar cascade — no wood/stone skin-blob false positives).
+    3. Multi-cue 3D + CV subject localization combining:
+       - Shi-Tomasi 2D structural detail richness gating (suppresses flat sky/water/walls and 1D stripes),
+       - CIELAB border-background contrast (isolates foreground objects from surrounding sky/water/wall),
+       - FFT spectral residual saliency (suppresses repetitive periodic grids like fences/dentils),
+       - Perspective-plane-removed Depth-Anything-V2 3D foreground prominence (when neural depth is available),
+       - Connected-component subject centroid + upper-core head/wings/crest anchoring for standing 3D sculptures.
     """
+    if hint_uv is not None:
+        hx, hy = float(hint_uv[0]), float(hint_uv[1])
+        is_default_start = abs(hx - 0.50) <= 0.015 and abs(hy - 0.50) <= 0.015
+        is_default_end = abs(hx - 0.50) <= 0.015 and abs(hy - 0.48) <= 0.015
+        if not (is_default_start or is_default_end):
+            return (max(0.16, min(0.84, hx)), max(0.16, min(0.82, hy)))
+
     thumb = raw_img.copy()
     thumb.thumbnail((480, 480), Image.Resampling.BILINEAR)
     tw, th = thumb.size
     if tw < 16 or th < 16:
         return (0.50, 0.45)
 
-    arr_rgb = np.asarray(thumb, dtype=np.uint8)
+    arr_rgb = np.asarray(thumb.convert("RGB"), dtype=np.uint8)
     bgr = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
+    # 1. Strict verified frontal human face detection (never falls back to tan wood/stone skin blobs)
+    global _SALIENT_FACE_CASCADE
     try:
-        from ..analyzer.semantic_intelligence import _detect_faces_and_skin_heads
-
-        faces = _detect_faces_and_skin_heads(bgr, gray)
-        if faces:
+        with _SALIENT_FACE_LOCK:
+            if _SALIENT_FACE_CASCADE is None:
+                xml_path = getattr(cv2.data, "haarcascades", "") + "haarcascade_frontalface_default.xml"
+                _SALIENT_FACE_CASCADE = cv2.CascadeClassifier(xml_path)
+            if _SALIENT_FACE_CASCADE is not None and not _SALIENT_FACE_CASCADE.empty():
+                min_f = max(28, int(round(min(tw, th) * 0.07)))
+                max_f = max(min_f + 4, int(round(min(tw, th) * 0.42)))
+                eq_gray = cv2.equalizeHist(gray)
+                faces = _SALIENT_FACE_CASCADE.detectMultiScale(
+                    eq_gray,
+                    scaleFactor=1.12,
+                    minNeighbors=7,
+                    minSize=(min_f, min_f),
+                    maxSize=(max_f, max_f),
+                )
+            else:
+                faces = ()
+        if len(faces) > 0:
             best_face = max(
                 faces,
                 key=lambda b: float(b[2] * b[3])
-                * max(0.35, 1.15 - 0.50 * math.hypot((b[0] + 0.5 * b[2]) / tw - 0.5, (b[1] + 0.42 * b[3]) / th - 0.48)),
+                * max(
+                    0.35,
+                    1.15 - 0.50 * math.hypot((b[0] + 0.5 * b[2]) / tw - 0.5, (b[1] + 0.42 * b[3]) / th - 0.46),
+                ),
             )
-            fx, fy, fw, fh = best_face
-            u = max(0.16, min(0.84, (fx + 0.50 * fw) / float(tw)))
-            v = max(0.16, min(0.82, (fy + 0.40 * fh) / float(th)))
-            return (float(u), float(v))
+            fx, fy, fw, fh = [int(val) for val in best_face]
+            if float(np.std(gray[fy : fy + fh, fx : fx + fw])) >= 18.0:
+                u = max(0.20, min(0.80, (fx + 0.50 * fw) / float(tw)))
+                v = max(0.20, min(0.76, (fy + 0.44 * fh) / float(th)))
+                return (float(u), float(v))
     except Exception:
         pass
 
-    if hint_uv is not None:
-        hx, hy = float(hint_uv[0]), float(hint_uv[1])
-        if abs(hx - 0.5) > 0.035 or abs(hy - 0.49) > 0.035:
-            return (max(0.18, min(0.82, hx)), max(0.18, min(0.82, hy)))
+    # 2. Local 2D sculptural/ornamental detail richness (Shi-Tomasi min-eigenvalue crushes flat sky/water & 1D stripes)
+    smooth_g = cv2.GaussianBlur(gray.astype(np.float32), (3, 3), 0.8)
+    gx = cv2.Sobel(smooth_g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(smooth_g, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.hypot(gx, gy)
+    k_det = max(15, int(round(min(tw, th) * 0.06)) | 1)
+    ixx = cv2.GaussianBlur(gx * gx, (k_det, k_det), 0)
+    iyy = cv2.GaussianBlur(gy * gy, (k_det, k_det), 0)
+    ixy = cv2.GaussianBlur(gx * gy, (k_det, k_det), 0)
+    tr = ixx + iyy
+    det = np.maximum(0.0, (ixx - iyy) ** 2 + 4.0 * ixy * ixy)
+    lam_min = np.maximum(0.0, 0.5 * (tr - np.sqrt(det)))
+    detail_2d = _norm_saliency_01(np.sqrt(lam_min + 1e-6), 10.0, 98.5)
+    detail_grad = _norm_saliency_01(cv2.GaussianBlur(grad_mag, (k_det, k_det), 0), 10.0, 98.5)
+    detail_rich = np.clip(0.65 * detail_2d + 0.35 * detail_grad, 0.0, 1.0)
+    detail_gate = np.clip(0.12 + 0.88 * np.power(detail_rich, 0.70), 0.12, 1.0)
 
-    gray_f = gray.astype(np.float32)
-    gx = cv2.Sobel(gray_f, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray_f, cv2.CV_32F, 0, 1, ksize=3)
-    grad = np.hypot(gx, gy)
+    # 3. Border-background contrast in CIELAB (separates foreground subjects from sky/water/wall surroundings)
+    lab = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    bw = max(4, int(round(min(tw, th) * 0.06)))
+    bg_refs = [
+        np.median(lab[:bw, :, :].reshape(-1, 3), axis=0),
+        np.median(lab[-bw:, :, :].reshape(-1, 3), axis=0),
+        np.median(lab[:, :bw, :].reshape(-1, 3), axis=0),
+        np.median(lab[:, -bw:, :].reshape(-1, 3), axis=0),
+    ]
+    dists = [
+        np.sqrt(
+            0.55 * (lab[..., 0] - ref[0]) ** 2
+            + 1.35 * (lab[..., 1] - ref[1]) ** 2
+            + 1.35 * (lab[..., 2] - ref[2]) ** 2
+        )
+        for ref in bg_refs
+    ]
+    d_stack = np.sort(np.stack(dists, axis=-1), axis=-1)
+    border_contrast = _norm_saliency_01(0.60 * d_stack[..., 0] + 0.40 * d_stack[..., 1])
+    border_contrast = cv2.GaussianBlur(border_contrast, (21, 21), 0)
 
-    arr_f = arr_rgb.astype(np.float32)
-    chroma = np.max(arr_f, axis=2) - np.min(arr_f, axis=2)
-    sal = grad + 0.35 * chroma
+    # 4. Spectral Residual Saliency (suppresses repetitive periodic textures like fences, cornice dentils, ripples)
+    s_w = 96
+    s_h = max(48, int(round(96 * th / max(1, tw))))
+    spec_accum = np.zeros((s_h, s_w), dtype=np.float32)
+    for ch in range(3):
+        ch_small = cv2.resize(lab[..., ch], (s_w, s_h), interpolation=cv2.INTER_AREA).astype(np.float32)
+        fft = np.fft.fft2(ch_small)
+        log_amp = np.log(np.abs(fft) + 1e-6)
+        phase = np.angle(fft)
+        spectral_res = log_amp - cv2.blur(log_amp, (5, 5))
+        inv = np.fft.ifft2(np.exp(spectral_res + 1j * phase))
+        mag2 = np.abs(inv) ** 2
+        spec_accum += _norm_saliency_01(cv2.GaussianBlur(mag2.astype(np.float32), (9, 9), 2.5))
+    spectral_sal = _norm_saliency_01(cv2.resize(spec_accum, (tw, th), interpolation=cv2.INTER_LINEAR))
+    spectral_sal = cv2.GaussianBlur(spectral_sal, (25, 25), 0)
 
+    # 5. Perspective-plane-removed 3D foreground prominence (only when real Depth-Anything-V2 is available)
+    depth_prom = np.zeros((th, tw), dtype=np.float32)
+    has_isolated_3d_subject = False
+    if use_depth:
+        try:
+            if _load_depth_anything_model() is not None:
+                d_map = estimate_depth_map(thumb, focal_point=(0.5, 0.48), target_size=(tw, th))
+                if d_map is not None and d_map.shape[:2] == (th, tw):
+                    d_f = d_map.astype(np.float32)
+                    edge_w = max(6, int(round(tw * 0.08)))
+                    left_d = np.median(d_f[:, :edge_w], axis=1, keepdims=True)
+                    right_d = np.median(d_f[:, -edge_w:], axis=1, keepdims=True)
+                    tx = np.linspace(0.0, 1.0, tw, dtype=np.float32)[None, :]
+                    row_plane = left_d * (1.0 - tx) + right_d * tx
+                    prom = np.maximum(0.0, d_f - row_plane - 0.05)
+                    yy_d = np.linspace(0.0, 1.0, th, dtype=np.float32)[:, None]
+                    prom = prom * np.where(yy_d > 0.78, np.clip((1.0 - yy_d) / 0.22, 0.15, 1.0), 1.0)
+                    p98 = float(np.percentile(prom, 98.5))
+                    if p98 >= 0.12:
+                        strength = min(1.0, (p98 - 0.10) / 0.25)
+                        depth_prom = _norm_saliency_01(cv2.GaussianBlur(prom, (21, 21), 0)) * strength
+                        has_isolated_3d_subject = p98 >= 0.18
+        except Exception:
+            pass
+
+    # 6. Photography center-composition & frame-safety prior
     yy, xx = np.mgrid[0:th, 0:tw].astype(np.float32)
     nx = xx / max(1.0, float(tw - 1))
     ny = yy / max(1.0, float(th - 1))
-    wx = np.clip(np.minimum(nx, 1.0 - nx) / 0.14, 0.25, 1.0)
-    wy = np.clip(np.minimum(ny, 1.0 - ny) / 0.14, 0.25, 1.0)
-    ground_damp = np.where(ny > 0.80, 0.55, 1.0)
-    sal = sal * wx * wy * ground_damp
-    sal_blur = cv2.GaussianBlur(sal, (31, 31), 0)
-    py_idx, px_idx = np.unravel_index(int(np.argmax(sal_blur)), sal_blur.shape)
-    u = max(0.20, min(0.80, px_idx / max(1.0, float(tw - 1))))
-    v = max(0.20, min(0.78, py_idx / max(1.0, float(th - 1))))
+    center_prior = np.exp(-(((nx - 0.50) / 0.34) ** 2 + ((ny - 0.47) / 0.30) ** 2))
+    edge_safe = (
+        np.clip(np.minimum(nx, 1.0 - nx) / 0.16, 0.05, 1.0)
+        * np.clip(np.minimum(ny, 1.0 - ny) / 0.16, 0.05, 1.0)
+    )
+    ground_damp = np.where(ny > 0.78, np.clip(1.0 - (ny - 0.78) * 2.5, 0.20, 1.0), 1.0)
+
+    d_max = float(depth_prom.max())
+    w_d = 0.34 * d_max
+    rem = 1.0 - w_d
+    subject_sal = w_d * depth_prom + rem * (0.42 * border_contrast + 0.34 * spectral_sal + 0.24 * detail_2d)
+
+    score_map = subject_sal * detail_gate * (0.40 + 0.60 * center_prior) * edge_safe * ground_damp
+    k_big = max(21, int(round(min(tw, th) * 0.12)) | 1)
+    score_smooth = cv2.GaussianBlur(score_map, (k_big, k_big), 0)
+
+    peak_val = float(score_smooth.max())
+    if peak_val < 1e-5:
+        return (0.50, 0.45)
+
+    # 7. Connected-component dominant subject blob + upper-core head/wings anchoring
+    peak_y, peak_x = np.unravel_index(int(np.argmax(score_smooth)), score_smooth.shape)
+    mask = (score_smooth >= peak_val * 0.62).astype(np.uint8)
+    _, labels = cv2.connectedComponents(mask)
+    comp = labels == int(labels[peak_y, peak_x])
+    ys, xs = np.where(comp)
+    w_comp = score_smooth[ys, xs]
+    cx = float(np.sum(xs * w_comp) / max(1e-6, float(np.sum(w_comp)))) / max(1.0, float(tw - 1))
+    cy = float(np.sum(ys * w_comp) / max(1e-6, float(np.sum(w_comp)))) / max(1.0, float(th - 1))
+
+    bx0, bx1 = float(xs.min()) / max(1.0, float(tw - 1)), float(xs.max()) / max(1.0, float(tw - 1))
+    by0, by1 = float(ys.min()) / max(1.0, float(th - 1)), float(ys.max()) / max(1.0, float(th - 1))
+    bh = by1 - by0
+
+    local_d = float(depth_prom[int(round(cy * (th - 1))), int(round(cx * (tw - 1)))])
+    if has_isolated_3d_subject and local_d >= 0.30 and bh >= 0.12:
+        upper_zone_y0 = max(0, int(round((by0 - 0.18) * th)))
+        upper_zone_y1 = int(round(cy * th))
+        col_x0 = max(0, int(round(bx0 * tw)))
+        col_x1 = min(tw, int(round(bx1 * tw)))
+        if upper_zone_y1 > upper_zone_y0 + 4 and col_x1 > col_x0 + 4:
+            upper_sig = (
+                0.65 * depth_prom[upper_zone_y0:upper_zone_y1, col_x0:col_x1]
+                + 0.35 * border_contrast[upper_zone_y0:upper_zone_y1, col_x0:col_x1]
+            ) * detail_gate[upper_zone_y0:upper_zone_y1, col_x0:col_x1]
+            row_sig = upper_sig.max(axis=1)
+            active_rows = np.where(row_sig >= max(0.28, float(row_sig.max()) * 0.44))[0]
+            if len(active_rows) > 0:
+                subj_top = (upper_zone_y0 + int(active_rows[0])) / max(1.0, float(th - 1))
+                subj_bot = by1
+                ideal_y = subj_top + 0.36 * (subj_bot - subj_top)
+                top_band_y0 = int(round(subj_top * th))
+                top_band_y1 = min(th, int(round((subj_top + 0.55 * (subj_bot - subj_top)) * th)))
+                if top_band_y1 > top_band_y0 + 3:
+                    band_w = (
+                        depth_prom[top_band_y0:top_band_y1, col_x0:col_x1]
+                        * detail_gate[top_band_y0:top_band_y1, col_x0:col_x1]
+                    )
+                    if float(band_w.sum()) > 1e-4:
+                        xs_band = np.arange(col_x0, col_x1, dtype=np.float32)[None, :]
+                        ideal_x = float((xs_band * band_w).sum() / band_w.sum()) / max(1.0, float(tw - 1))
+                        cx = 0.45 * cx + 0.55 * ideal_x
+                cy = 0.30 * cy + 0.70 * ideal_y
+
+    u = max(0.20, min(0.80, cx))
+    v = max(0.20, min(0.76, cy))
     return (float(u), float(v))
 
 
@@ -1215,7 +1390,11 @@ def _build_curator_loupe_assets(
 
     dimmed_canvas = Image.blend(sharp_canvas, Image.new("RGB", (width, height), (6, 8, 14)), 0.36)
 
-    radius_px = int(round(min(width, height) * 0.21))
+    # Adaptive lens radius: sleek ~20% on landscape prints, proportionally bounded on portrait prints
+    radius_px = min(
+        int(round(min(width, height) * 0.20)),
+        max(36, int(round(min(img_w, img_h) * 0.36))),
+    )
     diam = radius_px * 2
     loupe_mask_l = Image.new("L", (diam, diam), 0)
     m_draw = ImageDraw.Draw(loupe_mask_l)
@@ -1256,25 +1435,35 @@ def _build_curator_loupe_assets(
     target_cx = img_x0 + fu * img_w
     target_cy = img_y0 + fv * img_h
 
-    if img_w > 2.0 * src_half:
+    # Keep 100% of magnified crop AND >=88% of optical bezel gracefully inside the framed photograph
+    safe_margin_x = max(src_half + 4.0, radius_px * 0.88)
+    safe_margin_y = max(src_half + 4.0, radius_px * 0.88)
+
+    if img_w > 2.0 * safe_margin_x:
+        min_cx = img_x0 + safe_margin_x
+        max_cx = img_x0 + img_w - safe_margin_x
+    elif img_w > 2.0 * src_half:
         min_cx = img_x0 + src_half
         max_cx = img_x0 + img_w - src_half
     else:
         min_cx = max_cx = img_x0 + 0.5 * img_w
-    min_cx = max(src_half, min_cx)
-    max_cx = min(float(width) - src_half, max_cx)
+    min_cx = max(float(radius_px) + 6.0, min_cx)
+    max_cx = min(float(width) - float(radius_px) - 6.0, max_cx)
     if min_cx > max_cx:
         min_cx = max_cx = img_x0 + 0.5 * img_w
 
-    max_plaque_y = height * (0.74 if has_card else 0.88)
-    if img_h > 2.0 * src_half:
+    max_plaque_y = height * (0.78 if has_card else 0.90) - radius_px * 0.85
+    if img_h > 2.0 * safe_margin_y:
+        min_cy = img_y0 + safe_margin_y
+        max_cy = min(img_y0 + img_h - safe_margin_y, max_plaque_y)
+    elif img_h > 2.0 * src_half:
         min_cy = img_y0 + src_half
         max_cy = min(img_y0 + img_h - src_half, max_plaque_y)
     else:
         min_cy = max_cy = min(img_y0 + 0.5 * img_h, max_plaque_y)
-    min_cy = max(src_half, min_cy)
+    min_cy = max(float(radius_px) + 6.0, min_cy)
     if min_cy > max_cy:
-        min_cy = max_cy = max(src_half, min(float(height) - src_half, img_y0 + 0.5 * img_h))
+        min_cy = max_cy = max(float(radius_px) + 6.0, min(float(height) - float(radius_px) - 6.0, img_y0 + 0.5 * img_h))
 
     drift_x = min(22.0 * scale_factor, img_w * 0.045)
     drift_y = min(10.0 * scale_factor, img_h * 0.025)
@@ -2881,10 +3070,10 @@ def _prepare_photo_scene_context(
         ctx["bloom_depth_q"] = depth_q
 
     elif mode == "curator_loupe":
-        salient_uv = _detect_photo_salient_point(
-            raw_primary,
-            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center,
+        loupe_hint = kb.loupe_focus_point or (
+            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
         )
+        salient_uv = _detect_photo_salient_point(raw_primary, loupe_hint, use_depth=True)
         dimmed_c, sharp_c, loupe_mask, loupe_bezel, rad_px, s_xy, e_xy = _build_curator_loupe_assets(
             raw_primary=raw_primary,
             width=width,
@@ -2944,10 +3133,10 @@ def _prepare_photo_scene_context(
         ctx["contact_hero_xy"] = (hero_cx, hero_cy)
 
     elif mode == "split_diopter_focus":
-        salient_uv = _detect_photo_salient_point(
-            raw_primary,
-            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center,
+        sd_hint = kb.loupe_focus_point or (
+            kb.end_center if kb.end_center != (0.5, 0.48) else kb.start_center
         )
+        salient_uv = _detect_photo_salient_point(raw_primary, sd_hint, use_depth=True)
         sd_left, sd_right, sd_seam, sd_left_w = _build_split_diopter_assets(
             raw_primary=raw_primary,
             focal_point=salient_uv,

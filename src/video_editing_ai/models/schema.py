@@ -1175,6 +1175,13 @@ class KenBurnsConfig(BaseModel):
     end_zoom: float = Field(default=1.08, ge=0.5, le=2.5)
     start_center: tuple[float, float] = Field(default=(0.5, 0.5))
     end_center: tuple[float, float] = Field(default=(0.5, 0.48))
+    loupe_focus_point: Optional[tuple[float, float]] = Field(
+        default=None,
+        description=(
+            "Optional explicit normalized (u, v) in [0..1] focal detail target for curator_loupe / "
+            "split_diopter_focus; when omitted, multi-cue 3D depth + saliency subject localization runs automatically."
+        ),
+    )
     border_px: int = Field(default=16, description="White gallery frame border width in pixels (at 1080p scale)")
     secondary_source: Optional[str] = Field(
         default=None,
