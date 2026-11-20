@@ -61,20 +61,31 @@ Additional rendering & contract schema specification: [references/10_contracts_a
 
 When the user asks you to edit a video from a media folder, follow these 6 phases:
 
-### Phase 1: Project Setup, Zero-Setup Google Photos Browser Login & Media Inspection (`sync-google-photos`, `inspect-library`, `project`)
-When the user points you to **Google Photos** with a date range (`YYYY-MM-DD` to `YYYY-MM-DD`) instead of a local directory, use the **Zero-Setup Browser Login** workflow first (no Google Cloud `client_secret.json` required, and downloaded originals retain EXIF GPS for the 2.5D Travel Map):
-1. **Antigravity Browser Agent (Hands-Free in Chat)**:
-   - Print the deep-linked date search URL (`https://photos.google.com/search/YYYY-MM-DD%20to%20YYYY-MM-DD`):
+### Phase 1: Project Setup, Zero-Setup Fast Google Photos Picking & Media Inspection (`sync-google-photos`, `apply-cloud-picks`, `inspect-library`, `project`)
+When the user points you to **Google Photos** with a date range (`YYYY-MM-DD` to `YYYY-MM-DD`) or Album URL instead of a local directory, use the **Zero-Setup Fast Browser Picking** workflow by default (zero Google Cloud `client_secret.json` setup required, and browser downloads retain **100% original EXIF GPS & QuickTime locations** for 2.5D Travel Maps):
+1. **Generate Zero-Setup Deep-Links & Batch Playbook**:
+   ```bash
+   .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --search-url-only --date-from 2026-07-01 --date-to 2026-07-07
+   ```
+   Returns `search_url`, `favorites_search_url`, `videos_search_url`, `max_items_per_zip` (`450`), and exact batch instructions.
+2. **Fast Browser Selection (Never Click 100+ Tiles One-by-One!)**:
+   - Launch `invoke_subagent(TypeName="browser", Model="flash", ...)` on `search_url` (or `--album-url`). If redirected to Google Sign-In (`accounts.google.com`), pause and ask the user to log in inside the browser pane, then call `send_message` on the same subagent `conversationId` to resume.
+   - **Speed & Completeness Rules inside `photos.google.com`**:
+     - Keep Google Photos **Photo Stacks** ON (collapses burst sequences into a single "Top Pick" tile automatically, cutting raw download size by 50–65%).
+     - Select whole days in 1 click using **Day-Header checkboxes** or **`Shift+Click` first → last tile** (never spend 100 turns clicking individual thumbnails in the virtualized grid).
+     - Stay safely under Google Photos' 500-item web cap by splitting multi-day shoots into **`<= 450`-item batches** (e.g. 1–2 days per `Shift+D` ZIP: `Photos-day1.zip`, `Photos-day2.zip`, ...).
+     - Optionally check `favorites_search_url` (2 seconds) to capture `★` starred filenames so every favorite gets guaranteed selection immunity (`--favorites`).
+3. **Parallel Pass-1 Video-Editing Funnel + Pass-1.5 AI Vision Rescue Gate (`--plan-only` → `apply-cloud-picks`)**:
+   - Ingest one or multiple downloaded ZIPs in parallel (auto-removes screenshots/receipts while keeping camera-captured signs/menus, suppresses Live Photo `.MOV` micro-clips & duplicate videos, performs non-adjacent cross-camera dedup + smartphone-to-camera GPS inheritance, and selects an Event-Clustered Submodular MMR portfolio with **`1.6×` recall headroom** & 16:9 / vertical-diptych pair balance):
      ```bash
-     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --search-url-only --date-from 2026-07-01 --date-to 2026-07-07
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --project-dir "<project_dir>" --from-downloads "<zip_or_dir_of_zips>" --date-from 2026-07-01 --date-to 2026-07-07 --plan-only
      ```
-   - Launch `invoke_subagent(TypeName="browser", Model="flash", ...)` pointing at that `search_url`. If redirected to Google Sign-In (`accounts.google.com`), pause and ask the user to log in inside the browser pane, then call `send_message` on the same subagent `conversationId` so it resumes in the signed-in session, skips obvious burst duplicates, selects the remaining date-range items, clicks **Download** (`Shift+D`), and reports the downloaded `.zip`/media path(s).
-   - Run `sync-google-photos --from-downloads` to extract, enforce `[date_from, date_to]`, deduplicate bursts, and stage `<project_dir>/cloud_media/`:
+   - Inspect the paginated `5×4` scan sheets (`<project_dir>/contact_sheets/cloud_scan_sheet_01.jpg`, `02.jpg`, ...) via `read_file` to rescue any standout `RUNNER-UP` shots or drop unwanted frames, then finalize `<project_dir>/cloud_media/` staging (or Pass-2 Picker/Takeout extraction):
      ```bash
-     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --project-dir "<project_dir>" --from-downloads "<downloaded_zip_or_files>" --date-from 2026-07-01 --date-to 2026-07-07
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py apply-cloud-picks --project-dir "<project_dir>" --overrides-json "{\"select\":[\"#07\"],\"skip\":[\"#12\"]}"
      ```
-2. **CLI System Browser + `~/Downloads` Auto-Watcher (or Optional OAuth Picker / Takeout)**:
-   - Running `sync-google-photos --project-dir "<project_dir>" --date-from ... --date-to ...` (without `--from-downloads`) opens `photos.google.com/search/...` in the user's browser and watches `~/Downloads` until `Photos*.zip` finishes (or uses the Picker API if optional OAuth credentials were configured, or `--takeout <path>` for Google Takeout exports).
+4. **CLI System Browser Watcher / Optional OAuth Picker / Lazy Takeout ZIP**:
+   - Running `sync-google-photos --project-dir "<project_dir>" --date-from ... --date-to ...` (without `--from-downloads`) opens `photos.google.com/search/...` in the user's browser and watches `~/Downloads` until `Photos*.zip` finishes (or uses the pooled HTTP/2 Picker API if optional OAuth credentials were configured, or `--takeout <zip_or_dir>` with Lazy Two-Pass ZIP extraction that never extracts skipped videos).
    - You can also pass `--google-photos --date-from ... --date-to ...` (or `--from-downloads` / `--google-takeout`) directly to `inspect-library` or `run-pipeline`.
 
 Scan the raw (or cloud-staged) media folder to detect video/photo counts, EXIF camera models, and the **Executive Director's Recommended Video Length (`30s–600s`)**:

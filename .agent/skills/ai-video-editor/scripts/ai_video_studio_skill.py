@@ -98,7 +98,9 @@ from video_editing_ai.agents.intake_agent import _recommend_color_look  # noqa: 
 from video_editing_ai.cloud import (  # noqa: E402
     GooglePhotosAuthManager,
     YouTubeAuthManager,
+    apply_cloud_pick_overrides,
     build_google_photos_web_search_url,
+    build_zero_setup_browser_plan,
     execute_youtube_publish,
     format_picker_date_query,
     prepare_youtube_publish,
@@ -338,10 +340,12 @@ def cmd_publish_youtube(args: argparse.Namespace) -> int:
 
 def cmd_sync_google_photos(args: argparse.Namespace) -> int:
     if getattr(args, "search_url_only", False):
-        payload = {
-            "search_url": build_google_photos_web_search_url(args.date_from, args.date_to),
-            "date_query": format_picker_date_query(args.date_from, args.date_to),
-        }
+        payload = build_zero_setup_browser_plan(
+            date_from=args.date_from,
+            date_to=args.date_to,
+            album_url=getattr(args, "album_url", None),
+            favorites_only=bool(getattr(args, "favorites_only", False)),
+        )
         print(json.dumps(payload, indent=2))
         return 0
     if not getattr(args, "project_dir", None):
@@ -369,6 +373,10 @@ def cmd_sync_google_photos(args: argparse.Namespace) -> int:
         max_photos=args.max_photos,
         max_videos=args.max_videos,
         download_all=bool(args.download_all),
+        headroom_multiplier=float(getattr(args, "headroom_multiplier", None) or 1.6),
+        plan_only=bool(getattr(args, "plan_only", False)),
+        favorites_only=bool(getattr(args, "favorites_only", False)),
+        album_url=getattr(args, "album_url", None),
         auth_mode=getattr(args, "auth_mode", None) or "auto",
         from_downloads=getattr(args, "from_downloads", None),
         takeout_source=getattr(args, "takeout", None),
@@ -396,11 +404,36 @@ def cmd_sync_google_photos(args: argparse.Namespace) -> int:
     )
     if args.output:
         _write_json(Path(args.output).resolve(), manifest.model_dump(mode="json"))
+    sheets_list = manifest.scan_contact_sheet_paths or ([manifest.scan_contact_sheet_path] if manifest.scan_contact_sheet_path else [])
+    stage_note = "Planned (Pass-1.5 review ready; run apply-cloud-picks to finalize)" if manifest.download_stage == "planned_only" else "Synced"
     print(
-        f"Success! Synced {manifest.selected_photos_count} photos and {manifest.selected_videos_count} videos "
-        f"(from {manifest.in_date_range_count} in-range candidates) to {manifest.staged_media_dir}\n"
-        f"  - Manifest:      {proj_dir / 'google_photos_manifest.json'}\n"
-        f"  - Contact Sheet: {manifest.scan_contact_sheet_path}"
+        f"Success! {stage_note} {manifest.selected_photos_count} photos and {manifest.selected_videos_count} videos "
+        f"(from {manifest.in_date_range_count} in-range candidates across {manifest.event_clusters_count} event clusters) -> {manifest.staged_media_dir}\n"
+        f"  - Manifest:       {proj_dir / 'google_photos_manifest.json'}\n"
+        f"  - Contact Sheets: {', '.join(sheets_list)}"
+    )
+    return 0
+
+
+def cmd_apply_cloud_picks(args: argparse.Namespace) -> int:
+    proj_dir = Path(args.project_dir).resolve()
+    raw_ov = getattr(args, "overrides_json", None)
+    overrides: dict[str, Any] | list[dict[str, Any]] = {}
+    if raw_ov:
+        ov_p = Path(raw_ov)
+        overrides = json.loads(ov_p.read_text(encoding="utf-8")) if ov_p.is_file() else json.loads(raw_ov)
+
+    manifest = apply_cloud_pick_overrides(
+        project_dir=proj_dir,
+        overrides=overrides,
+        execute_pass2=not bool(getattr(args, "no_download", False)),
+        progress_callback=lambda m: print(f"  {m}"),
+    )
+    if args.output:
+        _write_json(Path(args.output).resolve(), manifest.model_dump(mode="json"))
+    print(
+        f"Success! Finalized cloud picks: {manifest.selected_photos_count} photos and {manifest.selected_videos_count} videos "
+        f"staged in {manifest.staged_media_dir} (stage={manifest.download_stage})."
     )
     return 0
 
@@ -2068,6 +2101,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sgp.add_argument("--max-photos", type=int, default=None, help="Optional cap on smart-downloaded photos")
     p_sgp.add_argument("--max-videos", type=int, default=None, help="Optional cap on smart-downloaded videos")
     p_sgp.add_argument("--download-all", action="store_true", default=False, help="Download/keep every in-range item without smart curation pruning")
+    p_sgp.add_argument("--headroom-multiplier", type=float, default=1.6, help="Recall headroom multiplier over strict timeline count (default 1.6)")
+    p_sgp.add_argument("--plan-only", action="store_true", default=False, help="Run Pass-1 curation + paginated 5x4 contact sheets and pause for Pass-1.5 Vision review before staging/Pass-2 download")
+    p_sgp.add_argument("--favorites-only", action="store_true", default=False, help="Scope browser search URL to ★ Favorited items only")
+    p_sgp.add_argument("--album-url", default=None, help="Optional direct Google Photos album URL to open instead of date search")
     p_sgp.add_argument("--favorites", default=None, help="Comma-separated Favorited filenames or JSON manifest path to mark ★ favorite")
     p_sgp.add_argument("--session-id", default=None, help="Optional existing Google Photos Picker sessionId")
     p_sgp.add_argument("--no-browser", action="store_true", default=False, help="Do not auto-open browser")
@@ -2075,6 +2112,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_sgp.add_argument("--token-path", default=None, help="Optional path to OAuth token.json")
     p_sgp.add_argument("--output", default=None, help="Optional output JSON report path")
     p_sgp.set_defaults(func=cmd_sync_google_photos)
+
+    # 22b. apply-cloud-picks (Pass-1.5 AI Vision / User Rescue Gate)
+    p_acp = sub.add_parser(
+        "apply-cloud-picks",
+        help="Apply Pass-1.5 AI Vision / user rescues & rejections to google_photos_manifest.json and execute Pass-2 selective staging/download",
+    )
+    p_acp.add_argument("--project-dir", required=True, help="Target project workspace directory containing google_photos_manifest.json")
+    p_acp.add_argument("--overrides-json", default=None, help="JSON string or file path with {'select': ['#07'], 'skip': ['#12']} or list of tile overrides")
+    p_acp.add_argument("--no-download", action="store_true", default=False, help="Update manifest & contact sheets without executing Pass-2 downloads/staging")
+    p_acp.add_argument("--output", default=None, help="Optional output JSON report path")
+    p_acp.set_defaults(func=cmd_apply_cloud_picks)
 
     # 23. youtube-auth
     p_yta = sub.add_parser(

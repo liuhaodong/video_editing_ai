@@ -9,6 +9,7 @@ import hashlib
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -41,6 +42,7 @@ from ..analyzer.media_probe import (
 )
 from ..analyzer.semantic_intelligence import (
     analyze_human_and_aesthetic_perception,
+    cie_lab_harmony_score,
     compute_zoom_tolerant_visual_similarity,
 )
 from ..hardware import get_io_worker_count
@@ -490,7 +492,7 @@ def _parse_duration_seconds(raw_val: Any, default_sec: float = 3.0) -> float:
 
 
 class GooglePhotosPickerClient:
-    """REST client for Google Photos Picker API (`photospicker.googleapis.com/v1`)."""
+    """REST client for Google Photos Picker API (`photospicker.googleapis.com/v1`) with pooled HTTP/2 keepalive."""
 
     def __init__(
         self,
@@ -502,13 +504,34 @@ class GooglePhotosPickerClient:
         base = api_base_url or os.environ.get("GOOGLE_PHOTOS_API_BASE_URL", "").strip() or DEFAULT_PICKER_API_BASE
         self.api_base_url = base.rstrip("/")
         self.timeout_sec = float(timeout_sec)
+        self._client_lock = threading.Lock()
+        self._http_client: Optional[httpx.Client] = None
+
+    def _client(self) -> httpx.Client:
+        with self._client_lock:
+            if self._http_client is None or self._http_client.is_closed:
+                limits = httpx.Limits(max_connections=24, max_keepalive_connections=16)
+                try:
+                    self._http_client = httpx.Client(http2=True, limits=limits, follow_redirects=True)
+                except Exception:
+                    self._http_client = httpx.Client(limits=limits, follow_redirects=True)
+            return self._http_client
+
+    def close(self) -> None:
+        with self._client_lock:
+            if self._http_client is not None and not self._http_client.is_closed:
+                try:
+                    self._http_client.close()
+                except Exception:
+                    pass
+                self._http_client = None
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.auth_manager.get_valid_access_token()}"}
 
     def create_session(self, max_item_count: int = 2000) -> dict[str, Any]:
         capped = max(1, min(2000, int(max_item_count)))
-        resp = httpx.post(
+        resp = self._client().post(
             f"{self.api_base_url}/sessions",
             headers=self._headers(),
             json={"pickingConfig": {"maxItemCount": capped}},
@@ -519,7 +542,7 @@ class GooglePhotosPickerClient:
         return dict(resp.json())
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        resp = httpx.get(
+        resp = self._client().get(
             f"{self.api_base_url}/sessions/{session_id}",
             headers=self._headers(),
             timeout=self.timeout_sec,
@@ -555,7 +578,7 @@ class GooglePhotosPickerClient:
             params: dict[str, Any] = {"sessionId": session_id, "pageSize": capped_size}
             if page_token:
                 params["pageToken"] = page_token
-            resp = httpx.get(
+            resp = self._client().get(
                 f"{self.api_base_url}/mediaItems",
                 headers=self._headers(),
                 params=params,
@@ -572,7 +595,7 @@ class GooglePhotosPickerClient:
 
     def delete_session(self, session_id: str) -> bool:
         try:
-            resp = httpx.delete(
+            resp = self._client().delete(
                 f"{self.api_base_url}/sessions/{session_id}",
                 headers=self._headers(),
                 timeout=self.timeout_sec,
@@ -596,11 +619,10 @@ class GooglePhotosPickerClient:
         last_exc: Optional[Exception] = None
         for attempt in range(max(1, int(max_retries))):
             try:
-                with httpx.stream(
+                with self._client().stream(
                     "GET",
                     dl_url,
                     headers=self._headers(),
-                    follow_redirects=True,
                     timeout=max(self.timeout_sec, 120.0),
                 ) as resp:
                     if resp.status_code >= 400:
@@ -642,6 +664,412 @@ def _safe_filename(raw_name: str, fallback_stem: str, mime_type: str, media_type
     return f"{clean_stem[:80]}{ext}"
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in kilometers between two WGS84 coordinates."""
+    r_earth = 6371.0088
+    p1 = math.radians(float(lat1))
+    p2 = math.radians(float(lat2))
+    dp = math.radians(float(lat2) - float(lat1))
+    dl = math.radians(float(lon2) - float(lon1))
+    a = math.sin(dp * 0.5) ** 2 + math.cos(p1) * math.cos(p2) * (math.sin(dl * 0.5) ** 2)
+    return r_earth * 2.0 * math.atan2(math.sqrt(max(0.0, a)), math.sqrt(max(0.0, 1.0 - a)))
+
+
+def _infer_orientation(width: int, height: int) -> str:
+    if width <= 0 or height <= 0:
+        return "unknown"
+    if width > height * 1.06:
+        return "landscape"
+    if height > width * 1.06:
+        return "portrait"
+    return "square"
+
+
+_DEDICATED_CAM_RE = re.compile(
+    r"(sony|ilce|a7c|a7r|a7s|a7m|a6\d{3}|zv-?e|canon|eos|nikon|fujifilm|fuji|x-t\d|x100|leica|olympus|om-?\d|panasonic|lumix|ricoh|hasselblad|pentax|sigma|phase\s*one)",
+    re.IGNORECASE,
+)
+_SCREENSHOT_NAME_RE = re.compile(
+    r"(^|[\W_])(screenshot|screen[\s_-]?shot|screen[\s_-]?capture|screencap|screen[\s_-]?recording|whatsapp[\s_-]*image|received[\s_-]*\d+)([\W_]|$)",
+    re.IGNORECASE,
+)
+
+
+def _is_dedicated_camera(camera_make_model: Optional[str], filename: str) -> bool:
+    cam = (camera_make_model or "").strip()
+    if cam and _DEDICATED_CAM_RE.search(cam):
+        return True
+    stem_up = Path(filename or "").stem.upper()
+    return stem_up.startswith(("_DSC", "DSC0", "DSC_", "A7C", "DSCF", "CR3_", "NEF_"))
+
+
+def _detect_screenshot_or_junk(item: CloudMediaCandidateItem, thumb_path: Optional[Path]) -> Optional[str]:
+    """
+    Detect phone screenshots, screen recordings & flat-UI junk while preserving starred items
+    and camera-captured photographs (including photographed signs, museum plaques, and menus).
+    """
+    if item.is_favorite or item.media_type != "photo":
+        return None
+    has_camera_exif = bool((item.camera_make_model or "").strip() or (item.exif_summary or "").strip())
+    fname_low = Path(item.filename or "").name.lower()
+    if not has_camera_exif and _SCREENSHOT_NAME_RE.search(fname_low):
+        return "screenshot_or_junk"
+
+    # Camera-captured JPEGs/HEICs (even of signs/menus) are never discarded as screenshots
+    ext = Path(item.filename or "").suffix.lower()
+    if has_camera_exif or ext in (".heic", ".heif", ".dng", ".arw", ".cr3", ".nef"):
+        return None
+
+    # PNG / WebP images lacking camera EXIF: check for flat-UI / phone-screen concentration
+    if ext in (".png", ".webp") and thumb_path and thumb_path.is_file():
+        try:
+            with Image.open(thumb_path) as im:
+                small = im.convert("RGB").resize((96, 96), Image.Resampling.BILINEAR)
+                arr = np.asarray(small, dtype=np.uint8)
+            quant = (arr >> 4).reshape(-1, 3)
+            keys = (quant[:, 0].astype(np.int32) << 8) | (quant[:, 1].astype(np.int32) << 4) | quant[:, 2].astype(np.int32)
+            counts = np.bincount(keys)
+            top4_frac = float(np.sort(counts)[-4:].sum()) / float(max(1, keys.size))
+            aspect = max(item.width, item.height) / float(max(1, min(item.width, item.height))) if (item.width > 0 and item.height > 0) else 1.0
+            if top4_frac >= 0.58 and (aspect >= 1.72 or top4_frac >= 0.72):
+                return "screenshot_or_junk"
+        except Exception:
+            pass
+    return None
+
+
+def _dedupe_and_filter_videos(
+    candidates: list[CloudMediaCandidateItem],
+    parsed_times: dict[int, Optional[datetime]],
+) -> None:
+    """Suppress Apple/Android Live Photo companion micro-.MOV clips and duplicate re-uploaded videos."""
+    photo_stems: set[str] = set()
+    photo_times: list[tuple[datetime, str]] = []
+    for idx, it in enumerate(candidates):
+        if it.media_type == "photo":
+            photo_stems.add(Path(it.filename).stem.lower())
+            pt = parsed_times.get(idx)
+            if pt is not None:
+                photo_times.append((pt, it.dhash))
+
+    eligible_vid_indices: list[int] = []
+    for idx, it in enumerate(candidates):
+        if it.media_type != "video" or not it.selected_for_download:
+            continue
+        if not it.is_favorite:
+            ext = Path(it.filename).suffix.lower()
+            is_mov = ext == ".mov" or it.mime_type == "video/quicktime"
+            stem_low = Path(it.filename).stem.lower()
+            if is_mov and 0.0 < float(it.duration_sec or 0.0) <= 3.2:
+                matched_photo = stem_low in photo_stems
+                if not matched_photo and parsed_times.get(idx) is not None:
+                    vt = parsed_times[idx]
+                    assert vt is not None
+                    for pt, p_hash in photo_times:
+                        if abs((vt - pt).total_seconds()) <= 2.0 and (
+                            not it.dhash or not p_hash or _hamming_distance_hex(it.dhash, p_hash) <= 18
+                        ):
+                            matched_photo = True
+                            break
+                if matched_photo:
+                    it.selected_for_download = False
+                    it.skip_reason = "live_photo_companion"
+                    continue
+        eligible_vid_indices.append(idx)
+
+    # Deduplicate exact/re-uploaded videos (e.g. A7C2_20251222_0618.MP4 vs A7C2_20251222_0618_1.MP4)
+    n_v = len(eligible_vid_indices)
+    if n_v < 2:
+        return
+    parent = list(range(n_v))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            if ra < rb:
+                parent[rb] = ra
+            else:
+                parent[ra] = rb
+
+    def _base_stem(fname: str) -> str:
+        s = Path(fname).stem.lower()
+        return re.sub(r"(?:_\d+|\(\d+\))$", "", s)
+
+    for a in range(n_v):
+        ia = eligible_vid_indices[a]
+        va = candidates[ia]
+        ta = parsed_times.get(ia)
+        if ta is None:
+            continue
+        ba = _base_stem(va.filename)
+        for b in range(a + 1, n_v):
+            ib = eligible_vid_indices[b]
+            vb = candidates[ib]
+            tb = parsed_times.get(ib)
+            if tb is None or abs((tb - ta).total_seconds()) > 2.0:
+                continue
+            same_hash = bool(va.dhash and vb.dhash and _hamming_distance_hex(va.dhash, vb.dhash) <= 6)
+            same_stem = bool(ba and ba == _base_stem(vb.filename))
+            if same_hash or same_stem:
+                _union(a, b)
+
+    groups: dict[int, list[int]] = {}
+    for pos, idx_v in enumerate(eligible_vid_indices):
+        groups.setdefault(_find(pos), []).append(idx_v)
+
+    for members in groups.values():
+        if len(members) <= 1:
+            continue
+        winner = max(
+            members,
+            key=lambda idx_m: (
+                candidates[idx_m].is_favorite,
+                int(candidates[idx_m].width) * int(candidates[idx_m].height),
+                candidates[idx_m].taste_score,
+                0 if re.search(r"(?:_\d+|\(\d+\))$", Path(candidates[idx_m].filename).stem) else 1,
+                -idx_m,
+            ),
+        )
+        for m_idx in members:
+            if m_idx != winner:
+                candidates[m_idx].selected_for_download = False
+                candidates[m_idx].skip_reason = "duplicate_video"
+
+
+def _inherit_dual_camera_gps(
+    candidates: list[CloudMediaCandidateItem],
+    photo_indices: list[int],
+    parsed_times: dict[int, Optional[datetime]],
+    clusters: dict[int, list[int]],
+) -> None:
+    """Hydrate missing GPS on dedicated-camera frames from nearby smartphone shots (same cluster or <=180s)."""
+    # Pass A: within visual/cross-camera burst clusters
+    for members in clusters.values():
+        gps_members = [m for m in members if candidates[m].gps_lat is not None and candidates[m].gps_lon is not None]
+        if not gps_members:
+            continue
+        for m in members:
+            if candidates[m].gps_lat is not None and candidates[m].gps_lon is not None:
+                continue
+            tm = parsed_times.get(m)
+            donor_idx = min(
+                gps_members,
+                key=lambda g: abs((parsed_times[g] - tm).total_seconds()) if (tm and parsed_times.get(g)) else 0.0,
+            )
+            candidates[m].gps_lat = candidates[donor_idx].gps_lat
+            candidates[m].gps_lon = candidates[donor_idx].gps_lon
+            candidates[m].gps_alt = candidates[donor_idx].gps_alt
+
+    # Pass B: temporal proximity (<= 180s) across all GPS-tagged items (photos + videos)
+    gps_donors: list[tuple[datetime, CloudMediaCandidateItem]] = []
+    for idx, it in enumerate(candidates):
+        if it.gps_lat is not None and it.gps_lon is not None:
+            ts = parsed_times.get(idx) or parse_iso_utc(it.creation_time)
+            if ts is not None:
+                gps_donors.append((ts, it))
+    if not gps_donors:
+        return
+    for idx in photo_indices:
+        it = candidates[idx]
+        if it.gps_lat is not None and it.gps_lon is not None:
+            continue
+        tm = parsed_times.get(idx)
+        if tm is None:
+            continue
+        best_dt = 181.0
+        best_donor: Optional[CloudMediaCandidateItem] = None
+        for d_ts, d_it in gps_donors:
+            dt_s = abs((d_ts - tm).total_seconds())
+            if dt_s < best_dt:
+                best_dt = dt_s
+                best_donor = d_it
+        if best_donor is not None and best_dt <= 180.0:
+            it.gps_lat = best_donor.gps_lat
+            it.gps_lon = best_donor.gps_lon
+            it.gps_alt = best_donor.gps_alt
+
+
+def _segment_event_clusters(
+    items: list[tuple[int, CloudMediaCandidateItem]],
+    parsed_times: dict[int, Optional[datetime]],
+) -> dict[int, str]:
+    """Group chronologically ordered items into geographic/temporal event clusters (dt > 25m or GPS > 0.5km)."""
+    if not items:
+        return {}
+    ordered = sorted(
+        items,
+        key=lambda pair: (pair[1].creation_time or "9999-12-31T23:59:59Z", pair[1].filename, pair[0]),
+    )
+    event_map: dict[int, str] = {}
+    ev_num = 1
+    prev_it: Optional[CloudMediaCandidateItem] = None
+    prev_ts: Optional[datetime] = None
+    for idx, it in ordered:
+        cur_ts = parsed_times.get(idx) or parse_iso_utc(it.creation_time)
+        if prev_it is not None:
+            time_break = bool(cur_ts is not None and prev_ts is not None and abs((cur_ts - prev_ts).total_seconds()) > 1500.0)
+            gps_break = bool(
+                it.gps_lat is not None
+                and it.gps_lon is not None
+                and prev_it.gps_lat is not None
+                and prev_it.gps_lon is not None
+                and _haversine_km(prev_it.gps_lat, prev_it.gps_lon, it.gps_lat, it.gps_lon) > 0.5
+            )
+            if time_break or gps_break:
+                ev_num += 1
+        ev_id = f"event_{ev_num:02d}"
+        it.event_cluster_id = ev_id
+        event_map[idx] = ev_id
+        prev_it = it
+        prev_ts = cur_ts
+    return event_map
+
+
+def _select_video_editing_mmr_portfolio(
+    items: list[tuple[int, CloudMediaCandidateItem]],
+    budget: int,
+    sig_map: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]],
+    event_map: dict[int, str],
+) -> set[int]:
+    """
+    Event-Clustered Submodular MMR selection optimized for 16:9 video editing:
+    - Guarantees 100% of Favorited items (up to budget)
+    - Guarantees >= 2 diverse shots per event stop (preferring a 16:9 landscape establishing shot per stop)
+    - Maximizes aesthetic taste + visual/category/event novelty + vertical portrait diptych pair completion
+    """
+    if len(items) <= budget:
+        for _, it in items:
+            it.mmr_score = round(min(1.0, it.taste_score / 10.0), 4)
+        return {idx for idx, _ in items}
+    if budget <= 0:
+        return set()
+
+    ordered = sorted(
+        items,
+        key=lambda pair: (pair[1].creation_time or "9999-12-31T23:59:59Z", pair[1].filename, pair[0]),
+    )
+    by_idx = {idx: it for idx, it in ordered}
+
+    selected: set[int] = set()
+    selected_sigs: list[np.ndarray] = []
+    cat_counts: dict[str, int] = {}
+    ev_counts: dict[str, int] = {}
+    portrait_by_ev: dict[str, int] = {}
+    landscape_total = 0
+
+    def _record_pick(pick_idx: int, gain: float) -> None:
+        nonlocal landscape_total
+        it_p = by_idx[pick_idx]
+        selected.add(pick_idx)
+        it_p.mmr_score = round(float(gain), 4)
+        if pick_idx in sig_map:
+            selected_sigs.append(sig_map[pick_idx][0])
+        cat_k = it_p.subject_category or "general"
+        cat_counts[cat_k] = cat_counts.get(cat_k, 0) + 1
+        ev_k = event_map.get(pick_idx, "event_01")
+        ev_counts[ev_k] = ev_counts.get(ev_k, 0) + 1
+        if it_p.orientation == "portrait":
+            portrait_by_ev[ev_k] = portrait_by_ev.get(ev_k, 0) + 1
+        elif it_p.orientation == "landscape":
+            landscape_total += 1
+
+    def _mmr_gain(cand_idx: int, remaining_slots: int) -> float:
+        it_c = by_idx[cand_idx]
+        ev_c = event_map.get(cand_idx, "event_01")
+        cat_c = it_c.subject_category or "general"
+        q_norm = min(1.15, float(it_c.taste_score) / 10.0)
+        if selected_sigs and cand_idx in sig_map:
+            sig_c = sig_map[cand_idx][0]
+            max_sim = max(float(np.dot(sig_c, s_sig)) for s_sig in selected_sigs)
+        else:
+            max_sim = 0.0
+        cat_nov = 1.0 / (1.0 + cat_counts.get(cat_c, 0))
+        ev_nov = 1.0 / (1.0 + ev_counts.get(ev_c, 0))
+
+        # Orientation balance for 16:9 timelines: encourage landscape anchors + complete vertical diptych pairs
+        orient_bonus = 0.0
+        n_sel = len(selected)
+        p_in_ev = portrait_by_ev.get(ev_c, 0)
+        if it_c.orientation == "portrait":
+            if p_in_ev % 2 == 1:
+                orient_bonus = 0.11  # Complete vertical diptych pair in same event!
+            elif remaining_slots == 1 and p_in_ev == 0:
+                orient_bonus = -0.05  # Avoid stranding a single lone vertical on the last slot
+        elif it_c.orientation == "landscape":
+            land_frac = landscape_total / float(max(1, n_sel))
+            if n_sel == 0 or land_frac < 0.45:
+                orient_bonus = 0.08
+
+        return (
+            0.46 * q_norm
+            - 0.28 * max(0.0, max_sim)
+            + 0.09 * cat_nov
+            + 0.08 * ev_nov
+            + orient_bonus
+            + (0.35 if it_c.is_favorite else 0.0)
+        )
+
+    # 1. Always preserve Favorited items first up to budget
+    fav_ordered = sorted(
+        [(idx, it) for idx, it in ordered if it.is_favorite],
+        key=lambda pair: (-pair[1].taste_score, pair[0]),
+    )
+    for f_idx, f_it in fav_ordered[:budget]:
+        _record_pick(f_idx, min(1.2, f_it.taste_score / 10.0 + 0.35))
+    if len(selected) >= budget:
+        return selected
+
+    # 2. Per-event minimum floor (preferring 1 landscape establishing anchor + 1 complementary shot per stop)
+    by_event: dict[str, list[int]] = {}
+    for idx, _ in ordered:
+        by_event.setdefault(event_map.get(idx, "event_01"), []).append(idx)
+
+    n_events = max(1, len(by_event))
+    floor_per_event = 2 if budget >= n_events * 2 else 1
+    for pass_round in range(floor_per_event):
+        for ev_id in sorted(by_event):
+            if len(selected) >= budget:
+                break
+            if ev_counts.get(ev_id, 0) > pass_round:
+                continue
+            avail = [i for i in by_event[ev_id] if i not in selected]
+            if not avail:
+                continue
+            rem = budget - len(selected)
+            if pass_round == 0:
+                # Prefer a strong landscape establishing frame for the stop's opener if available
+                lands = [i for i in avail if by_idx[i].orientation == "landscape"]
+                pool_ev = lands if lands else avail
+            else:
+                pool_ev = avail
+            best_i = max(pool_ev, key=lambda i: (_mmr_gain(i, rem), -i))
+            _record_pick(best_i, _mmr_gain(best_i, rem))
+
+    # 3. Fill remaining budget via global Submodular MMR
+    while len(selected) < budget:
+        rem = budget - len(selected)
+        best_i: Optional[int] = None
+        best_g = -1e9
+        for idx, _ in ordered:
+            if idx in selected:
+                continue
+            g = _mmr_gain(idx, rem)
+            if g > best_g:
+                best_g = g
+                best_i = idx
+        if best_i is None:
+            break
+        _record_pick(best_i, best_g)
+
+    return selected
+
+
 def _stratified_budget_indices(
     items: list[tuple[int, CloudMediaCandidateItem]],
     budget: int,
@@ -652,8 +1080,6 @@ def _stratified_budget_indices(
     if budget <= 0:
         return set()
 
-    # Divide chronologically ordered items into `budget` equal-count slices and pick best per slice,
-    # always preserving Favorited items first up to `budget`.
     ordered = sorted(
         items,
         key=lambda pair: (pair[1].creation_time or "9999-12-31T23:59:59Z", pair[1].filename, pair[0]),
@@ -702,49 +1128,71 @@ def select_necessary_cloud_items(
     max_photos: Optional[int] = None,
     max_videos: Optional[int] = None,
     download_all: bool = False,
+    headroom_multiplier: float = 1.6,
 ) -> list[CloudMediaCandidateItem]:
     """
-    Pass-1 Smart Cloud Curation on 512px thumbnails & metadata:
-    - Evaluates perceptual taste + human expression/eye-open scores
-    - Deduplicates burst sequences (dt <= 12s and dHash <= 11 or zoom-tolerant sim >= 0.86)
-    - Enforces temporal-stratified photo/video budgets sized to target_duration_sec (unless download_all=True)
+    Parallel Video-Editing-Aware Pass-1 Smart Cloud Curation:
+    - Parallel perception & taste evaluation (eye-open, smile, motion blur, saliency, Lab color)
+    - Rejects phone screenshots/blank receipts (preserving camera-captured signs/menus & ★ Favorites)
+    - Suppresses Live Photo companion micro-.MOVs & duplicate re-uploaded videos
+    - Non-adjacent Union-Find burst & cross-camera dedup + smartphone-to-camera GPS inheritance
+    - Event-clustered Submodular MMR with 1.6x recall headroom & 16:9 / vertical diptych pair balance
     """
     if not candidates:
         return []
 
     dur = max(30.0, min(600.0, float(target_duration_sec or 155.0)))
+    h_mult = max(1.0, min(3.0, float(headroom_multiplier or 1.6)))
     photo_budget = (
         max(1, int(max_photos))
         if max_photos is not None
-        else max(18, min(80, int(round(dur * 0.28))))
+        else max(24, min(120, int(round(dur * 0.26 * h_mult))))
     )
     video_budget = (
         max(1, int(max_videos))
         if max_videos is not None
-        else max(10, min(50, int(round(dur * 0.18))))
+        else max(12, min(60, int(round(dur * 0.20))))
     )
 
-    sig_map: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, float]] = {}
+    sig_map: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]] = {}
+    eye_smile_map: dict[int, tuple[float, float]] = {}
 
-    for idx, item in enumerate(candidates):
-        item.selected_for_download = True
-        item.skip_reason = None
-        item.burst_group_id = None
-
+    def _score_one(pair: tuple[int, CloudMediaCandidateItem]) -> tuple[
+        int,
+        float,
+        str,
+        str,
+        str,
+        Optional[str],
+        Optional[tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]],
+        tuple[float, float],
+    ]:
+        idx_c, item = pair
+        orient = _infer_orientation(item.width, item.height)
         thumb_p = Path(item.proxy_thumbnail_path) if item.proxy_thumbnail_path else None
+        if orient == "unknown" and thumb_p and thumb_p.is_file():
+            try:
+                with Image.open(thumb_p) as im_sz:
+                    tw_s, th_s = im_sz.size
+                orient = _infer_orientation(tw_s, th_s)
+            except Exception:
+                pass
+
+        junk_reason = _detect_screenshot_or_junk(item, thumb_p)
         if thumb_p and thumb_p.is_file():
             metrics = _evaluate_photo_taste_metrics(thumb_p, item.filename)
             perc = analyze_human_and_aesthetic_perception(thumb_p, item.filename)
-            item.dhash = str(perc.get("dhash") or metrics.get("dhash") or "")
+            dhash_val = str(perc.get("dhash") or metrics.get("dhash") or "")
             eye_s = float(perc.get("eye_open_score", 1.0))
             smile_s = float(perc.get("smile_score", 0.0))
             blur_t = str(perc.get("blur_type") or "crisp_all")
+            sub_cat = "screenshot_or_doc" if junk_reason else str(perc.get("inferred_category") or metrics.get("inferred_category") or "")
             taste = float(metrics.get("overall_taste_score", 7.5))
             if eye_s < 0.4:
                 taste -= 1.8
             elif smile_s > 0.35:
                 taste += 0.45
-            if blur_t == "global_motion_blur":
+            if blur_t in ("global_motion_blur", "motion_or_defocus_blur"):
                 taste -= 1.2
             if item.media_type == "video":
                 res_bonus = 0.35 if min(item.width, item.height) >= 1080 else 0.0
@@ -752,83 +1200,174 @@ def select_necessary_cloud_items(
                 taste += res_bonus + fps_bonus
             if item.is_favorite:
                 taste += 1.25
-            item.taste_score = round(max(1.0, min(9.99, taste)), 2)
-            sig_map[idx] = (
+            taste_clamped = round(max(1.0, min(9.99, taste)), 2)
+            lab_mean = np.asarray(perc.get("lab_mean", [128.0, 128.0, 128.0]), dtype=np.float32)
+            sig_t = (
                 perc["visual_signature"],
                 perc["center_signature"],
                 perc["inner_signature"],
                 eye_s,
+                lab_mean,
             )
-        else:
-            base_t = 7.6 if item.media_type == "video" else 7.2
-            item.taste_score = round(min(9.99, base_t + (1.25 if item.is_favorite else 0.0)), 2)
+            return idx_c, taste_clamped, dhash_val, orient, sub_cat, junk_reason, sig_t, (eye_s, smile_s)
+
+        base_t = 7.6 if item.media_type == "video" else 7.2
+        taste_clamped = round(min(9.99, base_t + (1.25 if item.is_favorite else 0.0)), 2)
+        sub_cat = "screenshot_or_doc" if junk_reason else ("video_clip" if item.media_type == "video" else "")
+        return idx_c, taste_clamped, item.dhash or "", orient, sub_cat, junk_reason, None, (1.0, 0.0)
+
+    workers = max(1, min(get_io_worker_count(12), len(candidates)))
+    indexed_cands = list(enumerate(candidates))
+    if workers == 1 or len(candidates) <= 3:
+        scored_rows = [_score_one(p) for p in indexed_cands]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            scored_rows = list(pool.map(_score_one, indexed_cands))
+
+    for idx_c, taste_val, dhash_val, orient, sub_cat, junk_reason, sig_t, es_pair in scored_rows:
+        item = candidates[idx_c]
+        item.selected_for_download = True
+        item.skip_reason = None
+        item.burst_group_id = None
+        item.burst_cluster_size = 1
+        item.mmr_score = 0.0
+        item.taste_score = taste_val
+        item.dhash = dhash_val
+        item.orientation = orient  # type: ignore[assignment]
+        item.subject_category = sub_cat
+        eye_smile_map[idx_c] = es_pair
+        if sig_t is not None:
+            sig_map[idx_c] = sig_t
 
         if item.media_type == "video" and item.video_processing_status not in ("", "READY", "UNSPECIFIED"):
             item.selected_for_download = False
             item.skip_reason = "video_processing_not_ready"
+        elif junk_reason and not download_all:
+            item.selected_for_download = False
+            item.skip_reason = junk_reason
 
-    if download_all:
-        return candidates
-
-    # Photo Burst Deduplication
-    photo_indices = sorted(
-        [i for i, it in enumerate(candidates) if it.media_type == "photo"],
-        key=lambda i: (candidates[i].creation_time or "9999", candidates[i].filename, i),
-    )
-    burst_counter = 0
-    assigned_burst: dict[int, int] = {}
     parsed_times: dict[int, Optional[datetime]] = {
-        i: parse_iso_utc(candidates[i].creation_time) for i in photo_indices
+        i: parse_iso_utc(candidates[i].creation_time) for i in range(len(candidates))
     }
 
-    for pos, i in enumerate(photo_indices):
-        if i not in assigned_burst:
-            burst_counter += 1
-            assigned_burst[i] = burst_counter
-        grp = assigned_burst[i]
-        t_a = parsed_times[i]
-        h_a = candidates[i].dhash
-        sig_a = sig_map.get(i)
+    if download_all:
+        _segment_event_clusters(list(enumerate(candidates)), parsed_times)
+        return candidates
 
-        for pos_b in range(pos + 1, min(len(photo_indices), pos + 6)):
-            j = photo_indices[pos_b]
-            if j in assigned_burst:
-                continue
-            t_b = parsed_times[j]
-            close_in_time = True
-            if t_a is not None and t_b is not None:
-                close_in_time = abs((t_b - t_a).total_seconds()) <= 12.0
-            if not close_in_time:
-                continue
+    # Video Live-Photo companion suppression & duplicate video deduplication
+    _dedupe_and_filter_videos(candidates, parsed_times)
 
-            is_dup = False
-            h_b = candidates[j].dhash
-            if h_a and h_b and _hamming_distance_hex(h_a, h_b) <= 11:
-                is_dup = True
-            elif sig_a is not None and j in sig_map:
-                sig_b = sig_map[j]
-                if (
-                    compute_zoom_tolerant_visual_similarity(
-                        sig_a[0], sig_a[1], sig_a[2], sig_b[0], sig_b[1], sig_b[2]
-                    )
-                    >= 0.88
-                ):
-                    is_dup = True
-            if is_dup:
-                assigned_burst[j] = grp
+    # Seed-Anchored Anti-Chaining Photo Burst & Cross-Camera Near-Duplicate Clustering
+    # (Anchored to each cluster's seed frame so similar warm/gold museum rooms can NEVER
+    # transitively chain distinct paintings or galleries into a single mega-cluster!)
+    photo_indices = sorted(
+        [i for i, it in enumerate(candidates) if it.media_type == "photo" and it.selected_for_download],
+        key=lambda i: (candidates[i].creation_time or "9999", candidates[i].filename, i),
+    )
+
+    def _cam_bucket(idx_c: int) -> str:
+        c = candidates[idx_c]
+        return (c.camera_make_model or ("dedicated" if _is_dedicated_camera(c.camera_make_model, c.filename) else "generic")).strip().lower()
 
     by_burst: dict[int, list[int]] = {}
-    for idx_p, grp_id in assigned_burst.items():
-        by_burst.setdefault(grp_id, []).append(idx_p)
-        candidates[idx_p].burst_group_id = f"burst_{grp_id:03d}"
+    cluster_seeds: list[tuple[int, int]] = []  # (cluster_id, seed_cand_idx)
+
+    for idx_p in photo_indices:
+        t_cur = parsed_times[idx_p]
+        h_cur = candidates[idx_p].dhash
+        sig_cur = sig_map.get(idx_p)
+        cam_cur = _cam_bucket(idx_p)
+
+        matched_cid: Optional[int] = None
+        best_match_score = -1.0
+
+        # Compare directly against active cluster seeds (prevents single-linkage transitive chaining!)
+        for cid, seed_idx in reversed(cluster_seeds):
+            t_seed = parsed_times[seed_idx]
+            dt_sec: Optional[float] = None
+            if t_cur is not None and t_seed is not None:
+                dt_sec = abs((t_cur - t_seed).total_seconds())
+                # Stop checking old seeds (> 10 min) unless exact dHash check on recent 25 clusters
+                if dt_sec > 600.0 and (len(cluster_seeds) - cid) > 25:
+                    continue
+
+            h_seed = candidates[seed_idx].dhash
+            h_dist = _hamming_distance_hex(h_cur, h_seed) if (h_cur and h_seed) else 64
+            sig_seed = sig_map.get(seed_idx)
+            lab_h = cie_lab_harmony_score(sig_cur[4], sig_seed[4]) if (sig_cur is not None and sig_seed is not None) else 0.75
+
+            is_dup = False
+            match_strength = 0.0
+            within_15s = dt_sec is None or dt_sec <= 15.0
+            within_7m = dt_sec is None or dt_sec <= 420.0
+            diff_cam = cam_cur != _cam_bucket(seed_idx)
+
+            # Rule 1: Near-identical duplicate regardless of time gap
+            if h_dist <= 2 and lab_h >= 0.85:
+                is_dup = True
+                match_strength = 2.0 - h_dist * 0.1
+            # Rule 2: Rapid burst sequence (<= 15s from cluster seed)
+            elif within_15s and h_dist <= 10 and lab_h >= 0.65:
+                is_dup = True
+                match_strength = 1.6 - h_dist * 0.05
+            elif within_15s and h_dist <= 16 and lab_h >= 0.65 and sig_cur is not None and sig_seed is not None:
+                z_sim = compute_zoom_tolerant_visual_similarity(
+                    sig_cur[0], sig_cur[1], sig_cur[2], sig_seed[0], sig_seed[1], sig_seed[2]
+                )
+                if z_sim >= 0.94:
+                    is_dup = True
+                    match_strength = z_sim
+            # Rule 3: Non-adjacent re-frame or dual-camera (Sony + Pixel) match within 7 minutes
+            elif within_7m and h_dist <= 6 and lab_h >= 0.78:
+                is_dup = True
+                match_strength = 1.4 - h_dist * 0.05
+            elif within_7m and (diff_cam or (dt_sec is not None and dt_sec <= 60.0)) and h_dist <= 12 and lab_h >= 0.72 and sig_cur is not None and sig_seed is not None:
+                z_sim = compute_zoom_tolerant_visual_similarity(
+                    sig_cur[0], sig_cur[1], sig_cur[2], sig_seed[0], sig_seed[1], sig_seed[2]
+                )
+                if z_sim >= 0.955:
+                    is_dup = True
+                    match_strength = z_sim
+
+            if is_dup and match_strength > best_match_score:
+                best_match_score = match_strength
+                matched_cid = cid
+
+        if matched_cid is None:
+            new_cid = len(cluster_seeds) + 1
+            cluster_seeds.append((new_cid, idx_p))
+            by_burst[new_cid] = [idx_p]
+            candidates[idx_p].burst_group_id = f"burst_{new_cid:03d}"
+        else:
+            by_burst[matched_cid].append(idx_p)
+            candidates[idx_p].burst_group_id = f"burst_{matched_cid:03d}"
+
+    # Inherit smartphone GPS onto dedicated-camera frames before discarding burst losers
+    _inherit_dual_camera_gps(candidates, photo_indices, parsed_times, by_burst)
 
     kept_photos: list[tuple[int, CloudMediaCandidateItem]] = []
-    for grp_id in sorted(by_burst):
-        members = by_burst[grp_id]
-        best_i = max(members, key=lambda idx_m: (candidates[idx_m].is_favorite, candidates[idx_m].taste_score, -idx_m))
+    for cid in sorted(by_burst):
+        members = by_burst[cid]
+        best_i = max(
+            members,
+            key=lambda idx_m: (
+                candidates[idx_m].is_favorite,
+                round(
+                    candidates[idx_m].taste_score
+                    + (0.45 if _is_dedicated_camera(candidates[idx_m].camera_make_model, candidates[idx_m].filename) else 0.0),
+                    2,
+                ),
+                eye_smile_map.get(idx_m, (1.0, 0.0))[0],
+                eye_smile_map.get(idx_m, (1.0, 0.0))[1],
+                int(candidates[idx_m].width) * int(candidates[idx_m].height),
+                -idx_m,
+            ),
+        )
+        candidates[best_i].burst_cluster_size = len(members)
         kept_photos.append((best_i, candidates[best_i]))
         for m_idx in members:
             if m_idx != best_i:
+                candidates[m_idx].burst_cluster_size = len(members)
                 candidates[m_idx].selected_for_download = False
                 candidates[m_idx].skip_reason = "burst_duplicate"
 
@@ -845,26 +1384,187 @@ def select_necessary_cloud_items(
                     filtered_photos.append((idx_p, it_p))
             kept_photos = filtered_photos or kept_photos
 
-    # Enforce stratified chronological photo budget
+    # Segment all surviving media into temporal/GPS Event Clusters
+    eligible_videos = [
+        (i, it) for i, it in enumerate(candidates) if it.media_type == "video" and it.selected_for_download
+    ]
+    event_map = _segment_event_clusters(kept_photos + eligible_videos, parsed_times)
+
+    # Event-Clustered Submodular MMR portfolio selection for photos
     if len(kept_photos) > photo_budget:
-        winner_ids = _stratified_budget_indices(kept_photos, photo_budget)
+        winner_ids = _select_video_editing_mmr_portfolio(kept_photos, photo_budget, sig_map, event_map)
         for idx_p, it_p in kept_photos:
             if idx_p not in winner_ids:
                 it_p.selected_for_download = False
                 it_p.skip_reason = "over_photo_budget"
+    else:
+        for _, it_p in kept_photos:
+            it_p.mmr_score = round(min(1.0, it_p.taste_score / 10.0), 4)
 
-    # Enforce stratified chronological video budget
-    eligible_videos = [
-        (i, it) for i, it in enumerate(candidates) if it.media_type == "video" and it.selected_for_download
-    ]
+    # Event-Clustered Submodular MMR portfolio selection for videos
     if len(eligible_videos) > video_budget:
-        winner_vids = _stratified_budget_indices(eligible_videos, video_budget)
+        winner_vids = _select_video_editing_mmr_portfolio(eligible_videos, video_budget, sig_map, event_map)
         for idx_v, it_v in eligible_videos:
             if idx_v not in winner_vids:
                 it_v.selected_for_download = False
                 it_v.skip_reason = "over_video_budget"
 
     return candidates
+
+
+def render_cloud_scan_contact_sheets(
+    items: list[CloudMediaCandidateItem],
+    output_dir: str | Path,
+    title: str = "Google Photos Smart Cloud Scan",
+    tiles_per_page: int = 20,
+    include_burst_duplicates: bool = False,
+) -> tuple[list[Path], Path]:
+    """
+    Render paginated 5x4 (20 tiles/page) cloud scan contact sheets covering ALL unique/deduped candidates
+    (zero 40-tile truncation!), plus `cloud_scan_tile_map.json` for Pass-1.5 AI Vision rescues.
+    """
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    legacy_p = out_dir / "cloud_scan_contact_sheet.jpg"
+
+    if include_burst_duplicates or len(items) <= tiles_per_page:
+        display_items = list(items)
+    else:
+        display_items = [it for it in items if it.skip_reason != "burst_duplicate"]
+        if not display_items:
+            display_items = list(items)
+
+    # Sort chronologically for natural narrative scanning
+    display_items.sort(key=lambda it: (it.creation_time or "9999", it.filename, it.cloud_item_id))
+
+    per_page = max(4, int(tiles_per_page))
+    cols = 5 if per_page >= 15 else 4
+    total_pages = max(1, (max(1, len(display_items)) + per_page - 1) // per_page)
+    sel_cnt = sum(1 for it in items if it.selected_for_download)
+    burst_collapsed = sum(1 for it in items if it.skip_reason == "burst_duplicate")
+    skip_cnt = len(items) - sel_cnt
+
+    f_hdr = _get_cjk_font(22)
+    f_sub = _get_cjk_font(14)
+    f_badge = _get_cjk_font(12)
+
+    tile_w, tile_h = 360, 245
+    margin = 16
+    header_h = 72
+    sheet_paths: list[Path] = []
+    tile_map: dict[str, dict[str, Any]] = {}
+
+    for page_idx in range(total_pages):
+        chunk = display_items[page_idx * per_page : (page_idx + 1) * per_page]
+        rows = max(1, (max(1, len(chunk)) + cols - 1) // cols)
+        canvas_w = cols * tile_w + (cols + 1) * margin
+        canvas_h = header_h + rows * tile_h + (rows + 1) * margin
+
+        canvas = Image.new("RGB", (canvas_w, canvas_h), (14, 18, 26))
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle([0, 0, canvas_w, header_h - 4], fill=(20, 27, 39))
+        draw.text((margin, 12), f"{title}  ·  Page {page_idx + 1}/{total_pages}", font=f_hdr, fill=(242, 246, 252))
+        draw.text(
+            (margin, 44),
+            f"Scanned: {len(items)}  |  Selected: {sel_cnt}  |  Skipped: {skip_cnt} ({burst_collapsed} burst dups collapsed)  |  Showing unique heroes #{page_idx * per_page + 1}-{page_idx * per_page + len(chunk)}",
+            font=f_sub,
+            fill=(146, 206, 244),
+        )
+
+        for local_i, it in enumerate(chunk):
+            global_num = page_idx * per_page + local_i + 1
+            tile_id = f"#{global_num:02d}"
+            tile_map[tile_id] = {
+                "cloud_item_id": it.cloud_item_id,
+                "filename": it.filename,
+                "selected": it.selected_for_download,
+                "skip_reason": it.skip_reason,
+                "media_type": it.media_type,
+                "event_cluster_id": it.event_cluster_id,
+            }
+
+            r, c = divmod(local_i, cols)
+            x0 = margin + c * (tile_w + margin)
+            y0 = header_h + margin + r * (tile_h + margin)
+            is_sel = it.selected_for_download
+            is_runner_up = (not is_sel) and (it.skip_reason in ("over_photo_budget", "over_video_budget"))
+            border_col = (
+                (250, 204, 21)
+                if (is_sel and it.is_favorite)
+                else ((54, 211, 153) if is_sel else ((96, 165, 250) if is_runner_up else (245, 158, 11)))
+            )
+            draw.rounded_rectangle([x0 - 2, y0 - 2, x0 + tile_w + 2, y0 + tile_h + 2], radius=8, outline=border_col, width=2)
+            draw.rounded_rectangle([x0, y0, x0 + tile_w, y0 + tile_h], radius=6, fill=(24, 30, 42))
+
+            img_h = tile_h - 54
+            thumb_loaded = False
+            for cand_p in (it.proxy_thumbnail_path, it.downloaded_path):
+                if cand_p and Path(cand_p).is_file():
+                    try:
+                        with Image.open(cand_p) as im:
+                            fitted = ImageOps.fit(ImageOps.exif_transpose(im).convert("RGB"), (tile_w - 8, img_h - 6))
+                            if not is_sel:
+                                fitted = Image.blend(fitted, Image.new("RGB", fitted.size, (18, 22, 30)), alpha=0.38 if is_runner_up else 0.52)
+                            canvas.paste(fitted, (x0 + 4, y0 + 4))
+                            thumb_loaded = True
+                            break
+                    except Exception:
+                        continue
+            if not thumb_loaded:
+                draw.rectangle([x0 + 4, y0 + 4, x0 + tile_w - 4, y0 + img_h], fill=(32, 40, 56))
+                draw.text((x0 + 16, y0 + img_h // 2 - 8), f"[{it.media_type.upper()}] {it.filename[:24]}", font=f_sub, fill=(190, 200, 216))
+
+            skip_short = {
+                "video_processing_not_ready": "processing",
+                "over_photo_budget": "RUNNER-UP",
+                "over_video_budget": "RUNNER-UP",
+                "screenshot_or_junk": "SCREENSHOT",
+                "live_photo_companion": "LIVE_MOV",
+                "duplicate_video": "DUP_VID",
+            }.get(it.skip_reason or "", (it.skip_reason or "filtered")[:14])
+            fav_prefix = "★" if it.is_favorite else ""
+            if is_sel:
+                badge_txt = f"{tile_id} {fav_prefix}SEL"
+                badge_bg = (16, 128, 86)
+            elif is_runner_up:
+                badge_txt = f"{tile_id} {fav_prefix}RUNNER-UP"
+                badge_bg = (37, 99, 178)
+            else:
+                badge_txt = f"{tile_id} {fav_prefix}SKIP:{skip_short}"
+                badge_bg = (146, 78, 12)
+            bw = min(tile_w - 110, max(78, len(badge_txt) * 7 + 16))
+            draw.rounded_rectangle([x0 + 8, y0 + 8, x0 + 8 + bw, y0 + 30], radius=5, fill=badge_bg)
+            draw.text((x0 + 14, y0 + 12), badge_txt, font=f_badge, fill=(248, 250, 252))
+
+            ori_tag = {"landscape": "16:9", "portrait": "9:16", "square": "1:1"}.get(it.orientation, "")
+            kind_txt = f"{'VID' if it.media_type == 'video' else 'IMG'} {ori_tag} {it.taste_score:.1f}".replace("  ", " ").strip()
+            kw = len(kind_txt) * 7 + 14
+            draw.rounded_rectangle([x0 + tile_w - kw - 8, y0 + 8, x0 + tile_w - 8, y0 + 30], radius=5, fill=(15, 23, 38))
+            draw.text((x0 + tile_w - kw - 2, y0 + 12), kind_txt, font=f_badge, fill=(196, 224, 248))
+
+            if it.burst_cluster_size > 1:
+                b_txt = f"+{it.burst_cluster_size - 1} burst"
+                bbw = len(b_txt) * 7 + 12
+                draw.rounded_rectangle([x0 + tile_w - bbw - 8, y0 + img_h - 26, x0 + tile_w - 8, y0 + img_h - 6], radius=4, fill=(15, 23, 38))
+                draw.text((x0 + tile_w - bbw - 2, y0 + img_h - 23), b_txt, font=f_badge, fill=(250, 204, 21))
+
+            ts_short = (it.creation_time or "")[:16].replace("T", " ")
+            ev_short = (it.event_cluster_id or "").replace("event_", "E")
+            cam_short = (it.camera_make_model or "")[:14]
+            gps_mark = " GPS" if (it.gps_lat is not None and it.gps_lon is not None) else ""
+            draw.text((x0 + 8, y0 + img_h + 7), f"{tile_id} {it.filename[:30]}", font=f_sub, fill=(236, 240, 246))
+            draw.text((x0 + 8, y0 + img_h + 27), f"{ev_short} {ts_short} {cam_short}{gps_mark}".strip(), font=f_badge, fill=(148, 163, 184))
+
+        page_p = out_dir / f"cloud_scan_sheet_{page_idx + 1:02d}.jpg"
+        canvas.save(page_p, "JPEG", quality=90)
+        sheet_paths.append(page_p.resolve())
+
+    if sheet_paths:
+        shutil.copy2(sheet_paths[0], legacy_p)
+    (out_dir / "cloud_scan_tile_map.json").write_text(
+        json.dumps(tile_map, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return sheet_paths, legacy_p.resolve()
 
 
 def render_cloud_scan_contact_sheet(
@@ -874,86 +1574,17 @@ def render_cloud_scan_contact_sheet(
     max_tiles: int = 40,
 ) -> Path:
     """Render an inspection contact sheet contrasting SELECTED vs SKIPPED cloud candidates."""
-    out_p = Path(output_jpg)
+    out_p = Path(output_jpg).resolve()
     out_p.parent.mkdir(parents=True, exist_ok=True)
-    shown = list(items[:max_tiles])
-    cols = 4
-    rows = max(1, (max(1, len(shown)) + cols - 1) // cols)
-    tile_w, tile_h = 380, 250
-    margin = 18
-    header_h = 74
-    canvas_w = cols * tile_w + (cols + 1) * margin
-    canvas_h = header_h + rows * tile_h + (rows + 1) * margin
-
-    canvas = Image.new("RGB", (canvas_w, canvas_h), (14, 18, 26))
-    draw = ImageDraw.Draw(canvas)
-    f_hdr = _get_cjk_font(24)
-    f_sub = _get_cjk_font(15)
-    f_badge = _get_cjk_font(13)
-
-    sel_cnt = sum(1 for it in items if it.selected_for_download)
-    skip_cnt = len(items) - sel_cnt
-    draw.rectangle([0, 0, canvas_w, header_h - 4], fill=(20, 27, 39))
-    draw.text((margin, 14), title, font=f_hdr, fill=(242, 246, 252))
-    draw.text(
-        (margin, 46),
-        f"In-Range Scanned: {len(items)}  |  Selected for High-Res Download: {sel_cnt}  |  Skipped (Bandwidth Saved): {skip_cnt}",
-        font=f_sub,
-        fill=(146, 206, 244),
+    sheet_paths, legacy_p = render_cloud_scan_contact_sheets(
+        items=items,
+        output_dir=out_p.parent,
+        title=title,
+        tiles_per_page=max(20, min(40, int(max_tiles))),
+        include_burst_duplicates=len(items) <= max_tiles,
     )
-
-    for idx, it in enumerate(shown):
-        r, c = divmod(idx, cols)
-        x0 = margin + c * (tile_w + margin)
-        y0 = header_h + margin + r * (tile_h + margin)
-        is_sel = it.selected_for_download
-        border_col = (250, 204, 21) if (is_sel and it.is_favorite) else ((54, 211, 153) if is_sel else (245, 158, 11))
-        draw.rounded_rectangle([x0 - 2, y0 - 2, x0 + tile_w + 2, y0 + tile_h + 2], radius=8, outline=border_col, width=2)
-        draw.rounded_rectangle([x0, y0, x0 + tile_w, y0 + tile_h], radius=6, fill=(24, 30, 42))
-
-        img_h = tile_h - 54
-        thumb_loaded = False
-        for cand_p in (it.proxy_thumbnail_path, it.downloaded_path):
-            if cand_p and Path(cand_p).is_file():
-                try:
-                    with Image.open(cand_p) as im:
-                        fitted = ImageOps.fit(ImageOps.exif_transpose(im).convert("RGB"), (tile_w - 8, img_h - 6))
-                        if not is_sel:
-                            fitted = Image.blend(fitted, Image.new("RGB", fitted.size, (18, 22, 30)), alpha=0.45)
-                        canvas.paste(fitted, (x0 + 4, y0 + 4))
-                        thumb_loaded = True
-                        break
-                except Exception:
-                    continue
-        if not thumb_loaded:
-            draw.rectangle([x0 + 4, y0 + 4, x0 + tile_w - 4, y0 + img_h], fill=(32, 40, 56))
-            draw.text((x0 + 18, y0 + img_h // 2 - 8), f"[{it.media_type.upper()}] {it.filename}", font=f_sub, fill=(190, 200, 216))
-
-        # Status badge (top-left) and media-type pill (top-right)
-        skip_short = {
-            "video_processing_not_ready": "video_processing",
-            "over_photo_budget": "over_budget",
-            "over_video_budget": "over_budget",
-        }.get(it.skip_reason or "", (it.skip_reason or "filtered")[:20])
-        fav_prefix = "★FAV " if it.is_favorite else ""
-        badge_txt = f"{fav_prefix}SELECTED" if is_sel else f"{fav_prefix}SKIP: {skip_short}"
-        badge_bg = (16, 128, 86) if is_sel else (146, 78, 12)
-        bw = max(84, len(badge_txt) * 8 + 16)
-        draw.rounded_rectangle([x0 + 10, y0 + 10, x0 + 10 + bw, y0 + 32], radius=5, fill=badge_bg)
-        draw.text((x0 + 17, y0 + 14), badge_txt, font=f_badge, fill=(248, 250, 252))
-
-        kind_txt = f"{it.media_type.upper()}  {it.taste_score:.1f}"
-        kw = len(kind_txt) * 8 + 14
-        draw.rounded_rectangle([x0 + tile_w - kw - 10, y0 + 10, x0 + tile_w - 10, y0 + 32], radius=5, fill=(15, 23, 38))
-        draw.text((x0 + tile_w - kw - 3, y0 + 14), kind_txt, font=f_badge, fill=(196, 224, 248))
-
-        # Footer metadata line
-        ts_short = (it.creation_time or "")[:16].replace("T", " ")
-        cam_short = (it.camera_make_model or "")[:20]
-        draw.text((x0 + 10, y0 + img_h + 7), f"#{idx + 1:02d} {it.filename[:32]}", font=f_sub, fill=(236, 240, 246))
-        draw.text((x0 + 10, y0 + img_h + 27), f"{ts_short}  {cam_short}".strip(), font=f_badge, fill=(148, 163, 184))
-
-    canvas.save(out_p, "JPEG", quality=90)
+    if legacy_p != out_p and sheet_paths:
+        shutil.copy2(sheet_paths[0], out_p)
     return out_p
 
 
@@ -961,17 +1592,17 @@ def _stage_selected_items_into_cloud_media(
     items: list[CloudMediaCandidateItem],
     staged_dir: Path,
 ) -> Path:
+    staged_dir = staged_dir.resolve()
     staged_dir.mkdir(parents=True, exist_ok=True)
-    # Remove previously staged files so cloud_media reflects the latest selection cleanly
-    for old_f in list(staged_dir.iterdir()):
-        if old_f.is_file() or old_f.is_symlink():
-            old_f.unlink()
 
+    # Plan destination names BEFORE touching staged_dir so re-staging never unlinks an active source file
+    planned_moves: list[tuple[CloudMediaCandidateItem, Path, Path]] = []
+    keep_dst_resolved: set[Path] = set()
     used_names: set[str] = set()
     for idx, it in enumerate(items, start=1):
         if not it.selected_for_download or not it.downloaded_path:
             continue
-        src = Path(it.downloaded_path)
+        src = Path(it.downloaded_path).resolve()
         if not src.is_file():
             continue
         candidate_name = _safe_filename(it.filename, f"cloud_{idx:04d}", it.mime_type, it.media_type)
@@ -981,13 +1612,26 @@ def _stage_selected_items_into_cloud_media(
             short_h = hashlib.sha1(it.cloud_item_id.encode("utf-8")).hexdigest()[:6]
             candidate_name = f"{stem}_{short_h}{suffix}"
         used_names.add(candidate_name.lower())
-        dst = staged_dir / candidate_name
+        dst = (staged_dir / candidate_name).resolve()
+        keep_dst_resolved.add(dst)
+        planned_moves.append((it, src, dst))
+
+    for old_f in list(staged_dir.iterdir()):
+        if (old_f.is_file() or old_f.is_symlink()) and old_f.resolve() not in keep_dst_resolved:
+            old_f.unlink()
+
+    for it, src, dst in planned_moves:
+        if src == dst:
+            it.downloaded_path = str(dst)
+            continue
+        if dst.exists() or dst.is_symlink():
+            dst.unlink()
         try:
             os.link(src, dst)
         except Exception:
             shutil.copy2(src, dst)
-        it.downloaded_path = str(dst.resolve())
-    return staged_dir.resolve()
+        it.downloaded_path = str(dst)
+    return staged_dir
 
 
 def _picker_item_to_candidate(raw: dict[str, Any]) -> CloudMediaCandidateItem:
@@ -1040,6 +1684,8 @@ def sync_google_photos_media(
     max_photos: Optional[int] = None,
     max_videos: Optional[int] = None,
     download_all: bool = False,
+    headroom_multiplier: float = 1.6,
+    plan_only: bool = False,
     session_id: Optional[str] = None,
     open_browser: bool = True,
     client_secrets_path: Optional[str | Path] = None,
@@ -1091,7 +1737,7 @@ def sync_google_photos_media(
         }
         candidates = [_picker_item_to_candidate(it) for it in in_range_raw]
 
-        # Pass 1: Parallel 512px proxy thumbnail download for perceptual scoring & burst deduplication
+        # Pass 1: Pooled HTTP/2 16-worker 512px proxy thumbnail download for perceptual scoring & burst dedup
         def _fetch_thumb(cand: CloudMediaCandidateItem) -> None:
             b_url = base_url_by_id.get(cand.cloud_item_id, "")
             if not b_url:
@@ -1107,7 +1753,7 @@ def sync_google_photos_media(
                 cand.proxy_thumbnail_path = str(thumb_p.resolve())
 
         if candidates:
-            workers = max(1, min(get_io_worker_count(8), len(candidates)))
+            workers = max(1, min(get_io_worker_count(16), len(candidates)))
             if workers == 1:
                 for c in candidates:
                     _fetch_thumb(c)
@@ -1121,49 +1767,71 @@ def sync_google_photos_media(
             max_photos=max_photos,
             max_videos=max_videos,
             download_all=download_all,
+            headroom_multiplier=headroom_multiplier,
         )
 
-        # Render Pass-1 smart scan contact sheet before Pass 2
-        sheet_p = proj / "contact_sheets" / "cloud_scan_contact_sheet.jpg"
-        render_cloud_scan_contact_sheet(
+        # Render Pass-1.5 paginated 5x4 contact sheets covering ALL unique cluster heroes
+        sheet_paths, legacy_sheet_p = render_cloud_scan_contact_sheets(
             candidates,
-            sheet_p,
+            proj / "contact_sheets",
             title=f"Google Photos Scan ({date_from or 'All'} -> {date_to or 'All'})",
         )
 
-        # Pass 2: Download full-res originals ONLY for selected items
-        selected_cands = [c for c in candidates if c.selected_for_download]
+        # Persist session base URLs privately so Pass-1.5 apply_cloud_pick_overrides can execute Pass 2 cleanly
+        picker_ctx_p = proj / "cache" / "picker_session_urls.json"
+        picker_ctx_p.parent.mkdir(parents=True, exist_ok=True)
+        picker_ctx_p.write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "api_base_url": client.api_base_url,
+                    "cache_dir": str(cache_root),
+                    "client_secrets_path": str(auth.client_secrets_path),
+                    "token_path": str(auth.token_path),
+                    "base_urls": base_url_by_id,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
         cache_hits = 0
+        staged_dir = (proj / "cloud_media").resolve()
+        if not plan_only:
+            # Pass 2: Pooled parallel full-res original download ONLY for selected items
+            selected_cands = [c for c in candidates if c.selected_for_download]
 
-        def _fetch_original(cand: CloudMediaCandidateItem) -> None:
-            b_url = base_url_by_id.get(cand.cloud_item_id, "")
-            if not b_url:
-                cand.selected_for_download = False
-                cand.skip_reason = "missing_base_url"
-                return
-            h_id = hashlib.sha1(cand.cloud_item_id.encode("utf-8")).hexdigest()[:16]
-            safe_n = _safe_filename(cand.filename, h_id, cand.mime_type, cand.media_type)
-            orig_p = orig_dir / f"{h_id}_{safe_n}"
-            if orig_p.is_file() and orig_p.stat().st_size > 0:
-                cand.cache_hit = True
-            else:
-                mod = "dv" if cand.media_type == "video" else "d"
-                client.download_media_file(b_url, orig_p, modifier=mod)
-            cand.downloaded_path = str(orig_p.resolve())
+            def _fetch_original(cand: CloudMediaCandidateItem) -> None:
+                b_url = base_url_by_id.get(cand.cloud_item_id, "")
+                if not b_url:
+                    cand.selected_for_download = False
+                    cand.skip_reason = "missing_base_url"
+                    return
+                h_id = hashlib.sha1(cand.cloud_item_id.encode("utf-8")).hexdigest()[:16]
+                safe_n = _safe_filename(cand.filename, h_id, cand.mime_type, cand.media_type)
+                orig_p = orig_dir / f"{h_id}_{safe_n}"
+                if orig_p.is_file() and orig_p.stat().st_size > 0:
+                    cand.cache_hit = True
+                else:
+                    mod = "dv" if cand.media_type == "video" else "d"
+                    client.download_media_file(b_url, orig_p, modifier=mod)
+                cand.downloaded_path = str(orig_p.resolve())
 
-        if selected_cands:
-            workers = max(1, min(4, len(selected_cands)))
-            if workers == 1:
-                for c in selected_cands:
-                    _fetch_original(c)
-            else:
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    list(pool.map(_fetch_original, selected_cands))
-            cache_hits = sum(1 for c in selected_cands if c.cache_hit)
+            if selected_cands:
+                workers = max(1, min(6, len(selected_cands)))
+                if workers == 1:
+                    for c in selected_cands:
+                        _fetch_original(c)
+                else:
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        list(pool.map(_fetch_original, selected_cands))
+                cache_hits = sum(1 for c in selected_cands if c.cache_hit)
 
-        staged_dir = _stage_selected_items_into_cloud_media(candidates, proj / "cloud_media")
+            staged_dir = _stage_selected_items_into_cloud_media(candidates, proj / "cloud_media")
+
         sel_photos = sum(1 for c in candidates if c.selected_for_download and c.media_type == "photo")
         sel_videos = sum(1 for c in candidates if c.selected_for_download and c.media_type == "video")
+        ev_cnt = len({c.event_cluster_id for c in candidates if c.event_cluster_id})
 
         manifest = GooglePhotosSyncManifest(
             source_mode="google_photos_picker",
@@ -1172,21 +1840,25 @@ def sync_google_photos_media(
             date_to=date_to,
             timezone_name=tz_name,
             download_policy="download_all" if download_all else "smart_two_pass",
+            download_stage="planned_only" if plan_only else "completed",
             total_scanned_in_session=len(raw_items),
             in_date_range_count=len(candidates),
             selected_photos_count=sel_photos,
             selected_videos_count=sel_videos,
             skipped_count=len(candidates) - (sel_photos + sel_videos),
             cache_hits_count=cache_hits,
+            event_clusters_count=ev_cnt,
             staged_media_dir=str(staged_dir),
-            scan_contact_sheet_path=str(sheet_p.resolve()),
+            scan_contact_sheet_path=str(legacy_sheet_p),
+            scan_contact_sheet_paths=[str(p) for p in sheet_paths],
             items=candidates,
         )
         manifest.to_json_file(proj / "google_photos_manifest.json")
         return manifest
     finally:
-        if created_here and session_id:
+        if created_here and session_id and not plan_only:
             client.delete_session(session_id)
+        client.close()
 
 
 def _extract_takeout_json_fields(raw_json: dict[str, Any]) -> dict[str, Any]:
@@ -1340,9 +2012,14 @@ def sync_google_takeout_media(
     max_photos: Optional[int] = None,
     max_videos: Optional[int] = None,
     download_all: bool = False,
+    headroom_multiplier: float = 1.6,
+    plan_only: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> GooglePhotosSyncManifest:
-    """Ingest an exported Google Takeout directory or `.zip`, filter [date_from, date_to], and run smart curation."""
+    """
+    Ingest an exported Google Takeout directory or `.zip`, filter [date_from, date_to], and run smart curation.
+    Uses Lazy Two-Pass ZIP extraction so skipped/unselected videos are NEVER extracted to disk.
+    """
     src = Path(takeout_source).resolve()
     if not src.exists():
         raise FileNotFoundError(f"Google Takeout path does not exist: {src}")
@@ -1356,10 +2033,11 @@ def sync_google_takeout_media(
 
     start_utc, end_utc = parse_date_range_bounds_utc(date_from, date_to, tz_name=tz_name)
     candidates: list[CloudMediaCandidateItem] = []
-    source_paths_by_id: dict[str, Path] = {}
+    deferred_zip_videos: dict[str, tuple[str, Path]] = {}
     total_scanned = 0
+    is_zip_src = bool(src.is_file() and src.suffix.lower() == ".zip")
 
-    if src.is_file() and src.suffix.lower() == ".zip":
+    if is_zip_src:
         with zipfile.ZipFile(src, "r") as zf:
             infos = [zi for zi in zf.infolist() if not zi.is_dir()]
             json_by_dir: dict[str, dict[str, str]] = {}
@@ -1391,31 +2069,54 @@ def sync_google_takeout_media(
 
                 item_id = f"takeout_{hashlib.sha1(zi.filename.encode('utf-8')).hexdigest()[:14]}"
                 out_file = extracted_dir / f"{idx:04d}_{Path(zi.filename).name}"
-                # Extract in-range photos (small) and in-range videos to cache for Pass-1 & staging
+                is_fav = bool(side_meta.get("is_favorite"))
+
+                if mtype == "video":
+                    # Lazy Two-Pass: defer extracting heavy video payloads until AFTER Pass-1 selection!
+                    deferred_zip_videos[item_id] = (zi.filename, out_file)
+                    dl_str = str(out_file.resolve()) if (out_file.is_file() and out_file.stat().st_size == zi.file_size) else None
+                    thumb_cached = thumbs_dir / f"{item_id}.jpg"
+                    thumb_p = thumb_cached if (thumb_cached.is_file() and thumb_cached.stat().st_size > 0) else None
+                    candidates.append(
+                        CloudMediaCandidateItem(
+                            cloud_item_id=item_id,
+                            source_provider="google_takeout",
+                            filename=Path(zi.filename).name,
+                            mime_type=_EXT_TO_MIME.get(ext, "video/mp4"),
+                            media_type="video",
+                            creation_time=c_time,
+                            gps_lat=side_meta.get("gps_lat"),
+                            gps_lon=side_meta.get("gps_lon"),
+                            gps_alt=side_meta.get("gps_alt"),
+                            proxy_thumbnail_path=str(thumb_p.resolve()) if thumb_p else None,
+                            downloaded_path=dl_str,
+                            is_favorite=is_fav,
+                        )
+                    )
+                    continue
+
+                # Photos are small: extract for Pass-1 512px thumbnail perception & EXIF
                 if not (out_file.is_file() and out_file.stat().st_size == zi.file_size):
                     with zf.open(zi, "r") as zsrc, out_file.open("wb") as dst_fh:
                         shutil.copyfileobj(zsrc, dst_fh, length=1024 * 1024)
 
-                source_paths_by_id[item_id] = out_file
-                thumb_p = _extract_photo_or_video_thumb(out_file, thumbs_dir / f"{item_id}.jpg", mtype)
+                thumb_p = _extract_photo_or_video_thumb(out_file, thumbs_dir / f"{item_id}.jpg", "photo")
                 cam = None
                 w, h = 0, 0
-                is_fav = bool(side_meta.get("is_favorite"))
-                if mtype == "photo":
-                    try:
-                        with Image.open(out_file) as im:
-                            w, h = im.size
-                            cam, _ = _extract_exif_camera_info(im, out_file)
-                            is_fav = is_fav or extract_exif_is_favorite(im, out_file)
-                    except Exception:
-                        pass
+                try:
+                    with Image.open(out_file) as im:
+                        w, h = im.size
+                        cam, _ = _extract_exif_camera_info(im, out_file)
+                        is_fav = is_fav or extract_exif_is_favorite(im, out_file)
+                except Exception:
+                    pass
                 candidates.append(
                     CloudMediaCandidateItem(
                         cloud_item_id=item_id,
                         source_provider="google_takeout",
                         filename=Path(zi.filename).name,
-                        mime_type=_EXT_TO_MIME.get(ext, "video/mp4" if mtype == "video" else "image/jpeg"),
-                        media_type=mtype,
+                        mime_type=_EXT_TO_MIME.get(ext, "image/jpeg"),
+                        media_type="photo",
                         creation_time=c_time,
                         width=w,
                         height=h,
@@ -1437,11 +2138,12 @@ def sync_google_takeout_media(
 
         media_files = [f for f in all_files if f.suffix.lower() in PHOTO_EXTENSIONS or f.suffix.lower() in VIDEO_EXTENSIONS]
         total_scanned = len(media_files)
-        for mf_path in media_files:
+
+        def _inspect_takeout_fs_file(mf_path: Path) -> Optional[CloudMediaCandidateItem]:
             ext = mf_path.suffix.lower()
             mtype = "video" if ext in VIDEO_EXTENSIONS else "photo"
             side_key = _find_takeout_sidecar_key(str(mf_path), json_by_dir_fs)
-            side_meta = {}
+            side_meta: dict[str, Any] = {}
             if side_key and Path(side_key).is_file():
                 try:
                     side_meta = _extract_takeout_json_fields(json.loads(Path(side_key).read_text(encoding="utf-8")))
@@ -1453,7 +2155,7 @@ def sync_google_takeout_media(
             exif_lon: Optional[float] = None
             exif_alt: Optional[float] = None
             cam = None
-            w, h = 0, 0
+            w, h, fps_v, dur_v = 0, 0, (30.0 if mtype == "video" else 0.0), 0.0
             is_fav = bool(side_meta.get("is_favorite"))
             if mtype == "photo":
                 try:
@@ -1465,6 +2167,16 @@ def sync_google_takeout_media(
                         is_fav = is_fav or extract_exif_is_favorite(im, mf_path)
                 except Exception:
                     pass
+            else:
+                try:
+                    vi = probe_video_file(mf_path)
+                    w = int(vi.get("width") or 0)
+                    h = int(vi.get("height") or 0)
+                    fps_v = float(vi.get("fps") or 30.0)
+                    dur_v = float(vi.get("duration") or 0.0)
+                    cam = vi.get("camera_make_model") or cam
+                except Exception:
+                    pass
 
             c_time = (
                 side_meta.get("creation_time")
@@ -1472,29 +2184,37 @@ def sync_google_takeout_media(
                 or datetime.fromtimestamp(mf_path.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             )
             if not is_timestamp_in_range(c_time, start_utc, end_utc):
-                continue
+                return None
 
             item_id = f"takeout_{hashlib.sha1(str(mf_path).encode('utf-8')).hexdigest()[:14]}"
-            source_paths_by_id[item_id] = mf_path
             thumb_p = _extract_photo_or_video_thumb(mf_path, thumbs_dir / f"{item_id}.jpg", mtype)
-            candidates.append(
-                CloudMediaCandidateItem(
-                    cloud_item_id=item_id,
-                    source_provider="google_takeout",
-                    filename=mf_path.name,
-                    media_type=mtype,
-                    creation_time=c_time,
-                    width=w,
-                    height=h,
-                    camera_make_model=cam,
-                    gps_lat=side_meta.get("gps_lat") if side_meta.get("gps_lat") is not None else exif_lat,
-                    gps_lon=side_meta.get("gps_lon") if side_meta.get("gps_lon") is not None else exif_lon,
-                    gps_alt=side_meta.get("gps_alt") if side_meta.get("gps_alt") is not None else exif_alt,
-                    proxy_thumbnail_path=str(thumb_p.resolve()) if thumb_p else None,
-                    downloaded_path=str(mf_path.resolve()),
-                    is_favorite=is_fav,
-                )
+            return CloudMediaCandidateItem(
+                cloud_item_id=item_id,
+                source_provider="google_takeout",
+                filename=mf_path.name,
+                mime_type=_EXT_TO_MIME.get(ext, "video/mp4" if mtype == "video" else "image/jpeg"),
+                media_type=mtype,
+                creation_time=c_time,
+                width=w,
+                height=h,
+                fps=fps_v,
+                duration_sec=dur_v,
+                camera_make_model=cam,
+                gps_lat=side_meta.get("gps_lat") if side_meta.get("gps_lat") is not None else exif_lat,
+                gps_lon=side_meta.get("gps_lon") if side_meta.get("gps_lon") is not None else exif_lon,
+                gps_alt=side_meta.get("gps_alt") if side_meta.get("gps_alt") is not None else exif_alt,
+                proxy_thumbnail_path=str(thumb_p.resolve()) if thumb_p else None,
+                downloaded_path=str(mf_path.resolve()),
+                is_favorite=is_fav,
             )
+
+        workers_fs = max(1, min(get_io_worker_count(12), len(media_files)))
+        if workers_fs == 1 or len(media_files) <= 3:
+            fs_rows = [_inspect_takeout_fs_file(p) for p in media_files]
+        else:
+            with ThreadPoolExecutor(max_workers=workers_fs) as pool:
+                fs_rows = list(pool.map(_inspect_takeout_fs_file, media_files))
+        candidates = [c for c in fs_rows if c is not None]
 
     if progress_callback:
         progress_callback(f"Takeout scanned {total_scanned} items, {len(candidates)} in range [{date_from or '*'}..{date_to or '*'}].")
@@ -1505,34 +2225,256 @@ def sync_google_takeout_media(
         max_photos=max_photos,
         max_videos=max_videos,
         download_all=download_all,
+        headroom_multiplier=headroom_multiplier,
     )
-    sheet_p = proj / "contact_sheets" / "cloud_scan_contact_sheet.jpg"
-    render_cloud_scan_contact_sheet(
+
+    if is_zip_src and deferred_zip_videos:
+        # Save zip member index so Pass-1.5 apply_cloud_pick_overrides can lazily extract rescued videos
+        (cache_root / "zip_index.json").write_text(
+            json.dumps(
+                {
+                    "takeout_zip": str(src),
+                    "members": {
+                        cid: {"zip_member": zm, "extract_path": str(ep.resolve())}
+                        for cid, (zm, ep) in deferred_zip_videos.items()
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if not plan_only:
+            with zipfile.ZipFile(src, "r") as zf:
+                for cand in candidates:
+                    if not cand.selected_for_download or cand.cloud_item_id not in deferred_zip_videos:
+                        continue
+                    z_mem, out_f = deferred_zip_videos[cand.cloud_item_id]
+                    zi_sel = zf.getinfo(z_mem)
+                    if not (out_f.is_file() and out_f.stat().st_size == zi_sel.file_size):
+                        with zf.open(zi_sel, "r") as zsrc, out_f.open("wb") as dst_fh:
+                            shutil.copyfileobj(zsrc, dst_fh, length=1024 * 1024)
+                    cand.downloaded_path = str(out_f.resolve())
+                    thumb_p = _extract_photo_or_video_thumb(out_f, thumbs_dir / f"{cand.cloud_item_id}.jpg", "video")
+                    if thumb_p:
+                        cand.proxy_thumbnail_path = str(thumb_p.resolve())
+
+    sheet_paths, legacy_sheet_p = render_cloud_scan_contact_sheets(
         candidates,
-        sheet_p,
+        proj / "contact_sheets",
         title=f"Google Takeout Scan ({date_from or 'All'} -> {date_to or 'All'})",
     )
 
-    staged_dir = _stage_selected_items_into_cloud_media(candidates, proj / "cloud_media")
+    staged_dir = (proj / "cloud_media").resolve()
+    if not plan_only:
+        staged_dir = _stage_selected_items_into_cloud_media(candidates, proj / "cloud_media")
+
     sel_photos = sum(1 for c in candidates if c.selected_for_download and c.media_type == "photo")
     sel_videos = sum(1 for c in candidates if c.selected_for_download and c.media_type == "video")
+    ev_cnt = len({c.event_cluster_id for c in candidates if c.event_cluster_id})
     manifest = GooglePhotosSyncManifest(
         source_mode="google_takeout",
         date_from=date_from,
         date_to=date_to,
         timezone_name=tz_name,
         download_policy="download_all" if download_all else "smart_two_pass",
+        download_stage="planned_only" if plan_only else "completed",
         total_scanned_in_session=total_scanned,
         in_date_range_count=len(candidates),
         selected_photos_count=sel_photos,
         selected_videos_count=sel_videos,
         skipped_count=len(candidates) - (sel_photos + sel_videos),
         cache_hits_count=0,
+        event_clusters_count=ev_cnt,
         staged_media_dir=str(staged_dir),
-        scan_contact_sheet_path=str(sheet_p.resolve()),
+        scan_contact_sheet_path=str(legacy_sheet_p),
+        scan_contact_sheet_paths=[str(p) for p in sheet_paths],
         items=candidates,
     )
     manifest.to_json_file(proj / "google_photos_manifest.json")
+    return manifest
+
+
+def apply_cloud_pick_overrides(
+    project_dir: str | Path,
+    overrides: dict[str, Any] | list[dict[str, Any]],
+    execute_pass2: bool = True,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> GooglePhotosSyncManifest:
+    """
+    Pass-1.5 AI Vision / User Rescue Gate:
+    Applies select/skip/favorite overrides (by `#07` tile_id, `cloud_item_id`, or `filename`)
+    to `google_photos_manifest.json`, then executes Pass-2 selective download / lazy Takeout extraction
+    and stages `<project_dir>/cloud_media/`.
+    """
+    proj = Path(project_dir).resolve()
+    manifest_p = proj / "google_photos_manifest.json"
+    if not manifest_p.is_file():
+        raise FileNotFoundError(f"google_photos_manifest.json not found in {proj}")
+    manifest = GooglePhotosSyncManifest.from_json_file(manifest_p)
+
+    tile_map_p = proj / "contact_sheets" / "cloud_scan_tile_map.json"
+    tile_to_cid: dict[str, str] = {}
+    if tile_map_p.is_file():
+        try:
+            raw_tm = json.loads(tile_map_p.read_text(encoding="utf-8"))
+            if isinstance(raw_tm, dict):
+                for tk, tv in raw_tm.items():
+                    if isinstance(tv, dict) and tv.get("cloud_item_id"):
+                        tile_to_cid[str(tk).strip().lower()] = str(tv["cloud_item_id"])
+        except Exception:
+            pass
+
+    by_cid = {it.cloud_item_id: it for it in manifest.items}
+    by_name = {it.filename.lower(): it for it in manifest.items}
+    by_stem = {Path(it.filename).stem.lower(): it for it in manifest.items}
+
+    def _resolve_item(token: str) -> Optional[CloudMediaCandidateItem]:
+        raw_t = str(token or "").strip()
+        if not raw_t:
+            return None
+        low_t = raw_t.lower()
+        if low_t in tile_to_cid and tile_to_cid[low_t] in by_cid:
+            return by_cid[tile_to_cid[low_t]]
+        if not low_t.startswith("#") and f"#{low_t}" in tile_to_cid and tile_to_cid[f"#{low_t}"] in by_cid:
+            return by_cid[tile_to_cid[f"#{low_t}"]]
+        if raw_t in by_cid:
+            return by_cid[raw_t]
+        if low_t in by_name:
+            return by_name[low_t]
+        if Path(raw_t).stem.lower() in by_stem:
+            return by_stem[Path(raw_t).stem.lower()]
+        return None
+
+    if isinstance(overrides, dict):
+        for tok in overrides.get("select") or []:
+            it = _resolve_item(str(tok))
+            if it is not None:
+                it.selected_for_download = True
+                it.skip_reason = None
+        for tok in overrides.get("skip") or []:
+            it = _resolve_item(str(tok))
+            if it is not None:
+                it.selected_for_download = False
+                it.skip_reason = "manual_skip"
+        for tok in overrides.get("favorite") or []:
+            it = _resolve_item(str(tok))
+            if it is not None:
+                it.is_favorite = True
+                it.selected_for_download = True
+                it.skip_reason = None
+    elif isinstance(overrides, list):
+        for row in overrides:
+            if not isinstance(row, dict):
+                continue
+            tok = str(row.get("tile_id") or row.get("cloud_item_id") or row.get("filename") or "")
+            it = _resolve_item(tok)
+            if it is None:
+                continue
+            if "is_favorite" in row:
+                it.is_favorite = bool(row["is_favorite"])
+            if "selected" in row:
+                sel = bool(row["selected"])
+                it.selected_for_download = sel
+                it.skip_reason = None if sel else str(row.get("skip_reason") or "manual_skip")
+
+    cache_hits = manifest.cache_hits_count
+    if execute_pass2:
+        # 1. Picker API Pass-2 selective original download for any selected item not yet downloaded
+        picker_ctx_p = proj / "cache" / "picker_session_urls.json"
+        if manifest.source_mode == "google_photos_picker" and picker_ctx_p.is_file():
+            p_ctx = json.loads(picker_ctx_p.read_text(encoding="utf-8"))
+            base_urls: dict[str, str] = dict(p_ctx.get("base_urls") or {})
+            cache_root = Path(p_ctx.get("cache_dir") or get_default_google_photos_cache_dir())
+            orig_dir = cache_root / "originals"
+            orig_dir.mkdir(parents=True, exist_ok=True)
+            need_dl = [
+                it
+                for it in manifest.items
+                if it.selected_for_download and (not it.downloaded_path or not Path(it.downloaded_path).is_file())
+            ]
+            if need_dl:
+                auth = GooglePhotosAuthManager(
+                    client_secrets_path=p_ctx.get("client_secrets_path"),
+                    token_path=p_ctx.get("token_path"),
+                )
+                client = GooglePhotosPickerClient(auth_manager=auth, api_base_url=p_ctx.get("api_base_url"))
+                try:
+                    def _dl_one(cand: CloudMediaCandidateItem) -> None:
+                        b_url = base_urls.get(cand.cloud_item_id, "")
+                        if not b_url:
+                            return
+                        h_id = hashlib.sha1(cand.cloud_item_id.encode("utf-8")).hexdigest()[:16]
+                        safe_n = _safe_filename(cand.filename, h_id, cand.mime_type, cand.media_type)
+                        orig_p = orig_dir / f"{h_id}_{safe_n}"
+                        if orig_p.is_file() and orig_p.stat().st_size > 0:
+                            cand.cache_hit = True
+                        else:
+                            mod = "dv" if cand.media_type == "video" else "d"
+                            client.download_media_file(b_url, orig_p, modifier=mod)
+                        cand.downloaded_path = str(orig_p.resolve())
+
+                    workers = max(1, min(6, len(need_dl)))
+                    if workers == 1:
+                        for c in need_dl:
+                            _dl_one(c)
+                    else:
+                        with ThreadPoolExecutor(max_workers=workers) as pool:
+                            list(pool.map(_dl_one, need_dl))
+                finally:
+                    if manifest.session_id:
+                        client.delete_session(manifest.session_id)
+                    client.close()
+                cache_hits = sum(1 for c in manifest.items if c.selected_for_download and c.cache_hit)
+
+        # 2. Takeout ZIP lazy extraction for any newly rescued video/photo not yet extracted
+        zip_idx_p = proj / "cache" / "takeout_scan" / "zip_index.json"
+        if manifest.source_mode == "google_takeout" and zip_idx_p.is_file():
+            z_idx = json.loads(zip_idx_p.read_text(encoding="utf-8"))
+            t_zip = Path(z_idx.get("takeout_zip") or "")
+            members_map: dict[str, dict[str, str]] = dict(z_idx.get("members") or {})
+            need_ex = [
+                it
+                for it in manifest.items
+                if it.selected_for_download
+                and it.cloud_item_id in members_map
+                and (not it.downloaded_path or not Path(it.downloaded_path).is_file())
+            ]
+            if need_ex and t_zip.is_file():
+                thumbs_dir = proj / "cache" / "takeout_scan" / "thumbs"
+                with zipfile.ZipFile(t_zip, "r") as zf:
+                    for it in need_ex:
+                        rec = members_map[it.cloud_item_id]
+                        out_f = Path(rec["extract_path"])
+                        out_f.parent.mkdir(parents=True, exist_ok=True)
+                        zi_sel = zf.getinfo(rec["zip_member"])
+                        if not (out_f.is_file() and out_f.stat().st_size == zi_sel.file_size):
+                            with zf.open(zi_sel, "r") as zsrc, out_f.open("wb") as dst_fh:
+                                shutil.copyfileobj(zsrc, dst_fh, length=1024 * 1024)
+                        it.downloaded_path = str(out_f.resolve())
+                        thumb_p = _extract_photo_or_video_thumb(out_f, thumbs_dir / f"{it.cloud_item_id}.jpg", it.media_type)
+                        if thumb_p:
+                            it.proxy_thumbnail_path = str(thumb_p.resolve())
+
+        staged_dir = _stage_selected_items_into_cloud_media(manifest.items, proj / "cloud_media")
+        manifest.staged_media_dir = str(staged_dir)
+        manifest.download_stage = "completed"
+
+    sheet_paths, legacy_sheet_p = render_cloud_scan_contact_sheets(
+        manifest.items,
+        proj / "contact_sheets",
+        title=f"Google Photos Curated Picks ({manifest.date_from or 'All'} -> {manifest.date_to or 'All'})",
+    )
+    manifest.selected_photos_count = sum(1 for c in manifest.items if c.selected_for_download and c.media_type == "photo")
+    manifest.selected_videos_count = sum(1 for c in manifest.items if c.selected_for_download and c.media_type == "video")
+    manifest.skipped_count = len(manifest.items) - (manifest.selected_photos_count + manifest.selected_videos_count)
+    manifest.cache_hits_count = cache_hits
+    manifest.scan_contact_sheet_path = str(legacy_sheet_p)
+    manifest.scan_contact_sheet_paths = [str(p) for p in sheet_paths]
+    manifest.to_json_file(manifest_p)
+    if progress_callback:
+        progress_callback(
+            f"Applied cloud pick overrides: {manifest.selected_photos_count} photos, {manifest.selected_videos_count} videos staged in {manifest.staged_media_dir}."
+        )
     return manifest
 
 
@@ -1564,14 +2506,59 @@ def build_google_photos_web_search_url(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     extra_query: str = "",
+    favorites_only: bool = False,
+    media_filter: Optional[str] = None,
+    album_url: Optional[str] = None,
 ) -> str:
-    """Build a zero-setup Google Photos web search deep-link URL for the given date range."""
+    """Build a zero-setup Google Photos web search or album deep-link URL."""
+    if album_url and str(album_url).strip().startswith(("http://", "https://")):
+        return str(album_url).strip()
     date_part = format_picker_date_query(date_from, date_to)
+    parts: list[str] = [date_part] if date_part else []
+    if favorites_only:
+        parts.append("favorites")
+    mf = (media_filter or "").strip().lower()
+    if mf in ("videos", "video"):
+        parts.append("videos")
+    elif mf in ("photos", "photo"):
+        parts.append("photos")
     extra = (extra_query or "").strip()
-    query = " ".join(p for p in (date_part, extra) if p).strip()
+    if extra:
+        parts.append(extra)
+    query = " ".join(p for p in parts if p).strip()
     if not query:
-        return "https://photos.google.com"
+        return "https://photos.google.com/favorites" if favorites_only else "https://photos.google.com"
     return f"https://photos.google.com/search/{quote(query, safe='')}"
+
+
+def build_zero_setup_browser_plan(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    album_url: Optional[str] = None,
+    favorites_only: bool = False,
+) -> dict[str, Any]:
+    """Build structured zero-setup Google Photos web deep-links & fast batch-picking playbook."""
+    primary_url = build_google_photos_web_search_url(
+        date_from=date_from,
+        date_to=date_to,
+        favorites_only=favorites_only,
+        album_url=album_url,
+    )
+    return {
+        "search_url": primary_url,
+        "favorites_search_url": build_google_photos_web_search_url(date_from, date_to, favorites_only=True),
+        "videos_search_url": build_google_photos_web_search_url(date_from, date_to, media_filter="videos"),
+        "date_query": format_picker_date_query(date_from, date_to),
+        "max_items_per_zip": 450,
+        "recommended_pathway": "zero_setup_browser_batch",
+        "batch_strategy_hint": (
+            "Zero-Setup Fast Picking: 1) Keep Google Photos 'Photo Stacks' ON to collapse burst duplicates into 1 Top Pick tile; "
+            "2) Select whole days via Day-Header checkmarks or Shift+Click first->last tile (never click 100+ items one-by-one); "
+            "3) Keep each Shift+D ZIP <= 450 items (split multi-day shoots into 1-2 day ZIPs to stay under Google Photos' 500-item web cap); "
+            "4) Optionally check favorites_search_url to pass --favorites; "
+            "5) Pass all ZIPs to sync-google-photos --from-downloads --plan-only for parallel Pass-1 dedup + Pass-1.5 contact-sheet review."
+        ),
+    }
 
 
 def get_default_browser_downloads_dir() -> Path:
@@ -1764,13 +2751,16 @@ def ingest_google_photos_browser_downloads(
     max_photos: Optional[int] = None,
     max_videos: Optional[int] = None,
     download_all: bool = False,
+    headroom_multiplier: float = 1.6,
+    plan_only: bool = False,
     keep_undated_items: bool = True,
     favorite_filenames: Optional[list[str] | set[str] | str] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> GooglePhotosSyncManifest:
     """
-    Unpack browser-downloaded Google Photos `.zip`/media files, filter optional [date_from, date_to],
-    run Two-Pass burst dedup & smart budget selection, and stage originals into `<project_dir>/cloud_media/`.
+    Unpack single or multi-batch browser-downloaded Google Photos `.zip`/media files in parallel,
+    filter optional [date_from, date_to], run parallel video-editing-aware Pass-1 burst/junk/MMR curation,
+    render paginated 5x4 contact sheets, and stage originals into `<project_dir>/cloud_media/`.
     """
     proj = Path(project_dir).resolve()
     proj.mkdir(parents=True, exist_ok=True)
@@ -1782,6 +2772,7 @@ def ingest_google_photos_browser_downloads(
 
     inputs = _expand_browser_download_inputs(download_paths)
     collected_media: list[Path] = []
+    seen_real: set[str] = set()
 
     for zip_idx, src_p in enumerate(inputs, start=1):
         ext = src_p.suffix.lower()
@@ -1800,28 +2791,33 @@ def ingest_google_photos_browser_downloads(
                     if m_ext not in PHOTO_EXTENSIONS and m_ext not in VIDEO_EXTENSIONS and m_ext != ".json":
                         continue
                     target_f = dest_sub / m_name
-                    if target_f.exists() and m_ext != ".json":
+                    if target_f.exists() and m_ext != ".json" and target_f.stat().st_size != zi.file_size:
                         target_f = dest_sub / f"{Path(m_name).stem}_{mem_idx:03d}{Path(m_name).suffix}"
                     if not (target_f.is_file() and target_f.stat().st_size == zi.file_size):
                         with zf.open(zi, "r") as zsrc, target_f.open("wb") as dst_fh:
                             shutil.copyfileobj(zsrc, dst_fh, length=1024 * 1024)
                     if m_ext in PHOTO_EXTENSIONS or m_ext in VIDEO_EXTENSIONS:
-                        collected_media.append(target_f)
+                        res_k = str(target_f.resolve())
+                        if res_k not in seen_real:
+                            seen_real.add(res_k)
+                            collected_media.append(target_f)
         elif ext in PHOTO_EXTENSIONS or ext in VIDEO_EXTENSIONS:
-            collected_media.append(src_p)
+            res_k = str(src_p.resolve())
+            if res_k not in seen_real:
+                seen_real.add(res_k)
+                collected_media.append(src_p)
 
     start_utc, end_utc = parse_date_range_bounds_utc(date_from, date_to, tz_name=tz_name)
     fav_names_low, fav_stems_low = _normalize_favorite_lookup(favorite_filenames)
-    candidates: list[CloudMediaCandidateItem] = []
 
-    for mf_path in collected_media:
+    def _inspect_browser_file(mf_path: Path) -> Optional[CloudMediaCandidateItem]:
         ext = mf_path.suffix.lower()
         mtype = "video" if ext in VIDEO_EXTENSIONS else "photo"
         side_meta = discover_takeout_sidecar_metadata(mf_path)
         c_time: Optional[str] = side_meta.get("creation_time")
         cam: Optional[str] = None
         exif_sum: Optional[str] = None
-        w, h, fps_val = 0, 0, (30.0 if mtype == "video" else 0.0)
+        w, h, fps_val, dur_val = 0, 0, (30.0 if mtype == "video" else 0.0), 0.0
         g_lat, g_lon, g_alt = side_meta.get("gps_lat"), side_meta.get("gps_lon"), side_meta.get("gps_alt")
         is_fav = (
             bool(side_meta.get("is_favorite"))
@@ -1832,7 +2828,8 @@ def ingest_google_photos_browser_downloads(
         if mtype == "photo":
             try:
                 with Image.open(mf_path) as im:
-                    w, h = im.size
+                    im_t = ImageOps.exif_transpose(im)
+                    w, h = im_t.size
                     cam, _ = _extract_exif_camera_info(im, mf_path)
                     ex_lat, ex_lon, ex_alt = _extract_exif_gps_and_alt(im)
                     if g_lat is None:
@@ -1848,6 +2845,7 @@ def ingest_google_photos_browser_downloads(
                 w = int(vi.get("width") or 0)
                 h = int(vi.get("height") or 0)
                 fps_val = float(vi.get("fps") or 30.0)
+                dur_val = float(vi.get("duration") or 0.0)
                 cam = vi.get("camera_make_model") or cam
                 if not c_time and vi.get("creation_time"):
                     dt_v = parse_iso_utc(str(vi["creation_time"]))
@@ -1863,33 +2861,40 @@ def ingest_google_photos_browser_downloads(
         if start_utc is not None or end_utc is not None:
             if c_time:
                 if not is_timestamp_in_range(c_time, start_utc, end_utc):
-                    continue
+                    return None
             elif not keep_undated_items:
-                continue
+                return None
 
         item_id = f"browser_{hashlib.sha1(str(mf_path).encode('utf-8')).hexdigest()[:14]}"
         thumb_p = _extract_photo_or_video_thumb(mf_path, thumbs_dir / f"{item_id}.jpg", mtype)
-        candidates.append(
-            CloudMediaCandidateItem(
-                cloud_item_id=item_id,
-                source_provider="google_photos_browser",
-                filename=mf_path.name,
-                mime_type=_EXT_TO_MIME.get(ext, "video/mp4" if mtype == "video" else "image/jpeg"),
-                media_type=mtype,
-                creation_time=c_time or "",
-                width=w,
-                height=h,
-                fps=fps_val,
-                camera_make_model=cam,
-                exif_summary=exif_sum,
-                gps_lat=g_lat,
-                gps_lon=g_lon,
-                gps_alt=g_alt,
-                proxy_thumbnail_path=str(thumb_p.resolve()) if thumb_p else None,
-                downloaded_path=str(mf_path.resolve()),
-                is_favorite=is_fav,
-            )
+        return CloudMediaCandidateItem(
+            cloud_item_id=item_id,
+            source_provider="google_photos_browser",
+            filename=mf_path.name,
+            mime_type=_EXT_TO_MIME.get(ext, "video/mp4" if mtype == "video" else "image/jpeg"),
+            media_type=mtype,
+            creation_time=c_time or "",
+            width=w,
+            height=h,
+            fps=fps_val,
+            duration_sec=dur_val,
+            camera_make_model=cam,
+            exif_summary=exif_sum,
+            gps_lat=g_lat,
+            gps_lon=g_lon,
+            gps_alt=g_alt,
+            proxy_thumbnail_path=str(thumb_p.resolve()) if thumb_p else None,
+            downloaded_path=str(mf_path.resolve()),
+            is_favorite=is_fav,
         )
+
+    workers_io = max(1, min(get_io_worker_count(12), len(collected_media)))
+    if workers_io == 1 or len(collected_media) <= 3:
+        inspected = [_inspect_browser_file(p) for p in collected_media]
+    else:
+        with ThreadPoolExecutor(max_workers=workers_io) as pool:
+            inspected = list(pool.map(_inspect_browser_file, collected_media))
+    candidates = [c for c in inspected if c is not None]
 
     if progress_callback:
         progress_callback(
@@ -1902,31 +2907,38 @@ def ingest_google_photos_browser_downloads(
         max_photos=max_photos,
         max_videos=max_videos,
         download_all=download_all,
+        headroom_multiplier=headroom_multiplier,
     )
-    sheet_p = proj / "contact_sheets" / "cloud_scan_contact_sheet.jpg"
-    render_cloud_scan_contact_sheet(
+    sheet_paths, legacy_sheet_p = render_cloud_scan_contact_sheets(
         candidates,
-        sheet_p,
+        proj / "contact_sheets",
         title=f"Google Photos Browser Import ({date_from or 'All'} -> {date_to or 'All'})",
     )
 
-    staged_dir = _stage_selected_items_into_cloud_media(candidates, proj / "cloud_media")
+    staged_dir = (proj / "cloud_media").resolve()
+    if not plan_only:
+        staged_dir = _stage_selected_items_into_cloud_media(candidates, proj / "cloud_media")
+
     sel_photos = sum(1 for c in candidates if c.selected_for_download and c.media_type == "photo")
     sel_videos = sum(1 for c in candidates if c.selected_for_download and c.media_type == "video")
+    ev_cnt = len({c.event_cluster_id for c in candidates if c.event_cluster_id})
     manifest = GooglePhotosSyncManifest(
         source_mode="google_photos_browser",
         date_from=date_from,
         date_to=date_to,
         timezone_name=tz_name,
         download_policy="download_all" if download_all else "smart_two_pass",
+        download_stage="planned_only" if plan_only else "completed",
         total_scanned_in_session=len(collected_media),
         in_date_range_count=len(candidates),
         selected_photos_count=sel_photos,
         selected_videos_count=sel_videos,
         skipped_count=len(candidates) - (sel_photos + sel_videos),
         cache_hits_count=0,
+        event_clusters_count=ev_cnt,
         staged_media_dir=str(staged_dir),
-        scan_contact_sheet_path=str(sheet_p.resolve()),
+        scan_contact_sheet_path=str(legacy_sheet_p),
+        scan_contact_sheet_paths=[str(p) for p in sheet_paths],
         items=candidates,
     )
     manifest.to_json_file(proj / "google_photos_manifest.json")
@@ -1942,6 +2954,10 @@ def sync_google_photos_via_browser(
     max_photos: Optional[int] = None,
     max_videos: Optional[int] = None,
     download_all: bool = False,
+    headroom_multiplier: float = 1.6,
+    plan_only: bool = False,
+    favorites_only: bool = False,
+    album_url: Optional[str] = None,
     downloads_dir: Optional[str | Path] = None,
     timeout_sec: float = 600.0,
     settle_quiet_sec: float = 1.8,
@@ -1952,15 +2968,20 @@ def sync_google_photos_via_browser(
 ) -> GooglePhotosSyncManifest:
     """
     Zero-setup Google Photos Browser Login workflow:
-    1. Opens `photos.google.com/search/<date_from> to <date_to>` in the user's browser.
-    2. Watches `~/Downloads` for newly downloaded `.zip` / media files after sign-in & selection.
-    3. Extracts, filters [date_from, date_to], runs burst dedup & curation, and stages `cloud_media/`.
+    1. Opens `photos.google.com/search/<date_from> to <date_to>` (or Album / Favorites URL) in the user's browser.
+    2. Watches `~/Downloads` for newly downloaded `.zip` / media files after sign-in & Day-Header/Shift+Click selection.
+    3. Extracts in parallel, filters [date_from, date_to], runs video-editing Pass-1 curation, renders paginated sheets, and stages `cloud_media/`.
     """
     dl_dir = Path(downloads_dir).expanduser().resolve() if downloads_dir else get_default_browser_downloads_dir()
     dl_dir.mkdir(parents=True, exist_ok=True)
     baseline = snapshot_downloads_directory(dl_dir)
     started_at = time.time()
-    search_url = build_google_photos_web_search_url(date_from, date_to)
+    search_url = build_google_photos_web_search_url(
+        date_from,
+        date_to,
+        favorites_only=favorites_only,
+        album_url=album_url,
+    )
 
     if browser_open_callback is not None:
         browser_open_callback(search_url, dl_dir)
@@ -1991,6 +3012,8 @@ def sync_google_photos_via_browser(
         max_photos=max_photos,
         max_videos=max_videos,
         download_all=download_all,
+        headroom_multiplier=headroom_multiplier,
+        plan_only=plan_only,
         favorite_filenames=favorite_filenames,
         progress_callback=progress_callback,
     )
@@ -2020,6 +3043,10 @@ def run_google_photos_sync(
     max_photos: Optional[int] = None,
     max_videos: Optional[int] = None,
     download_all: bool = False,
+    headroom_multiplier: float = 1.6,
+    plan_only: bool = False,
+    favorites_only: bool = False,
+    album_url: Optional[str] = None,
     auth_mode: str = "auto",
     from_downloads: Optional[str | Path | list[str | Path]] = None,
     takeout_source: Optional[str | Path] = None,
@@ -2046,6 +3073,8 @@ def run_google_photos_sync(
             max_photos=max_photos,
             max_videos=max_videos,
             download_all=download_all,
+            headroom_multiplier=headroom_multiplier,
+            plan_only=plan_only,
             favorite_filenames=favorite_filenames,
             progress_callback=progress_callback,
         )
@@ -2060,6 +3089,8 @@ def run_google_photos_sync(
             max_photos=max_photos,
             max_videos=max_videos,
             download_all=download_all,
+            headroom_multiplier=headroom_multiplier,
+            plan_only=plan_only,
             progress_callback=progress_callback,
         )
     eff_mode = "oauth" if session_id else resolve_auth_mode(
@@ -2077,6 +3108,8 @@ def run_google_photos_sync(
             max_photos=max_photos,
             max_videos=max_videos,
             download_all=download_all,
+            headroom_multiplier=headroom_multiplier,
+            plan_only=plan_only,
             session_id=session_id,
             open_browser=open_browser,
             client_secrets_path=client_secrets_path,
@@ -2093,6 +3126,10 @@ def run_google_photos_sync(
         max_photos=max_photos,
         max_videos=max_videos,
         download_all=download_all,
+        headroom_multiplier=headroom_multiplier,
+        plan_only=plan_only,
+        favorites_only=favorites_only,
+        album_url=album_url,
         downloads_dir=downloads_dir,
         timeout_sec=watch_timeout_sec,
         open_browser=open_browser,

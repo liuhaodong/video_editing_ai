@@ -2238,6 +2238,12 @@ class CloudMediaCandidateItem(BaseModel):
     )
     dhash: str = ""
     burst_group_id: Optional[str] = None
+    burst_cluster_size: int = 1
+    event_cluster_id: Optional[str] = None
+    orientation: Literal["landscape", "portrait", "square", "unknown"] = "unknown"
+    subject_category: str = ""
+    mmr_score: float = 0.0
+    duration_sec: float = 0.0
     selected_for_download: bool = True
     skip_reason: Optional[str] = None
     cache_hit: bool = False
@@ -2252,14 +2258,17 @@ class GooglePhotosSyncManifest(BaseModel):
     date_to: Optional[str] = None
     timezone_name: str = "UTC"
     download_policy: Literal["smart_two_pass", "download_all"] = "smart_two_pass"
+    download_stage: Literal["planned_only", "completed"] = "completed"
     total_scanned_in_session: int = 0
     in_date_range_count: int = 0
     selected_photos_count: int = 0
     selected_videos_count: int = 0
     skipped_count: int = 0
     cache_hits_count: int = 0
+    event_clusters_count: int = 0
     staged_media_dir: str = ""
     scan_contact_sheet_path: Optional[str] = None
+    scan_contact_sheet_paths: list[str] = Field(default_factory=list)
     items: list[CloudMediaCandidateItem] = Field(default_factory=list)
 
     def to_json_file(self, path: str | Path) -> None:

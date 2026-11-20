@@ -971,3 +971,380 @@ def test_favorites_boost_and_guaranteed_selection(tmp_path: Path) -> None:
     dit_by_name = {ent.filename: ent for ent in bb.dit_manifest.entries}
     assert dit_by_name["BURST_STARRED.JPG"].is_favorite is True
     assert dit_by_name["ALT_STARRED.JPG"].is_favorite is True
+
+
+def test_screenshot_live_photo_and_duplicate_video_rejection(tmp_path: Path) -> None:
+    """Verify phone screenshots, Live Photo micro-.MOVs & duplicate videos are skipped while camera signs & favs stay."""
+    from video_editing_ai.cloud.google_photos import select_necessary_cloud_items
+    from video_editing_ai.models.schema import CloudMediaCandidateItem
+
+    # Build real thumbnail files on disk
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir(parents=True, exist_ok=True)
+    flat_ui = Image.new("RGB", (320, 640), (245, 245, 248))
+    d_ui = ImageDraw.Draw(flat_ui)
+    d_ui.rectangle([0, 0, 320, 64], fill=(28, 32, 42))
+    d_ui.rectangle([20, 90, 300, 150], fill=(255, 255, 255))
+    ss_p = thumbs / "ss.png"
+    flat_ui.save(ss_p, "PNG")
+
+    cam_p = thumbs / "cam_sign.jpg"
+    cam_p.write_bytes(_make_jpeg_bytes(640, 480, shape="arch", bg_rgb=(96, 72, 48)))
+    vid_t = thumbs / "vid_t.jpg"
+    vid_t.write_bytes(_make_jpeg_bytes(640, 360, shape="mountain", bg_rgb=(30, 64, 96)))
+
+    cands = [
+        # 1. Phone screenshot by filename -> skipped
+        CloudMediaCandidateItem(
+            cloud_item_id="c_ss_name", filename="Screenshot_20260702-101500.png", mime_type="image/png",
+            media_type="photo", creation_time="2026-07-02T10:15:00Z", width=1080, height=2400,
+            proxy_thumbnail_path=str(ss_p),
+        ),
+        # 2. Unnamed flat-UI PNG without camera EXIF -> skipped
+        CloudMediaCandidateItem(
+            cloud_item_id="c_ss_flat", filename="IMG_9991.png", mime_type="image/png",
+            media_type="photo", creation_time="2026-07-02T10:20:00Z", width=1170, height=2532,
+            proxy_thumbnail_path=str(ss_p),
+        ),
+        # 3. Starred screenshot -> protected!
+        CloudMediaCandidateItem(
+            cloud_item_id="c_ss_fav", filename="Screenshot_important_ticket.png", mime_type="image/png",
+            media_type="photo", creation_time="2026-07-02T10:25:00Z", width=1080, height=2400,
+            proxy_thumbnail_path=str(ss_p), is_favorite=True,
+        ),
+        # 4. Camera-captured museum plaque / sign -> KEPT!
+        CloudMediaCandidateItem(
+            cloud_item_id="c_cam_sign", filename="PXL_20260702_103000.jpg", mime_type="image/jpeg",
+            media_type="photo", creation_time="2026-07-02T10:30:00Z", width=4032, height=3024,
+            camera_make_model="Google Pixel 9 Pro", proxy_thumbnail_path=str(cam_p),
+        ),
+        # 5. Paired still + Apple Live Photo companion micro-.MOV (1.9s) -> .MOV skipped!
+        CloudMediaCandidateItem(
+            cloud_item_id="c_live_jpg", filename="IMG_5001.JPG", mime_type="image/jpeg",
+            media_type="photo", creation_time="2026-07-02T11:00:00Z", width=4032, height=3024,
+            camera_make_model="Apple iPhone 16 Pro", proxy_thumbnail_path=str(vid_t),
+        ),
+        CloudMediaCandidateItem(
+            cloud_item_id="c_live_mov", filename="IMG_5001.MOV", mime_type="video/quicktime",
+            media_type="video", creation_time="2026-07-02T11:00:00Z", width=1920, height=1440,
+            fps=30.0, duration_sec=1.9, proxy_thumbnail_path=str(vid_t),
+        ),
+        # 6. Duplicate re-uploaded 4K videos at identical timestamp -> _1 skipped!
+        CloudMediaCandidateItem(
+            cloud_item_id="c_vid_orig", filename="A7C2_20260702_0618.MP4", mime_type="video/mp4",
+            media_type="video", creation_time="2026-07-02T14:00:00Z", width=3840, height=2160,
+            fps=29.97, duration_sec=12.0, proxy_thumbnail_path=str(vid_t),
+        ),
+        CloudMediaCandidateItem(
+            cloud_item_id="c_vid_dup", filename="A7C2_20260702_0618_1.MP4", mime_type="video/mp4",
+            media_type="video", creation_time="2026-07-02T14:00:00Z", width=3840, height=2160,
+            fps=29.97, duration_sec=12.0, proxy_thumbnail_path=str(vid_t),
+        ),
+    ]
+    select_necessary_cloud_items(cands, target_duration_sec=120.0)
+    by_id = {c.cloud_item_id: c for c in cands}
+
+    assert by_id["c_ss_name"].selected_for_download is False and by_id["c_ss_name"].skip_reason == "screenshot_or_junk"
+    assert by_id["c_ss_flat"].selected_for_download is False and by_id["c_ss_flat"].skip_reason == "screenshot_or_junk"
+    assert by_id["c_ss_fav"].selected_for_download is True
+    assert by_id["c_cam_sign"].selected_for_download is True
+    assert by_id["c_live_mov"].selected_for_download is False and by_id["c_live_mov"].skip_reason == "live_photo_companion"
+    assert by_id["c_vid_orig"].selected_for_download is True
+    assert by_id["c_vid_dup"].selected_for_download is False and by_id["c_vid_dup"].skip_reason == "duplicate_video"
+
+
+def test_non_adjacent_cross_camera_dedup_and_gps_inheritance(tmp_path: Path) -> None:
+    """Verify Sony (no GPS) + Pixel (GPS) shots 6 minutes apart dedup into Sony hero AND inherit Pixel GPS."""
+    from video_editing_ai.cloud.google_photos import select_necessary_cloud_items
+    from video_editing_ai.models.schema import CloudMediaCandidateItem
+
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir(parents=True, exist_ok=True)
+    same_scene_a = thumbs / "sony_gate.jpg"
+    same_scene_b = thumbs / "pxl_gate.jpg"
+    other_scene = thumbs / "other.jpg"
+    same_scene_a.write_bytes(_make_jpeg_bytes(640, 426, bg_rgb=(36, 62, 94), shape="burst", seed_offset=0))
+    same_scene_b.write_bytes(_make_jpeg_bytes(640, 426, bg_rgb=(36, 62, 94), shape="burst", seed_offset=1))
+    other_scene.write_bytes(_make_jpeg_bytes(640, 426, bg_rgb=(120, 48, 36), shape="mountain"))
+
+    cands = [
+        CloudMediaCandidateItem(
+            cloud_item_id="sony_01", filename="_DSC4512.JPG", media_type="photo",
+            creation_time="2026-04-21T09:10:00Z", width=7008, height=4672,
+            camera_make_model="SONY ILCE-7CM2", gps_lat=None, gps_lon=None,
+            proxy_thumbnail_path=str(same_scene_a),
+        ),
+        # Unrelated shot taken in between (non-adjacent!)
+        CloudMediaCandidateItem(
+            cloud_item_id="other_01", filename="_DSC4513.JPG", media_type="photo",
+            creation_time="2026-04-21T09:13:00Z", width=7008, height=4672,
+            camera_make_model="SONY ILCE-7CM2", gps_lat=None, gps_lon=None,
+            proxy_thumbnail_path=str(other_scene),
+        ),
+        # Pixel phone shot of same landmark 6 minutes later carrying Versailles GPS
+        CloudMediaCandidateItem(
+            cloud_item_id="pxl_01", filename="PXL_20260421_091600.jpg", media_type="photo",
+            creation_time="2026-04-21T09:16:00Z", width=4032, height=2688,
+            camera_make_model="Google Pixel 9 Pro", gps_lat=48.8049, gps_lon=2.1204, gps_alt=135.0,
+            proxy_thumbnail_path=str(same_scene_b),
+        ),
+    ]
+    select_necessary_cloud_items(cands, target_duration_sec=120.0)
+    by_id = {c.cloud_item_id: c for c in cands}
+
+    # Sony wins over Pixel in cross-camera cluster and inherits Pixel's GPS!
+    assert by_id["sony_01"].selected_for_download is True
+    assert by_id["sony_01"].burst_cluster_size == 2
+    assert by_id["pxl_01"].selected_for_download is False and by_id["pxl_01"].skip_reason == "burst_duplicate"
+    assert by_id["sony_01"].gps_lat is not None and abs(by_id["sony_01"].gps_lat - 48.8049) < 1e-4
+    assert by_id["sony_01"].gps_lon is not None and abs(by_id["sony_01"].gps_lon - 2.1204) < 1e-4
+    # Nearby Sony shot within 180s also inherits GPS!
+    assert by_id["other_01"].gps_lat is not None and abs(by_id["other_01"].gps_lat - 48.8049) < 1e-4
+
+
+def test_event_clustered_mmr_orientation_pair_balance_and_headroom(tmp_path: Path) -> None:
+    """Verify multi-stop event floor, landscape + vertical diptych pairing, and 1.6x recall headroom."""
+    from video_editing_ai.cloud.google_photos import select_necessary_cloud_items
+    from video_editing_ai.models.schema import CloudMediaCandidateItem
+
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir(parents=True, exist_ok=True)
+    palettes = [
+        (24, 52, 86), (110, 62, 42), (42, 88, 62), (96, 44, 88),
+        (132, 98, 42), (38, 92, 108), (76, 62, 112), (144, 72, 64),
+    ]
+    shapes = ["mountain", "arch", "grid"]
+
+    cands: list[CloudMediaCandidateItem] = []
+    # 3 distinct event stops separated by >2 hours & >5km:
+    # Event 1 (08:00): 4 photos (2 landscape, 2 portrait)
+    # Event 2 (11:00): 8 photos (4 landscape, 4 portrait)
+    # Event 3 (19:00): 4 photos (2 landscape, 2 portrait)
+    stops = [
+        ("08", 48.845, 2.366, 4),
+        ("11", 48.802, 2.128, 8),
+        ("19", 48.874, 2.295, 4),
+    ]
+    idx_g = 0
+    for hr, lat, lon, count in stops:
+        for k in range(count):
+            is_port = (k % 2 == 1)
+            w, h = (3000, 4000) if is_port else (4000, 3000)
+            tp = thumbs / f"ev_{hr}_{k}.jpg"
+            tp.write_bytes(
+                _make_jpeg_bytes(
+                    360 if is_port else 480,
+                    480 if is_port else 360,
+                    bg_rgb=palettes[idx_g % len(palettes)],
+                    shape=shapes[(idx_g // 2) % len(shapes)],
+                )
+            )
+            cands.append(
+                CloudMediaCandidateItem(
+                    cloud_item_id=f"p_{hr}_{k}",
+                    filename=f"IMG_{hr}_{k:02d}.JPG",
+                    media_type="photo",
+                    creation_time=f"2026-04-21T{hr}:{k * 3:02d}:00Z",
+                    width=w,
+                    height=h,
+                    camera_make_model="SONY ILCE-7CM2",
+                    gps_lat=lat,
+                    gps_lon=lon,
+                    proxy_thumbnail_path=str(tp),
+                )
+            )
+            idx_g += 1
+
+    # Constrained budget = 8 across 3 events -> every event must get >= 2 picks including >= 1 landscape!
+    select_necessary_cloud_items(cands, target_duration_sec=155.0, max_photos=8)
+    selected = [c for c in cands if c.selected_for_download]
+    assert len(selected) == 8
+    events_found = {c.event_cluster_id for c in cands if c.event_cluster_id}
+    assert len(events_found) == 3
+    for ev in events_found:
+        ev_sel = [c for c in selected if c.event_cluster_id == ev]
+        assert len(ev_sel) >= 2
+        assert any(c.orientation == "landscape" for c in ev_sel)
+
+
+def test_paginated_cloud_sheets_and_pass15_vision_rescue_gate(tmp_path: Path) -> None:
+    """Verify plan_only=True emits paginated 5x4 sheets (>20 tiles) with ZERO Pass-2 downloads until apply_cloud_pick_overrides."""
+    from video_editing_ai.cloud.google_photos import apply_cloud_pick_overrides
+
+    mock_items: list[dict[str, Any]] = []
+    payloads: dict[str, bytes] = {}
+    state = _MockGoogleState(items=mock_items, media_payloads=payloads, page_size_cap=15)
+    srv, base_url = _start_mock_server(state)
+    try:
+        palettes = [(20 + (k * 17) % 180, 40 + (k * 29) % 160, 60 + (k * 37) % 160) for k in range(26)]
+        shapes = ["mountain", "arch", "grid"]
+        for k in range(26):
+            iid = f"pick_{k + 1:02d}"
+            jpg = _make_jpeg_bytes(480, 360, bg_rgb=palettes[k], shape=shapes[k % 3])
+            day = 1 + (k // 9)
+            hr = 9 + (k % 9)
+            mock_items.append(
+                {
+                    "id": iid,
+                    "createTime": f"2026-07-0{day}T{hr:02d}:00:00Z",
+                    "type": "PHOTO",
+                    "mediaFile": {
+                        "baseUrl": f"{base_url}/media/{iid}",
+                        "mimeType": "image/jpeg",
+                        "filename": f"TRIP_{k + 1:02d}.JPG",
+                        "mediaFileMetadata": {"width": 4000, "height": 3000, "cameraMake": "Sony", "cameraModel": "A7C2"},
+                    },
+                }
+            )
+            payloads[f"{iid}=w512-h512"] = jpg
+            payloads[f"{iid}=d"] = jpg
+
+        secrets_p, token_p = _write_mock_credentials(tmp_path, base_url, with_valid_token=True)
+        proj = tmp_path / "pass15_proj"
+        manifest_plan = sync_google_photos_media(
+            project_dir=proj,
+            date_from="2026-07-01",
+            date_to="2026-07-05",
+            max_photos=10,
+            plan_only=True,
+            open_browser=False,
+            client_secrets_path=secrets_p,
+            token_path=token_p,
+            cache_dir=tmp_path / "gp_cache",
+            api_base_url=f"{base_url}/v1",
+        )
+        # Zero full-res downloads happened during plan_only!
+        assert manifest_plan.download_stage == "planned_only"
+        assert [r for r in state.download_requests if r[1] in ("d", "dv")] == []
+        # Paginated 5x4 sheets cover ALL 26 items (2 pages: 20 + 6)
+        assert len(manifest_plan.scan_contact_sheet_paths) == 2
+        assert all(Path(p).is_file() for p in manifest_plan.scan_contact_sheet_paths)
+
+        # Rescue 1 skipped runner-up & drop 1 selected item via Pass-1.5 tile IDs
+        tile_map = json.loads((proj / "contact_sheets" / "cloud_scan_tile_map.json").read_text(encoding="utf-8"))
+        skipped_tile = next(tk for tk, tv in tile_map.items() if not tv["selected"])
+        selected_tile = next(tk for tk, tv in tile_map.items() if tv["selected"])
+        rescued_cid = tile_map[skipped_tile]["cloud_item_id"]
+        dropped_cid = tile_map[selected_tile]["cloud_item_id"]
+
+        final_m = apply_cloud_pick_overrides(
+            proj,
+            overrides={"select": [skipped_tile], "skip": [selected_tile]},
+            execute_pass2=True,
+        )
+        assert final_m.download_stage == "completed"
+        assert final_m.selected_photos_count == 10
+        full_dls = {iid for iid, mod in state.download_requests if mod == "d"}
+        assert rescued_cid in full_dls
+        assert dropped_cid not in full_dls
+        assert len(list(Path(final_m.staged_media_dir).iterdir())) == 10
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_takeout_lazy_zip_skips_unselected_video_extraction(tmp_path: Path) -> None:
+    """Verify Takeout ZIP ingest NEVER extracts skipped videos to disk, and rescues lazily on demand."""
+    from video_editing_ai.cloud.google_photos import apply_cloud_pick_overrides
+
+    takeout_zip = tmp_path / "takeout_lazy.zip"
+    v_bytes = _make_stripped_mp4_bytes(tmp_path, "v_src.mp4", color="navy", duration=2.0)
+    p_bytes = _make_jpeg_bytes(480, 360, shape="arch")
+
+    with zipfile.ZipFile(takeout_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        base = "Takeout/Google Photos/Trip/"
+        zf.writestr(base + "HERO.JPG", p_bytes)
+        zf.writestr(base + "HERO.JPG.json", json.dumps({"photoTakenTime": {"timestamp": "1782986400"}}))
+        for i_v, (fname, ts, fav) in enumerate(
+            [
+                ("VID_FAV.MP4", "1782987000", True),
+                ("VID_SKIP_1.MP4", "1782994000", False),
+                ("VID_SKIP_2.MP4", "1783001000", False),
+            ]
+        ):
+            zf.writestr(base + fname, v_bytes)
+            zf.writestr(
+                base + f"{fname}.supplemental-metadata.json",
+                json.dumps({"photoTakenTime": {"timestamp": ts}, "favorited": fav}),
+            )
+
+    proj = tmp_path / "lazy_takeout_proj"
+    manifest = sync_google_takeout_media(
+        takeout_source=takeout_zip,
+        project_dir=proj,
+        date_from="2026-07-01",
+        date_to="2026-07-05",
+        max_videos=1,
+    )
+    assert manifest.selected_videos_count == 1
+    extracted_dir = proj / "cache" / "takeout_scan" / "extracted"
+    extracted_mp4s = [p.name for p in extracted_dir.glob("*.MP4")]
+    assert len(extracted_mp4s) == 1 and "VID_FAV.MP4" in extracted_mp4s[0]
+
+    # Rescuing VID_SKIP_1.MP4 via Pass-1.5 lazily extracts ONLY that rescued video
+    rescued_m = apply_cloud_pick_overrides(proj, overrides={"select": ["VID_SKIP_1.MP4"]}, execute_pass2=True)
+    assert rescued_m.selected_videos_count == 2
+    extracted_after = [p.name for p in extracted_dir.glob("*.MP4")]
+    assert len(extracted_after) == 2
+    assert any("VID_SKIP_1.MP4" in n for n in extracted_after)
+    assert not any("VID_SKIP_2.MP4" in n for n in extracted_after)
+
+
+def test_zero_setup_browser_search_urls_and_multi_zip_ingest(tmp_path: Path) -> None:
+    """Verify zero-setup browser deep-links (favorites/videos/album), multi-ZIP day-batch merge & apply-cloud-picks CLI."""
+    from video_editing_ai.cloud.google_photos import build_zero_setup_browser_plan
+
+    plan = build_zero_setup_browser_plan("2026-04-21", "2026-04-22")
+    assert plan["search_url"] == "https://photos.google.com/search/2026-04-21%20to%202026-04-22"
+    assert plan["favorites_search_url"] == "https://photos.google.com/search/2026-04-21%20to%202026-04-22%20favorites"
+    assert plan["videos_search_url"] == "https://photos.google.com/search/2026-04-21%20to%202026-04-22%20videos"
+    assert plan["max_items_per_zip"] == 450
+
+    album_u = "https://photos.google.com/album/AF1QipTestAlbum"
+    assert build_google_photos_web_search_url("2026-04-21", "2026-04-22", album_url=album_u) == album_u
+
+    # Multi-ZIP day batches merged cleanly in plan_only -> apply-cloud-picks CLI
+    z1 = tmp_path / "Photos-day1.zip"
+    z2 = tmp_path / "Photos-day2.zip"
+    with zipfile.ZipFile(z1, "w") as zf:
+        zf.writestr("DAY1_SEINE.JPG", _make_exif_jpeg_bytes("2026:04:21 09:00:00", 48.845, 2.366, 35.0, shape="mountain"))
+    with zipfile.ZipFile(z2, "w") as zf:
+        zf.writestr("DAY2_LOUVRE.JPG", _make_exif_jpeg_bytes("2026:04:22 11:00:00", 48.861, 2.337, 42.0, shape="arch", bg_rgb=(110, 62, 42)))
+
+    repo_root = Path(__file__).resolve().parent.parent
+    skill_script = repo_root / ".agent" / "skills" / "ai-video-editor" / "scripts" / "ai_video_studio_skill.py"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+    proj = tmp_path / "multi_zip_proj"
+
+    subprocess.run(
+        [
+            sys.executable, str(skill_script), "sync-google-photos",
+            "--project-dir", str(proj),
+            "--from-downloads", f"{z1},{z2}",
+            "--date-from", "2026-04-21", "--date-to", "2026-04-22",
+            "--max-photos", "1", "--plan-only",
+        ],
+        env=env,
+        check=True,
+    )
+    m_plan = GooglePhotosSyncManifest.from_json_file(proj / "google_photos_manifest.json")
+    assert m_plan.download_stage == "planned_only"
+    assert m_plan.in_date_range_count == 2
+    assert m_plan.event_clusters_count == 2
+
+    # Finalize via apply-cloud-picks rescuing both days
+    subprocess.run(
+        [
+            sys.executable, str(skill_script), "apply-cloud-picks",
+            "--project-dir", str(proj),
+            "--overrides-json", json.dumps({"select": ["DAY1_SEINE.JPG", "DAY2_LOUVRE.JPG"]}),
+        ],
+        env=env,
+        check=True,
+    )
+    m_done = GooglePhotosSyncManifest.from_json_file(proj / "google_photos_manifest.json")
+    assert m_done.download_stage == "completed"
+    assert m_done.selected_photos_count == 2
+    assert len(list(Path(m_done.staged_media_dir).iterdir())) == 2
+
