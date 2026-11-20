@@ -1562,21 +1562,26 @@ def cmd_render_travel_map(args: argparse.Namespace) -> int:
 
     allow_tiles = os.environ.get("AI_EDITOR_OFFLINE_MAPS", "0") != "1"
     eff_mode = (leg_modes[0] if leg_modes else None) or args.transport_mode or "auto"
-    if (args.style or "auto").strip().lower() == "auto" and allow_tiles:
-        from video_editing_ai.renderer.travel_map import haversine_km, infer_transport_mode
-        focus_i = max(0, min(max(0, len(wps) - 2), int(getattr(args, "leg_index", None) or 0)))
-        km_est = haversine_km(float(wps[focus_i]["lat"]), float(wps[focus_i]["lon"]), float(wps[focus_i + 1]["lat"]), float(wps[focus_i + 1]["lon"])) if len(wps) >= 2 else 0.0
-        inf_m = infer_transport_mode(km_est, str(wps[focus_i].get("label", "")), str(wps[focus_i + 1].get("label", "")), hint=eff_mode)
-        if inf_m in ("flight", "boat") or (inf_m == "train" and km_est >= 10.0):
-            tm_style = "satellite_hybrid_4k"
-        else:
-            tm_style = resolve_travel_map_style("auto", prompt_text=f"{args.origin or ''} {args.destination or ''}", transport_mode=inf_m)
-    else:
-        tm_style = resolve_travel_map_style(
-            args.style or "auto",
-            prompt_text=f"{args.origin or ''} {args.destination or ''}",
-            transport_mode=eff_mode,
+    from video_editing_ai.renderer.travel_map import haversine_km, infer_transport_mode
+    focus_i = max(0, min(max(0, len(wps) - 2), int(getattr(args, "leg_index", None) or 0)))
+    km_est = haversine_km(float(wps[focus_i]["lat"]), float(wps[focus_i]["lon"]), float(wps[focus_i + 1]["lat"]), float(wps[focus_i + 1]["lon"])) if len(wps) >= 2 else 0.0
+    inf_m = infer_transport_mode(km_est, str(wps[focus_i].get("label", "")), str(wps[focus_i + 1].get("label", "")), hint=eff_mode)
+    wp_ctx_blob = " ".join(
+        filter(
+            None,
+            [
+                args.origin or "",
+                args.destination or "",
+                *(f"{w.get('label', '')} {w.get('subtitle', '')}" for w in wps if isinstance(w, dict)),
+            ],
         )
+    )
+    tm_style = resolve_travel_map_style(
+        args.style or "auto",
+        prompt_text=wp_ctx_blob,
+        transport_mode=inf_m,
+        leg_km=km_est,
+    )
     req_leg_idx = getattr(args, "leg_index", None)
     use_leg_idx = int(req_leg_idx) if req_leg_idx is not None else (None if len(wps) > 2 else 0)
     res_mp4 = render_travel_map_clip(
@@ -1590,7 +1595,7 @@ def cmd_render_travel_map(args: argparse.Namespace) -> int:
         with_audio=bool(args.with_audio),
         cache_dir=proj / "cache" / "maps" / "tiles",
         leg_modes=leg_modes,
-        dynamic_zoom=allow_tiles,
+        dynamic_zoom=bool(allow_tiles and inf_m == "flight" and km_est >= 250.0),
     )
     print(f"Success! Rendered Cinema 2.5D Travel Map flyover ({tm_style}) to: {res_mp4}")
     return 0

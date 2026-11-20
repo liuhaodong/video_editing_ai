@@ -521,7 +521,17 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
             max_map_h = 2160 if os.environ.get("AI_EDITOR_MAP_4K") == "1" else 1440
             map_w = max(640, min(int(timeline.settings.width), max_map_w))
             map_h = max(360, min(int(timeline.settings.height), max_map_h))
-            user_prompt_blob = str(getattr(brief, "raw_user_prompt", "") if brief is not None else blackboard.user_prompt)
+            user_prompt_blob = " ".join(
+                part
+                for part in (
+                    str(getattr(brief, "raw_user_prompt", "") if brief is not None else blackboard.user_prompt),
+                    str(getattr(brief, "overall_mood", "") if brief is not None else ""),
+                    str(getattr(brief, "visual_style", "") if brief is not None else ""),
+                    str(getattr(brief, "color_palette_direction", "") if brief is not None else ""),
+                    " ".join(w.label for w in waypoints),
+                )
+                if part
+            )
 
             for leg_pos, leg_i in enumerate(chosen_legs):
                 orig_wp = waypoints[leg_i]
@@ -531,9 +541,9 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                 t_mode = all_leg_modes[leg_i]
                 if str(tm_raw_style or "auto").strip().lower() == "auto":
                     if t_mode in ("flight", "boat"):
-                        leg_style = "satellite_hybrid_4k" if allow_tiles else resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
+                        leg_style = "satellite_hybrid_4k" if allow_tiles else resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode, leg_km=leg_km)
                     else:
-                        leg_style = resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode)
+                        leg_style = resolve_travel_map_style("auto", theme, user_prompt_blob, transport_mode=t_mode, leg_km=leg_km)
                 else:
                     leg_style = tm_style
 
@@ -578,8 +588,8 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                         map_mp4 = maps_dir / f"flyover_leg_{leg_i + 1:02d}.mp4"
                         map_sig_payload = json.dumps(
                             {
-                                "v": 2,
-                                "wps": [(round(w.lat, 5), round(w.lon, 5), w.label, w.hero_thumbnail_path) for w in waypoints],
+                                "v": 3,
+                                "wps": [(round(w.lat, 5), round(w.lon, 5), w.label, w.hero_thumbnail_path, list(w.via_points)) for w in waypoints],
                                 "style": leg_style,
                                 "dur": seg_dur,
                                 "w": map_w,
@@ -617,7 +627,7 @@ class MotionGraphicsTitleAgent(BaseEditingAgent):
                                 with_audio=False,
                                 cache_dir=tiles_cache_dir,
                                 leg_modes=all_leg_modes,
-                                dynamic_zoom=allow_tiles,
+                                dynamic_zoom=bool(allow_tiles and t_mode == "flight" and leg_km >= 250.0),
                             )
                             map_sig_file.write_text(map_sig, encoding="utf-8")
                         broll_id = f"broll_map_{len(v2_map_windows) + 1:02d}"

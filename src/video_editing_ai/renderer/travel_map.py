@@ -131,8 +131,8 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_mid": (210, 194, 158),
         "land_high": (182, 154, 114),
         "coast_rgb": (96, 76, 54),
-        "contour_rgba": (128, 102, 72, 92),
-        "graticule_rgba": (112, 88, 62, 68),
+        "contour_rgba": (128, 102, 72, 72),
+        "graticule_rgba": (112, 88, 62, 30),
         "route_glow": (192, 68, 52),
         "route_core": (164, 42, 36),
         "route_casing": (78, 32, 24),
@@ -240,8 +240,8 @@ CART_THEME_SPECS: dict[str, dict[str, Any]] = {
         "land_mid": (226, 220, 208),
         "land_high": (208, 200, 186),
         "coast_rgb": (138, 148, 154),
-        "contour_rgba": (170, 164, 152, 78),
-        "graticule_rgba": (152, 146, 138, 60),
+        "contour_rgba": (170, 164, 152, 62),
+        "graticule_rgba": (152, 146, 138, 26),
         "route_glow": (196, 102, 74),
         "route_core": (178, 76, 52),
         "route_casing": (88, 42, 30),
@@ -275,41 +275,83 @@ def resolve_travel_map_style(
     title_theme: str = "apple_tv_glass",
     prompt_text: str = "",
     transport_mode: str = "auto",
+    leg_km: Optional[float] = None,
 ) -> str:
-    """Resolve explicit, mode-adaptive, or brief-matched cartography style."""
+    """Intelligently resolve explicit, theme-matched, landscape-matched, or mode-adaptive cartography style."""
     req = (requested_style or "auto").strip().lower()
     if req in CART_THEME_SPECS:
         return req
 
     low = (prompt_text or "").lower()
+    # 1. Explicit cartography style mentions in user prompt
     if any(k in low for k in ("satellite hybrid", "earth studio", "satellite 4k")):
         return "satellite_hybrid_4k"
-    if any(k in low for k in ("google", "road", "street", "highway", "navigator", "driving map")):
+    if any(k in low for k in ("google", "road navigator", "street map", "highway map", "driving map")):
         return "google_road_navigator"
     if any(k in low for k in ("parchment", "vintage", "archival", "expedition", "indiana", "sepia", "treasure")):
         return "archival_expedition_parchment"
     if any(k in low for k in ("aerial", "satellite", "terrain", "alpine", "mountain", "relief", "topograph")):
         return "aerial_relief_hybrid"
-    if any(k in low for k in ("kinfolk", "minimal", "monograph", "alabaster", "gallery", "magazine")):
+    if any(k in low for k in ("kinfolk", "minimal", "monograph", "alabaster", "magazine")):
         return "kinfolk_minimal_monograph"
     if any(k in low for k in ("vox", "midnight", "neon", "cyan", "dark atlas")):
         return "midnight_vox_atlas"
 
+    # 2. Flights & coastal/ocean crossings shine best on high-res orbital satellite imagery
     t_mode = (transport_mode or "auto").strip().lower()
     if t_mode in ("flight", "boat"):
         return "satellite_hybrid_4k"
-    if t_mode in ("drive", "train", "walk"):
-        return "midnight_vox_atlas"
 
+    # 3. Context-intelligent destination, mood, and film-stock style selection (avoid blind midnight_vox_atlas default!)
+    heritage_cues = (
+        "paris", "versailles", "chateau", "château", "palace", "museum", "cathedral", "castle",
+        "rome", "florence", "venice", "prague", "vienna", "kyoto", "temple", "shrine",
+        "historic", "heritage", "monument", "kodak", "classic", "europe", "louvre", "triomphe",
+    )
+    nature_cues = (
+        "national park", "yosemite", "big sur", "coast", "coastal", "canyon", "zion", "bryce",
+        "banff", "alps", "hiking", "trail", "lake", "island", "forest", "glacier", "desert",
+        "road trip", "scenic drive", "pacific", "highway 1", "valley", "beach",
+    )
+    editorial_cues = (
+        "bistro", "cafe", "café", "garden", "botanical", "winery", "napa", "carmel",
+        "gallery", "boutique", "fuji", "eterna", "pastel", "soft", "artisan", "culinary",
+    )
+    modern_night_cues = (
+        "shinjuku", "shibuya", "seoul", "manhattan", "hong kong", "singapore", "las vegas",
+        "night", "dusk", "twilight", "skyline", "cyber", "modern", "tech", "metro", "subway",
+    )
+    day_road_cues = ("freeway", "interstate", "commute", "suburb", "street navigation", "highway")
+
+    if any(k in low for k in heritage_cues):
+        return "archival_expedition_parchment"
+    if any(k in low for k in nature_cues):
+        return "aerial_relief_hybrid"
+    if any(k in low for k in editorial_cues):
+        return "kinfolk_minimal_monograph"
+    if any(k in low for k in modern_night_cues):
+        return "midnight_vox_atlas"
+    if any(k in low for k in day_road_cues):
+        return "google_road_navigator"
+
+    # 4. Respect explicit cinema title themes before mode fallback
     theme_map = {
         "criterion_atelier": "archival_expedition_parchment",
         "archival_35mm": "archival_expedition_parchment",
         "kinfolk_magazine": "kinfolk_minimal_monograph",
-        "a24_minimal": "midnight_vox_atlas",
         "kinetic_travelogue": "aerial_relief_hybrid",
-        "apple_tv_glass": "midnight_vox_atlas",
+        "a24_minimal": "midnight_vox_atlas",
     }
-    return theme_map.get(title_theme, "midnight_vox_atlas")
+    if title_theme in theme_map:
+        return theme_map[title_theme]
+
+    # 5. Long overland drives (> 80 km) favor terrain relief; neutral urban hops use sleek dark Vox atlas
+    if t_mode == "drive" and leg_km is not None and leg_km >= 80.0:
+        return "aerial_relief_hybrid"
+    if t_mode in ("drive", "train", "walk"):
+        return "midnight_vox_atlas"
+
+    return "archival_expedition_parchment" if title_theme != "apple_tv_glass" else "midnight_vox_atlas"
 
 
 # ---------------------------------------------------------------------------
@@ -1092,16 +1134,19 @@ def _draw_compass_rose(
     sub_font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     light_paper: bool,
 ) -> None:
-    """Draw a crisp 8-point nautical/cartographic compass rose with N/E/S/W ticks."""
-    draw = ImageDraw.Draw(img, "RGBA")
+    """Draw a crisp 8-point nautical/cartographic compass rose with true alpha compositing."""
     r = max(18, radius)
-    ring_c = (*color_rgb, 140)
-    dark_c = (*color_rgb, 210)
-    fill_lite = (color_rgb[0], color_rgb[1], color_rgb[2], 70 if light_paper else 55)
+    pad = r + max(24, r // 2)
+    patch = Image.new("RGBA", (pad * 2, pad * 2), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(patch, "RGBA")
+    lx, ly = pad, pad
+    ring_c = (*color_rgb, 145)
+    dark_c = (*color_rgb, 215)
+    fill_lite = (color_rgb[0], color_rgb[1], color_rgb[2], 78 if light_paper else 60)
 
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=ring_c, width=max(1, r // 24))
+    draw.ellipse([lx - r, ly - r, lx + r, ly + r], outline=ring_c, width=max(1, r // 24))
     inner_r = int(round(r * 0.78))
-    draw.ellipse([cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r], outline=(*color_rgb, 80), width=1)
+    draw.ellipse([lx - inner_r, ly - inner_r, lx + inner_r, ly + inner_r], outline=(*color_rgb, 85), width=1)
 
     for angle_deg in range(0, 360, 45):
         rad = math.radians(angle_deg - 90.0)
@@ -1109,13 +1154,20 @@ def _draw_compass_rose(
         tip_len = r * (0.94 if is_cardinal else 0.62)
         side_len = r * (0.20 if is_cardinal else 0.13)
         perp = rad + math.pi * 0.5
-        tip = (cx + math.cos(rad) * tip_len, cy + math.sin(rad) * tip_len)
-        left_pt = (cx + math.cos(perp) * side_len, cy + math.sin(perp) * side_len)
-        right_pt = (cx - math.cos(perp) * side_len, cy - math.sin(perp) * side_len)
-        draw.polygon([(cx, cy), tip, right_pt], fill=dark_c if is_cardinal else fill_lite)
-        draw.polygon([(cx, cy), tip, left_pt], fill=fill_lite, outline=(*color_rgb, 150))
+        tip = (lx + math.cos(rad) * tip_len, ly + math.sin(rad) * tip_len)
+        left_pt = (lx + math.cos(perp) * side_len, ly + math.sin(perp) * side_len)
+        right_pt = (lx - math.cos(perp) * side_len, ly - math.sin(perp) * side_len)
+        draw.polygon([(lx, ly), tip, right_pt], fill=dark_c if is_cardinal else fill_lite)
+        draw.polygon([(lx, ly), tip, left_pt], fill=fill_lite, outline=(*color_rgb, 145))
 
-    draw.text((cx - max(4, r // 9), cy - r - max(12, r // 3)), "N", font=sub_font, fill=dark_c)
+    draw.text((lx - max(4, r // 9), ly - r - max(12, r // 3)), "N", font=sub_font, fill=dark_c)
+    px0, py0 = int(cx - pad), int(cy - pad)
+    if img.mode == "RGBA":
+        img.alpha_composite(patch, (px0, py0))
+    else:
+        tmp = img.convert("RGBA")
+        tmp.alpha_composite(patch, (px0, py0))
+        img.paste(tmp.convert("RGB"))
 
 
 def _fetch_osrm_route_latlon(
@@ -1123,22 +1175,28 @@ def _fetch_osrm_route_latlon(
     dest: MapWaypointSpec,
     cache_dir: Optional[Path] = None,
     profile: str = "driving",
+    via_latlons: Optional[list[tuple[float, float]]] = None,
 ) -> Optional[list[tuple[float, float]]]:
-    """Fetch and disk-cache real road/pedestrian network geometry between (orig, dest) via OSRM."""
+    """Fetch and disk-cache real road/pedestrian network geometry between (orig, [*via], dest) via OSRM."""
     import json as _json
 
     clean_prof = "foot" if str(profile).lower() in ("walk", "foot", "pedestrian") else "driving"
-    key = f"{orig.lat:.4f}_{orig.lon:.4f}_{dest.lat:.4f}_{dest.lon:.4f}"
+    vias = [(float(p[0]), float(p[1])) for p in (via_latlons or []) if len(p) >= 2]
+    via_tag = ""
+    if vias:
+        via_sig = hashlib.sha1(";".join(f"{lat:.4f},{lon:.4f}" for lat, lon in vias).encode("utf-8")).hexdigest()[:8]
+        via_tag = f"_via_{via_sig}"
+    key = f"{orig.lat:.4f}_{orig.lon:.4f}_{dest.lat:.4f}_{dest.lon:.4f}{via_tag}"
     r_dir = (cache_dir or Path("cache")) / "map_routes"
     mem_key = (clean_prof, key, str(r_dir))
     cached_pts = _OSRM_ROUTE_MEM.get(mem_key)
     if cached_pts is not None:
         return cached_pts
     r_dir.mkdir(parents=True, exist_ok=True)
-    # Prefer profile-specific cache when present, falling back to legacy coordinate key
+    # Prefer profile-specific cache when present, falling back to legacy coordinate key (only when no vias)
     r_file_prof = r_dir / f"{clean_prof}_{key}.json"
-    r_file_legacy = r_dir / f"{key}.json"
-    for candidate in (r_file_legacy, r_file_prof):
+    candidates = [r_file_prof] if vias else [r_dir / f"{key}.json", r_file_prof]
+    for candidate in candidates:
         if candidate.exists():
             try:
                 pts = _json.loads(candidate.read_text(encoding="utf-8"))
@@ -1148,21 +1206,23 @@ def _fetch_osrm_route_latlon(
                     return res
             except Exception:
                 pass
+    coord_chain = [(orig.lon, orig.lat)] + [(lon, lat) for lat, lon in vias] + [(dest.lon, dest.lat)]
+    coord_str = ";".join(f"{lon:.5f},{lat:.5f}" for lon, lat in coord_chain)
     url = (
         f"https://router.project-osrm.org/route/v1/{clean_prof}/"
-        f"{orig.lon:.5f},{orig.lat:.5f};{dest.lon:.5f},{dest.lat:.5f}"
+        f"{coord_str}"
         "?overview=full&geometries=geojson"
     )
     try:
-        raw_bytes = _http_fetch_bytes(url, timeout=2.2)
+        raw_bytes = _http_fetch_bytes(url, timeout=2.5)
         if not raw_bytes:
             return None
         payload = _json.loads(raw_bytes.decode("utf-8"))
         routes = payload.get("routes") or []
         coords = routes[0].get("geometry", {}).get("coordinates", []) if routes else []
         if len(coords) >= 2:
-            # GeoJSON coordinates are [lon, lat]; thin slightly to ~160 points max for smooth AA drawing
-            step = max(1, len(coords) // 160)
+            # GeoJSON coordinates are [lon, lat]; thin slightly to ~180 points max for smooth AA drawing
+            step = max(1, len(coords) // 180)
             latlons = [(float(c[1]), float(c[0])) for c in coords[::step]]
             if latlons[-1] != (float(coords[-1][1]), float(coords[-1][0])):
                 latlons.append((float(coords[-1][1]), float(coords[-1][0])))
@@ -1294,8 +1354,23 @@ def _cached_world_baseplate(
             has_real_tiles = True
             blend = float(spec.get("tile_blend", 0.52))
             if style == "archival_expedition_parchment":
-                warm = np.array([1.01, 0.995, 0.965], dtype=np.float32)
-                rgb = np.clip(tile_arr * warm, 0, 255) * blend + rgb * (1.0 - blend)
+                # Premium museum parchment clarity wash: calm noisy topo clutter so crimson route & Polaroids pop
+                soft_t = cv2.GaussianBlur(tile_arr.astype(np.float32), (3, 3), 0.55)
+                clean_t = tile_arr.astype(np.float32) * 0.68 + soft_t * 0.32
+                luma_t = (0.299 * clean_t[..., 0] + 0.587 * clean_t[..., 1] + 0.114 * clean_t[..., 2])[..., None]
+                desat_t = luma_t + (clean_t - luma_t) * 0.72
+                paper_veil = np.array([234.0, 225.0, 206.0], dtype=np.float32)
+                washed = np.clip(desat_t * 0.80 + paper_veil * 0.20, 0, 255)
+                warm = np.array([1.015, 0.992, 0.955], dtype=np.float32)
+                rgb = np.clip(washed * warm, 0, 255) * blend + rgb * (1.0 - blend)
+            elif style == "kinfolk_minimal_monograph":
+                soft_t = cv2.GaussianBlur(tile_arr.astype(np.float32), (3, 3), 0.60)
+                clean_t = tile_arr.astype(np.float32) * 0.62 + soft_t * 0.38
+                luma_t = (0.299 * clean_t[..., 0] + 0.587 * clean_t[..., 1] + 0.114 * clean_t[..., 2])[..., None]
+                desat_t = luma_t + (clean_t - luma_t) * 0.58
+                alabaster = np.array([240.0, 236.0, 228.0], dtype=np.float32)
+                washed = np.clip(desat_t * 0.78 + alabaster * 0.22, 0, 255)
+                rgb = washed * blend + rgb * (1.0 - blend)
             elif style == "midnight_vox_atlas":
                 rgb = np.clip(tile_arr * 1.15, 0, 255) * blend + rgb * (1.0 - blend)
             else:
@@ -1369,29 +1444,30 @@ def _cached_world_baseplate(
             r_alpha = roads_im.getchannel("A").point(lambda v: int(round(v * 0.85)))
             roads_im.putalpha(r_alpha)
             base_img.alpha_composite(roads_im)
-    draw = ImageDraw.Draw(base_img, "RGBA")
+    grat_layer = Image.new("RGBA", (world_w, world_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(grat_layer, "RGBA")
     s = world_w / 1920.0
     f_mono = _load_font_tier(max(10, int(round(12 * s))), tier="mono", bold=False)
 
-    # Lat/Lon cartographic graticule grid (omitted on crisp satellite_hybrid_4k & continental Earth views)
+    # Lat/Lon cartographic graticule grid (true translucent archival hairlines via RGBA layer composite)
     grat_col = tuple(spec["graticule_rgba"])
     if grat_col[3] >= 20:
         for gx_frac in (0.18, 0.34, 0.50, 0.66, 0.82):
             px = int(round(world_w * gx_frac))
             draw.line([(px, 0), (px, world_h)], fill=grat_col, width=max(1, int(round(1.0 * s))))
             _, g_lon = vp.px_to_latlon(px, world_h * 0.5)
-            draw.text((px + int(round(4 * s)), world_h - int(round(20 * s))), _format_coord_dms(g_lon, False), font=f_mono, fill=(*spec["coast_rgb"], 150))
+            draw.text((px + int(round(4 * s)), world_h - int(round(20 * s))), _format_coord_dms(g_lon, False), font=f_mono, fill=(*spec["coast_rgb"], 118))
         for gy_frac in (0.20, 0.38, 0.56, 0.74):
             py = int(round(world_h * gy_frac))
             draw.line([(0, py), (world_w, py)], fill=grat_col, width=max(1, int(round(1.0 * s))))
             g_lat, _ = vp.px_to_latlon(world_w * 0.5, py)
-            draw.text((int(round(14 * s)), py + int(round(3 * s))), _format_coord_dms(g_lat, True), font=f_mono, fill=(*spec["coast_rgb"], 150))
+            draw.text((int(round(14 * s)), py + int(round(3 * s))), _format_coord_dms(g_lat, True), font=f_mono, fill=(*spec["coast_rgb"], 118))
 
     # Optional engraved alternating cartographic neatline border (Archival / Kinfolk)
     if spec.get("neatline"):
         bw = max(6, int(round(8 * s)))
-        dark_b = (*spec["coast_rgb"], 185)
-        light_b = (*spec["land_low"], 210)
+        dark_b = (*spec["coast_rgb"], 155)
+        light_b = (*spec["land_low"], 195)
         seg = max(48, int(round(96 * s)))
         for x0 in range(0, world_w, seg):
             c = dark_b if ((x0 // seg) % 2 == 0) else light_b
@@ -1402,16 +1478,9 @@ def _cached_world_baseplate(
             draw.rectangle([0, y0, bw, min(world_h, y0 + seg)], fill=c)
             draw.rectangle([world_w - bw, y0, world_w, min(world_h, y0 + seg)], fill=c)
 
-    # 8-point cartographic compass rose in bottom-left safe area
-    _draw_compass_rose(
-        base_img,
-        cx=int(round(world_w * 0.14)),
-        cy=int(round(world_h * 0.80)),
-        radius=max(24, int(round(38 * s))),
-        color_rgb=spec["compass_color"],
-        sub_font=f_mono,
-        light_paper=bool(spec["light_paper"]),
-    )
+    base_img.alpha_composite(grat_layer)
+    # Compass rose is rendered cleanly in post-warp screen space inside _render_screen_hud
+    # so it never drifts across routes or Polaroids during camera pans.
     return base_img.convert("RGB")
 
 
@@ -1739,18 +1808,27 @@ def _draw_cased_route(
     # 3. Saturated inner core
     _draw_aa_polyline(route_arr, pts, (*spec["route_core"], 255), max(2, stroke_w + 1))
 
-    # 4. Luminous leading-edge comet pulse immediately trailing the vehicle
+    # 4. Multi-stage tapered luminous comet tail leading smoothly into the moving beacon
     arc_p = _ArcLengthPath(pts)
-    tail_s = max(0.0, arc_p.total_len - 88.0 * s_w)
-    tip_pts = arc_p.sample_window(tail_s, arc_p.total_len, step_px=max(2.0, 4.0 * s_w))
-    if len(tip_pts) >= 2:
+    tail_len = min(arc_p.total_len * 0.35, max(56.0 * s_w, 128.0 * s_w))
+    if tail_len >= 6.0 * s_w:
         rc = spec["route_core"]
-        comet_rgb = (
-            min(255, int(round(rc[0] * 0.45 + 255 * 0.55))),
-            min(255, int(round(rc[1] * 0.45 + 255 * 0.55))),
-            min(255, int(round(rc[2] * 0.45 + 255 * 0.55))),
+        ac = spec["accent"]
+        glow_c = spec["route_glow"]
+        # 4 stepped segments from trailing tail -> blazing tip
+        stages = (
+            (1.00, 0.62, glow_c, 95, max(2, int(round(stroke_w * 1.45)))),
+            (0.66, 0.34, ac, 155, max(2, int(round(stroke_w * 1.15)))),
+            (0.38, 0.12, (min(255, int(rc[0] * 0.45 + 255 * 0.55)), min(255, int(rc[1] * 0.45 + 255 * 0.55)), min(255, int(rc[2] * 0.45 + 255 * 0.55))), 215, max(2, stroke_w)),
+            (0.15, 0.00, (255, 250, 238), 245, max(1, stroke_w - 1)),
         )
-        _draw_aa_polyline(route_arr, tip_pts, (*comet_rgb, 210), max(1, stroke_w - 1))
+        for frac_back, frac_front, col_rgb, alpha_v, seg_w in stages:
+            s0 = max(0.0, arc_p.total_len - tail_len * frac_back)
+            s1 = max(s0, arc_p.total_len - tail_len * frac_front)
+            if s1 - s0 >= 1.5:
+                seg_pts = arc_p.sample_window(s0, s1, step_px=max(2.0, 3.5 * s_w))
+                if len(seg_pts) >= 2:
+                    _draw_aa_polyline(route_arr, seg_pts, (*col_rgb, alpha_v), seg_w)
 
 
 def _draw_aircraft_ground_shadow(
@@ -1909,22 +1987,24 @@ def _draw_glow_beacon_dot(
     core_rgb: tuple[int, int, int],
     stroke_rgb: tuple[int, int, int],
     scale: float,
+    pulse_phase: float = 0.0,
 ) -> None:
-    """Render a sleek 4x-supersampled glowing beacon dot (replaces clunky multi-car sprites on map arcs)."""
-    box = max(44, int(round(64 * scale)))
+    """Render a sleek 4x-supersampled glowing beacon dot with gentle rhythmic pulse."""
+    pulse = 1.0 + 0.07 * math.sin(float(pulse_phase) * 2.0 * math.pi)
+    box = max(48, int(round(68 * scale)))
     ss = box * 4
     sub = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
     d = ImageDraw.Draw(sub, "RGBA")
     m = ss * 0.5
-    for mul, a_val in ((0.38, 42), (0.28, 78)):
-        r_g = ss * mul
+    for mul, a_val in ((0.42 * pulse, 36), (0.31 * pulse, 78), (0.22, 128)):
+        r_g = min(m - 2.0, ss * mul)
         d.ellipse([m - r_g, m - r_g, m + r_g, m + r_g], fill=(*glow_rgb, a_val))
-    r_out = ss * 0.175
-    d.ellipse([m - r_out, m - r_out, m + r_out, m + r_out], fill=(*stroke_rgb, 245))
-    r_in = ss * 0.125
+    r_out = ss * 0.165
+    d.ellipse([m - r_out, m - r_out, m + r_out, m + r_out], fill=(*stroke_rgb, 250))
+    r_in = ss * 0.118
     d.ellipse([m - r_in, m - r_in, m + r_in, m + r_in], fill=(*core_rgb, 255))
-    r_spec = ss * 0.048
-    d.ellipse([m - r_spec, m - r_spec, m + r_spec, m + r_spec], fill=(255, 252, 244, 248))
+    r_spec = ss * 0.046
+    d.ellipse([m - r_spec, m - r_spec, m + r_spec, m + r_spec], fill=(255, 253, 246, 252))
     tile = sub.resize((box, box), Image.Resampling.LANCZOS)
     canvas.alpha_composite(tile, dest=(int(round(cx - box * 0.5)), int(round(cy - box * 0.5))))
 
@@ -2293,6 +2373,67 @@ def _load_clean_callout_rgb(path: Path) -> Image.Image:
     return Image.fromarray(np.clip(np.round(arr), 0, 232).astype(np.uint8), mode="RGB")
 
 
+def _polaroid_candidate_slots(
+    dx: float,
+    dy: float,
+    card_w: float,
+    card_h: float,
+    s: float,
+) -> list[tuple[float, float]]:
+    """Canonical 8-quadrant Polaroid placement candidates anchored cleanly around a map pin."""
+    margin = int(round(32 * s))
+    return [
+        (dx - card_w - margin, dy + int(round(34 * s))),                   # 0: Lower-left
+        (dx + margin, dy + int(round(34 * s))),                            # 1: Lower-right
+        (dx - card_w - margin, dy - card_h - int(round(30 * s))),          # 2: Upper-left
+        (dx + margin, dy - card_h - int(round(30 * s))),                   # 3: Upper-right
+        (dx - card_w * 0.50, dy + int(round(62 * s))),                     # 4: Directly below
+        (dx - card_w * 0.50, dy - card_h - int(round(58 * s))),            # 5: Directly above
+        (dx - card_w - int(round(52 * s)), dy - card_h * 0.50),            # 6: Due left
+        (dx + int(round(52 * s)), dy - card_h * 0.50),                     # 7: Due right
+    ]
+
+
+def _score_rect_against_obstacles(
+    px_c: float,
+    py_c: float,
+    rw: float,
+    rh: float,
+    world_w: int,
+    world_h: int,
+    s: float,
+    others: list[tuple[float, float]],
+    rects: list[tuple[float, float, float, float]],
+    route_pts: list[tuple[float, float]],
+) -> float:
+    """Score a candidate card/callout rectangle: strongly avoids HUD, labels, pins, edges, and route line."""
+    pad_rect = 14.0 * s
+    cx_mid = px_c + rw * 0.5
+    cy_mid = py_c + rh * 0.5
+    min_d = min((math.hypot(cx_mid - ax, cy_mid - ay) for ax, ay in others), default=9999.0)
+    ov_area = 0.0
+    for rx0, ry0, rx1, ry1 in rects:
+        ix = max(0.0, min(px_c + rw + pad_rect, rx1) - max(px_c - pad_rect, rx0))
+        iy = max(0.0, min(py_c + rh + pad_rect, ry1) - max(py_c - pad_rect, ry0))
+        ov_area += ix * iy
+    # Penalize any active route spline point passing inside or right beside the card!
+    route_pen = 0.0
+    route_pad = 16.0 * s
+    for rpx, rpy in route_pts:
+        if (px_c - route_pad) <= rpx <= (px_c + rw + route_pad) and (py_c - route_pad) <= rpy <= (py_c + rh + route_pad):
+            # Stronger penalty deeper inside the card
+            dx_in = min(rpx - (px_c - route_pad), (px_c + rw + route_pad) - rpx)
+            dy_in = min(rpy - (py_c - route_pad), (py_c + rh + route_pad) - rpy)
+            route_pen += 900.0 + min(dx_in, dy_in) * 28.0
+    # Penalize clipping against frame bounds
+    edge_pen = 0.0
+    if px_c < 18.0 * s or (px_c + rw) > (world_w - 18.0 * s):
+        edge_pen += 6000.0
+    if py_c < world_h * 0.18 or (py_c + rh) > (world_h - 18.0 * s):
+        edge_pen += 6000.0
+    return min_d - ov_area * 3.0 - route_pen - edge_pen
+
+
 def _paste_hero_photo_callout(
     world_rgba: Image.Image,
     dest_px: tuple[float, float],
@@ -2307,21 +2448,30 @@ def _paste_hero_photo_callout(
     tilt_deg: float = 2.2,
     accent_override: Optional[tuple[int, int, int]] = None,
     avoid_rects: Optional[list[tuple[float, float, float, float]]] = None,
+    route_avoid_pts: Optional[list[tuple[float, float]]] = None,
+    locked_slot_idx: Optional[int] = None,
+    preloaded_thumb_rgb: Optional[Image.Image] = None,
 ) -> Optional[tuple[float, float]]:
     """Draw a tilted gallery photo card with caption & pin leader beside an origin/destination stop."""
-    if not thumb_path or bloom_p <= 0.01:
+    if bloom_p <= 0.01:
         return None
-    p = Path(thumb_path)
-    if not p.exists():
-        return None
-    try:
-        im = _load_clean_callout_rgb(p)
-    except Exception:
-        return None
+    if preloaded_thumb_rgb is not None:
+        im = preloaded_thumb_rgb
+    else:
+        if not thumb_path:
+            return None
+        p = Path(thumb_path)
+        if not p.exists():
+            return None
+        try:
+            im = _load_clean_callout_rgb(p)
+        except Exception:
+            return None
 
     s = world_w / 1920.0
     accent_rgb = accent_override or spec["accent"]
-    card_w = int(round(256 * s * (0.88 + 0.12 * bloom_p)))
+    bloom_eased = _ease_in_out_cubic(min(1.0, max(0.0, float(bloom_p))))
+    card_w = int(round(256 * s * (0.90 + 0.10 * bloom_eased)))
     img_h = int(round(card_w * 0.60))
     cap_h = max(14, int(round(24 * s)))
     card_h = img_h + cap_h + int(round(12 * s))
@@ -2330,73 +2480,167 @@ def _paste_hero_photo_callout(
     inner_h = max(20, img_h - pad)
     im = ImageOps.fit(im, (inner_w, inner_h), method=Image.Resampling.LANCZOS)
 
-    matte_bg = (*spec["pin_fill"], int(round(244 * bloom_p))) if not spec["light_paper"] else (248, 245, 238, int(round(246 * bloom_p)))
-    border_c = (*accent_rgb, int(round(225 * bloom_p)))
-    card = Image.new("RGBA", (card_w + 16, card_h + 16), (0, 0, 0, 0))
+    alpha_f = max(0.0, min(1.0, float(bloom_p)))
+    matte_bg = (*spec["pin_fill"], int(round(244 * alpha_f))) if not spec["light_paper"] else (248, 245, 238, int(round(246 * alpha_f)))
+    border_c = (*accent_rgb, int(round(225 * alpha_f)))
+    card = Image.new("RGBA", (card_w + 18, card_h + 18), (0, 0, 0, 0))
     dc = ImageDraw.Draw(card, "RGBA")
-    dc.rounded_rectangle([10, 10, card_w + 10, card_h + 10], radius=max(4, int(round(8 * s))), fill=(6, 10, 16, int(round(135 * bloom_p))))
+    # Soft layered gallery drop shadow
+    dc.rounded_rectangle([11, 12, card_w + 11, card_h + 12], radius=max(4, int(round(8 * s))), fill=(6, 10, 16, int(round(105 * alpha_f))))
+    dc.rounded_rectangle([9, 10, card_w + 9, card_h + 10], radius=max(4, int(round(8 * s))), fill=(6, 10, 16, int(round(75 * alpha_f))))
     dc.rounded_rectangle([4, 4, card_w + 4, card_h + 4], radius=max(4, int(round(8 * s))), fill=matte_bg, outline=border_c, width=max(1, int(round(2 * s))))
     im_rgba = im.convert("RGBA")
-    if bloom_p < 0.99:
-        alpha = im_rgba.getchannel("A").point(lambda v: int(round(v * bloom_p)))
+    if alpha_f < 0.99:
+        alpha = im_rgba.getchannel("A").point(lambda v: int(round(v * alpha_f)))
         im_rgba.putalpha(alpha)
     card.alpha_composite(im_rgba, (4 + pad, 4 + pad))
 
     f_cap = _load_font_tier(max(9, int(round(12 * s))), tier="mono", bold=True)
     cap_txt = f"{caption_prefix} · {label}"[:28].upper()
-    cap_col = (*spec["hud_title"], int(round(245 * bloom_p)))
+    cap_col = (*spec["hud_title"], int(round(245 * alpha_f)))
     dc.text((4 + pad + 2, 4 + pad + inner_h + max(3, int(round(5 * s)))), cap_txt, font=f_cap, fill=cap_col)
 
     card = card.rotate(tilt_deg, resample=Image.Resampling.BICUBIC, expand=True)
     dx, dy = dest_px
-    margin = int(round(28 * s))
-    cand_slots = [
-        (dx - card.width - margin, dy + int(round(36 * s))),
-        (dx + margin, dy + int(round(36 * s))),
-        (dx + int(round(14 * s)), dy + int(round(68 * s))),
-        (dx - card.width - margin, dy - card.height - int(round(28 * s))),
-        (dx - card.width - int(round(54 * s)), dy - card.height - int(round(92 * s))),
-        (dx + margin, dy - card.height - int(round(28 * s))),
-        (dx - card.width * 0.35, dy + int(round(72 * s))),
-        (dx - card.width * 0.5, dy - card.height - int(round(96 * s))),
-    ]
+    cand_slots = _polaroid_candidate_slots(dx, dy, float(card.width), float(card.height), s)
     others = list(avoid_pts or [])
     rects = list(avoid_rects or [])
-    best_xy: Optional[tuple[int, int]] = None
-    best_score = -1e12
-    pad_rect = 12.0 * s
-    for cx_raw, cy_raw in cand_slots:
-        px_c = int(round(max(14.0, min(float(world_w - card.width - 14), cx_raw))))
-        py_c = int(round(max(float(world_h * 0.22), min(float(world_h - card.height - 14), cy_raw))))
-        cx_mid = px_c + card.width * 0.5
-        cy_mid = py_c + card.height * 0.5
-        min_d = min((math.hypot(cx_mid - ax, cy_mid - ay) for ax, ay in others), default=9999.0)
-        # Penalize strongly any intersection with HUD boxes, pins, text tags, or sibling card
-        ov_area = 0.0
-        for rx0, ry0, rx1, ry1 in rects:
-            ix = max(0.0, min(px_c + card.width + pad_rect, rx1) - max(px_c - pad_rect, rx0))
-            iy = max(0.0, min(py_c + card.height + pad_rect, ry1) - max(py_c - pad_rect, ry0))
-            ov_area += ix * iy
-        score = min_d - ov_area * 2.5
-        if score > best_score:
-            best_score = score
-            best_xy = (px_c, py_c)
-    assert best_xy is not None
-    place_x, place_y = best_xy
+    route_pts = list(route_avoid_pts or [])
+
+    if locked_slot_idx is not None and 0 <= locked_slot_idx < len(cand_slots):
+        cx_raw, cy_raw = cand_slots[locked_slot_idx]
+        place_x = int(round(max(14.0, min(float(world_w - card.width - 14), cx_raw))))
+        place_y = int(round(max(float(world_h * 0.19), min(float(world_h - card.height - 14), cy_raw))))
+    else:
+        best_xy: Optional[tuple[int, int]] = None
+        best_score = -1e12
+        for cx_raw, cy_raw in cand_slots:
+            px_c = int(round(max(14.0, min(float(world_w - card.width - 14), cx_raw))))
+            py_c = int(round(max(float(world_h * 0.19), min(float(world_h - card.height - 14), cy_raw))))
+            score = _score_rect_against_obstacles(
+                float(px_c), float(py_c), float(card.width), float(card.height),
+                world_w, world_h, s, others, rects, route_pts,
+            )
+            if score > best_score:
+                best_score = score
+                best_xy = (px_c, py_c)
+        assert best_xy is not None
+        place_x, place_y = best_xy
 
     # Leader connector hairline linking the Polaroid corner back to the exact map pin
     wd_conn = ImageDraw.Draw(world_rgba, "RGBA")
-    anc_x = max(float(place_x + 10), min(float(place_x + card.width - 10), dx))
-    anc_y = max(float(place_y + 10), min(float(place_y + card.height - 10), dy))
-    wd_conn.line([(dx, dy), (anc_x, anc_y)], fill=(250, 248, 242, int(round(210 * bloom_p))), width=max(2, int(round(3.5 * s))))
-    wd_conn.line([(dx, dy), (anc_x, anc_y)], fill=(*accent_rgb, int(round(230 * bloom_p))), width=max(1, int(round(1.8 * s))))
+    anc_x = max(float(place_x + 12), min(float(place_x + card.width - 12), dx))
+    anc_y = max(float(place_y + 12), min(float(place_y + card.height - 12), dy))
+    wd_conn.line([(dx, dy), (anc_x, anc_y)], fill=(250, 248, 242, int(round(205 * alpha_f))), width=max(2, int(round(3.5 * s))))
+    wd_conn.line([(dx, dy), (anc_x, anc_y)], fill=(*accent_rgb, int(round(235 * alpha_f))), width=max(1, int(round(1.8 * s))))
     r_dot = max(2, int(round(3.5 * s)))
-    wd_conn.ellipse([anc_x - r_dot, anc_y - r_dot, anc_x + r_dot, anc_y + r_dot], fill=(*accent_rgb, int(round(240 * bloom_p))))
+    wd_conn.ellipse([anc_x - r_dot, anc_y - r_dot, anc_x + r_dot, anc_y + r_dot], fill=(*accent_rgb, int(round(240 * alpha_f))))
 
     world_rgba.alpha_composite(card, (place_x, place_y))
     if avoid_rects is not None:
         avoid_rects.append((float(place_x), float(place_y), float(place_x + card.width), float(place_y + card.height)))
     return (place_x + card.width * 0.5, place_y + card.height * 0.5)
+
+
+def _draw_route_annotations_screen(
+    out_rgba: Image.Image,
+    annotations: Optional[list[dict[str, Any]]],
+    vp: _MapViewport,
+    proj_fn: Any,
+    u: float,
+    spec: dict[str, Any],
+    width: int,
+    height: int,
+    occupied_rects: list[tuple[float, float, float, float]],
+    route_avoid_pts: Optional[list[tuple[float, float]]] = None,
+    locked_offsets: Optional[dict[int, tuple[float, float]]] = None,
+) -> None:
+    """Draw razor-sharp post-warp screen-space corridor/landmark callouts with collision avoidance."""
+    if not annotations:
+        return
+    ann_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    wd = ImageDraw.Draw(ann_layer, "RGBA")
+    s = width / 1920.0
+    f_t = _load_font_tier(max(11, int(round(15 * s))), tier=spec["title_tier"], bold=True)
+    f_s = _load_font_tier(max(9, int(round(11 * s))), tier="mono", bold=True)
+    route_pts = list(route_avoid_pts or [])
+    shadow_rgb = (68, 54, 38) if spec.get("light_paper") else (6, 10, 16)
+    drawn_any = False
+
+    for idx_a, ann in enumerate(annotations):
+        reveal_u = float(ann.get("reveal_u", ann.get("u_min", 0.0)))
+        hide_u = float(ann.get("u_max", 1.15))
+        if u < reveal_u:
+            continue
+        raw_in = min(1.0, (u - reveal_u) / 0.14) if reveal_u > 0.0 else 1.0
+        raw_out = 1.0 if u <= hide_u else max(0.0, 1.0 - (u - hide_u) / 0.14)
+        fade = _ease_in_out_cubic(raw_in) * _ease_in_out_cubic(raw_out)
+        if fade <= 0.04 or "lat" not in ann or "lon" not in ann:
+            continue
+        wx, wy = vp.latlon_to_px(float(ann["lat"]), float(ann["lon"]))
+        ax, ay = proj_fn(wx, wy)
+        if ax < -40 or ax > width + 40 or ay < height * 0.12 or ay > height + 40:
+            continue
+        title = str(ann.get("title") or "").strip()
+        sub = str(ann.get("sub") or "").strip()
+        if not title:
+            continue
+        bb_t = wd.textbbox((0, 0), title, font=f_t)
+        wt, ht = bb_t[2] - bb_t[0], bb_t[3] - bb_t[1]
+        ws, hs = (0, 0)
+        if sub:
+            bb_s = wd.textbbox((0, 0), sub, font=f_s)
+            ws, hs = bb_s[2] - bb_s[0], bb_s[3] - bb_s[1]
+        bw = max(wt, ws) + int(round(22 * s))
+        bh = ht + (hs + int(round(10 * s)) if sub else 0) + int(round(15 * s))
+
+        # Use locked per-leg offset when precomputed; else evaluate caller offset + 6 cardinal fallbacks
+        if locked_offsets is not None and idx_a in locked_offsets:
+            dx, dy = locked_offsets[idx_a]
+        else:
+            raw_off = ann.get("offset")
+            cand_offs: list[tuple[float, float]] = []
+            if raw_off is not None and len(raw_off) >= 2:
+                # Scale caller offsets (authored in ~1920p space) cleanly to current screen scale
+                cand_offs.append((float(raw_off[0]) * (s / max(0.5, 1.333 if abs(float(raw_off[0])) > 120 else 1.0)), float(raw_off[1]) * (s / max(0.5, 1.333 if abs(float(raw_off[1])) > 120 else 1.0))))
+            cand_offs.extend([
+                (22 * s, -bh - 20 * s),
+                (-bw - 22 * s, -bh - 20 * s),
+                (22 * s, 20 * s),
+                (-bw - 22 * s, 20 * s),
+                (-bw * 0.5, -bh - 26 * s),
+                (-bw * 0.5, 26 * s),
+            ])
+            dx, dy = cand_offs[0]
+            best_sc = -1e12
+            for ox_c, oy_c in cand_offs:
+                tx_c = max(16.0, min(float(width - bw - 16), ax + ox_c))
+                ty_c = max(float(height * 0.19), min(float(height - bh - 16), ay + oy_c))
+                sc = _score_rect_against_obstacles(tx_c, ty_c, float(bw), float(bh), width, height, s, [], occupied_rects, route_pts)
+                if sc > best_sc:
+                    best_sc = sc
+                    dx, dy = ox_c, oy_c
+
+        rise_px = (1.0 - fade) * 7.0 * s
+        tx = int(round(max(16.0, min(float(width - bw - 16), ax + dx))))
+        ty = int(round(max(float(height * 0.19), min(float(height - bh - 16), ay + dy + rise_px))))
+        bx = max(float(tx + 8), min(float(tx + bw - 8), ax))
+        by = max(float(ty + 8), min(float(ty + bh - 8), ay))
+        wd.line([(ax, ay), (bx, by)], fill=(250, 248, 242, int(round(165 * fade))), width=max(2, int(round(2.8 * s))))
+        wd.line([(ax, ay), (bx, by)], fill=(*spec["hud_border"][:3], int(round(205 * fade))), width=max(1, int(round(1.5 * s))))
+        r_a = max(3, int(round(4.5 * s)))
+        wd.ellipse([ax - r_a - 2, ay - r_a - 2, ax + r_a + 2, ay + r_a + 2], fill=(*spec["accent"], int(round(92 * fade))))
+        wd.ellipse([ax - r_a, ay - r_a, ax + r_a, ay + r_a], fill=(*spec["pin_fill"], int(round(245 * fade))), outline=(*spec["accent"], int(round(240 * fade))), width=max(1, int(round(2 * s))))
+        # Soft translucent shadow + frosted museum pill
+        wd.rounded_rectangle([tx + 2, ty + 4, tx + bw + 3, ty + bh + 5], radius=max(4, int(round(7 * s))), fill=(*shadow_rgb, int(round(48 * fade))))
+        wd.rounded_rectangle([tx, ty, tx + bw, ty + bh], radius=max(4, int(round(7 * s))), fill=(*spec["hud_fill"][:3], int(round(234 * fade))), outline=(*spec["hud_border"][:3], int(round(168 * fade))), width=max(1, int(round(1.4 * s))))
+        wd.text((tx + int(round(11 * s)), ty + int(round(6 * s))), title, font=f_t, fill=(*spec["hud_title"], int(round(252 * fade))))
+        if sub:
+            wd.text((tx + int(round(11 * s)), ty + int(round(6 * s)) + ht + int(round(7 * s))), sub, font=f_s, fill=(*spec["hud_metric"], int(round(238 * fade))))
+        occupied_rects.append((float(tx), float(ty), float(tx + bw), float(ty + bh)))
+        drawn_any = True
+    if drawn_any:
+        out_rgba.alpha_composite(ann_layer)
 
 
 def _draw_route_annotations(
@@ -2519,11 +2763,33 @@ def _get_cuda_map_grid(out_w: int, out_h: int) -> tuple[Any, Any, Any, Any, Any,
     return val
 
 
+def _upload_world_to_cuda(arr: np.ndarray) -> Optional[Any]:
+    """Upload static world RGB array (H, W, 3) once to CUDA VRAM as (1, 3, H, W) float32 tensor."""
+    if not _cuda_map_enabled():
+        return None
+    try:
+        import torch
+
+        with _CUDA_MAP_LOCK, torch.no_grad():
+            return (
+                torch.from_numpy(np.array(arr, dtype=np.uint8, copy=True))
+                .to("cuda", dtype=torch.float32)
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .contiguous()
+            )
+    except Exception:
+        return None
+
+
 def _cuda_warp_flat(
     arr: np.ndarray,
     h_inv: np.ndarray,
     out_w: int,
     out_h: int,
+    src_cuda_t: Optional[Any] = None,
+    vignette_strength: float = 0.0,
+    sharpen_amount: float = 0.0,
 ) -> Optional[np.ndarray]:
     if not _cuda_map_enabled() or (out_w * out_h) < 400_000:
         return None
@@ -2533,7 +2799,7 @@ def _cuda_warp_flat(
 
         wh, ww = int(arr.shape[0]), int(arr.shape[1])
         with _CUDA_MAP_LOCK, torch.no_grad():
-            gx_g, gy_g, _, _, _, _ = _get_cuda_map_grid(out_w, out_h)
+            gx_g, gy_g, nx_g, _, _, _ = _get_cuda_map_grid(out_w, out_h)
             h00, h01, h02 = float(h_inv[0, 0]), float(h_inv[0, 1]), float(h_inv[0, 2])
             h10, h11, h12 = float(h_inv[1, 0]), float(h_inv[1, 1]), float(h_inv[1, 2])
             h20, h21, h22 = float(h_inv[2, 0]), float(h_inv[2, 1]), float(h_inv[2, 2])
@@ -2546,15 +2812,30 @@ def _cuda_warp_flat(
             norm_y = (2.0 * map_y / max(1.0, float(wh - 1))) - 1.0
             grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0)
 
+            owned_src = src_cuda_t is None
             src_t = (
-                torch.from_numpy(np.array(arr, dtype=np.uint8, copy=True))
+                src_cuda_t
+                if src_cuda_t is not None
+                else torch.from_numpy(np.array(arr, dtype=np.uint8, copy=True))
                 .to("cuda", dtype=torch.float32)
                 .permute(2, 0, 1)
                 .unsqueeze(0)
             )
             warped = F.grid_sample(src_t, grid, mode="bicubic", padding_mode="border", align_corners=True)
+            if sharpen_amount > 1e-3:
+                blurred = F.avg_pool2d(warped, kernel_size=3, stride=1, padding=1)
+                warped = warped + (warped - blurred) * float(sharpen_amount)
+                del blurred
+            if vignette_strength > 1e-3:
+                ny_g = (2.0 * gy_g / max(1.0, float(out_h - 1))) - 1.0
+                r2 = nx_g * nx_g * 0.72 + ny_g * ny_g * 0.95
+                vig = torch.clamp(1.0 - float(vignette_strength) * torch.clamp(r2 - 0.35, min=0.0), 0.72, 1.0)
+                warped = warped * vig.view(1, 1, out_h, out_w)
+                del ny_g, r2, vig
             out_u8 = warped.squeeze(0).permute(1, 2, 0).clamp_(0.0, 255.0).round().to(torch.uint8).cpu().numpy()
-            del denom, map_x, map_y, norm_x, norm_y, grid, src_t, warped
+            del denom, map_x, map_y, norm_x, norm_y, grid, warped
+            if owned_src:
+                del src_t
             return out_u8
     except Exception:
         return None
@@ -2569,6 +2850,7 @@ def _cuda_warp_globe(
     y_h0: float,
     curve_drop: float,
     bank_slope: float,
+    src_cuda_t: Optional[Any] = None,
 ) -> Optional[np.ndarray]:
     if not _cuda_map_enabled() or (out_w * out_h) < 400_000:
         return None
@@ -2597,8 +2879,11 @@ def _cuda_warp_globe(
             norm_y = (2.0 * map_y / max(1.0, float(wh - 1))) - 1.0
             grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0)
 
+            owned_src = src_cuda_t is None
             src_t = (
-                torch.from_numpy(np.array(arr, dtype=np.uint8, copy=True))
+                src_cuda_t
+                if src_cuda_t is not None
+                else torch.from_numpy(np.array(arr, dtype=np.uint8, copy=True))
                 .to("cuda", dtype=torch.float32)
                 .permute(2, 0, 1)
                 .unsqueeze(0)
@@ -2636,15 +2921,18 @@ def _cuda_warp_globe(
             crest_rgb = torch.tensor([128.0, 208.0, 255.0], device="cuda", dtype=torch.float32)
             comp = space_lit * (1.0 - earth_mask) + earth_lit * earth_mask + crest * crest_rgb
             out_u8 = comp.clamp_(0.0, 255.0).round().to(torch.uint8).cpu().numpy()
-            del y_limb, span_h, t_y, sy_planar, sx_planar, denom, map_x, map_y, norm_x, norm_y, grid, src_t
+            del y_limb, span_h, t_y, sy_planar, sx_planar, denom, map_x, map_y, norm_x, norm_y, grid
             del earth_w, d_limb, zero, haze_w, earth_lit, space_bg, rim_out, space_lit, earth_mask, crest, comp
+            if owned_src:
+                del src_t
             return out_u8
     except Exception:
         return None
 
 
-def _apply_camera_homography(
-    world_rgb: Image.Image,
+def _compute_camera_projection(
+    ww: int,
+    wh: int,
     out_w: int,
     out_h: int,
     center_xy: tuple[float, float],
@@ -2652,16 +2940,8 @@ def _apply_camera_homography(
     pitch_deg: float,
     bank_deg: float,
     globe_strength: float = 0.0,
-) -> tuple[np.ndarray, Any, Any]:
-    """
-    Project oversampled 2D world atlas through a 2.5D virtual drone / Google Earth orbital camera.
-
-    Returns `(warped_rgb_u8, project_world_pt_fn, horizon_y_fn)` so sky-layer aircraft, 3D altitude
-    ribbons, and screen-space hero callouts align to Earth's surface while remaining razor sharp.
-    """
-    ww, wh = world_rgb.size
-    arr = np.asarray(world_rgb, dtype=np.uint8)
-
+) -> tuple[np.ndarray, np.ndarray, Any, Any, float, float, float]:
+    """Compute exact camera homography matrices and world->screen projector without warping pixels."""
     cx, cy = center_xy
     pitch = math.radians(max(0.0, min(42.0, pitch_deg)))
     bank = math.radians(max(-12.0, min(12.0, bank_deg)))
@@ -2679,7 +2959,6 @@ def _apply_camera_homography(
 
     base_frac = 0.56 if g_str > 0.1 else 0.72
     base_scale = (ww / max(1.0, float(out_w))) * (base_frac / max(0.55, zoom))
-    # Clamp camera center before sampling 4 frustum corners so no individual corner pinches at world boundary
     max_rx = abs(half_sw * cb) + abs(half_sh * sb)
     max_ry = abs(half_sw * sb) + abs(half_sh * cb)
     far_persp = 1.0 / max(0.42, 1.0 - 0.5 * math.tan(pitch) * 0.72)
@@ -2706,24 +2985,13 @@ def _apply_camera_homography(
     h_fwd = cv2.getPerspectiveTransform(src_arr, dst_pts)  # world -> screen
 
     if g_str <= 0.02:
-        warped = _cuda_warp_flat(arr, h_inv, out_w, out_h)
-        if warped is None:
-            warped = cv2.warpPerspective(
-                arr,
-                h_fwd,
-                (out_w, out_h),
-                flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REPLICATE,
-            )
-
         def _proj_flat(wx: float, wy: float) -> tuple[float, float]:
             pt = np.array([[[float(wx), float(wy)]]], dtype=np.float32)
             res = cv2.perspectiveTransform(pt, h_fwd)
             return (float(res[0, 0, 0]), float(res[0, 0, 1]))
 
-        return warped, _proj_flat, (lambda _sx: -100.0)
+        return h_inv, h_fwd, _proj_flat, (lambda _sx: -100.0), 0.0, 0.0, 0.0
 
-    # Google Earth curved planetary limb & aerial perspective sphere projection
     y_h0 = out_h * (0.105 * g_str)
     curve_drop = out_h * (0.095 * g_str)
     bank_slope = math.tan(bank) * (out_w * 0.08)
@@ -2732,15 +3000,84 @@ def _apply_camera_homography(
         nx_v = (2.0 * sx_val / max(1.0, float(out_w - 1))) - 1.0
         return y_h0 + curve_drop * (nx_v * nx_v) + bank_slope * nx_v
 
-    comp = _cuda_warp_globe(arr, h_inv, out_w, out_h, g_str, y_h0, curve_drop, bank_slope)
+    def _proj_globe(wx: float, wy: float) -> tuple[float, float]:
+        pt = np.array([[[float(wx), float(wy)]]], dtype=np.float32)
+        res = cv2.perspectiveTransform(pt, h_fwd)
+        sx_p, sy_p = float(res[0, 0, 0]), float(res[0, 0, 1])
+        t_v = sy_p / max(1.0, float(out_h))
+        nx_approx = (2.0 * sx_p / max(1.0, float(out_w - 1))) - 1.0
+        yl_approx = y_h0 + curve_drop * (nx_approx * nx_approx) + bank_slope * nx_approx
+        sy_g = yl_approx + t_v * max(1.0, float(out_h) - yl_approx)
+        span_f = 1.0 + 0.08 * g_str * (max(0.0, 1.0 - t_v) ** 1.4)
+        sx_g = out_w * 0.5 + (sx_p - out_w * 0.5) / max(0.5, span_f)
+        return (sx_g, sy_g)
+
+    return h_inv, h_fwd, _proj_globe, _horizon_y, y_h0, curve_drop, bank_slope
+
+
+def _apply_camera_homography(
+    world_rgb: Image.Image,
+    out_w: int,
+    out_h: int,
+    center_xy: tuple[float, float],
+    zoom: float,
+    pitch_deg: float,
+    bank_deg: float,
+    globe_strength: float = 0.0,
+    src_cuda_t: Optional[Any] = None,
+    vignette_strength: float = 0.0,
+    sharpen_amount: float = 0.0,
+) -> tuple[np.ndarray, Any, Any]:
+    """
+    Project oversampled 2D world atlas through a 2.5D virtual drone / Google Earth orbital camera.
+
+    Supports pre-uploaded `src_cuda_t` VRAM tensor reuse + GPU sharpening/vignette for ~3-5x faster renders.
+    """
+    ww, wh = world_rgb.size
+    arr = np.asarray(world_rgb, dtype=np.uint8)
+    g_str = max(0.0, min(1.0, float(globe_strength)))
+    h_inv, h_fwd, proj_fn, horizon_y_fn, y_h0, curve_drop, bank_slope = _compute_camera_projection(
+        ww, wh, out_w, out_h, center_xy, zoom, pitch_deg, bank_deg, g_str
+    )
+
+    if g_str <= 0.02:
+        warped = _cuda_warp_flat(
+            arr, h_inv, out_w, out_h,
+            src_cuda_t=src_cuda_t,
+            vignette_strength=vignette_strength,
+            sharpen_amount=sharpen_amount,
+        )
+        if warped is None:
+            warped = cv2.warpPerspective(
+                arr,
+                h_fwd,
+                (out_w, out_h),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+            if sharpen_amount > 1e-3:
+                w_f = warped.astype(np.float32)
+                blur_f = cv2.GaussianBlur(w_f, (3, 3), 0.7)
+                warped = np.clip(np.round(w_f + (w_f - blur_f) * float(sharpen_amount)), 0, 255).astype(np.uint8)
+            if vignette_strength > 1e-3:
+                yy, xx = np.mgrid[0:out_h, 0:out_w].astype(np.float32)
+                nx_v = (2.0 * xx / max(1.0, float(out_w - 1))) - 1.0
+                ny_v = (2.0 * yy / max(1.0, float(out_h - 1))) - 1.0
+                r2 = nx_v * nx_v * 0.72 + ny_v * ny_v * 0.95
+                vig = np.clip(1.0 - float(vignette_strength) * np.maximum(0.0, r2 - 0.35), 0.72, 1.0)[..., None]
+                warped = np.clip(np.round(warped.astype(np.float32) * vig), 0, 255).astype(np.uint8)
+        return warped, proj_fn, horizon_y_fn
+
+    comp = _cuda_warp_globe(
+        arr, h_inv, out_w, out_h, g_str, y_h0, curve_drop, bank_slope,
+        src_cuda_t=src_cuda_t,
+    )
     if comp is None:
         gx_grid, gy_grid, nx_norm, star_xs, star_ys, star_b = _get_cpu_globe_grid(out_w, out_h)
         y_limb = y_h0 + curve_drop * (nx_norm * nx_norm) + bank_slope * nx_norm
 
-        # Remap curved screen pixels back onto planar screen domain smoothly
         span_h = np.maximum(1.0, float(out_h) - y_limb)
         t_y = np.clip((gy_grid - y_limb) / span_h, 0.0, 1.0)
-        # Subtle spherical compression near the limb so continents bow around Earth horizon cleanly
         sy_planar = t_y * float(out_h)
         sx_planar = out_w * 0.5 + (gx_grid - out_w * 0.5) * (1.0 + 0.08 * g_str * np.power(1.0 - t_y, 1.4))
 
@@ -2757,44 +3094,26 @@ def _apply_camera_homography(
             borderMode=cv2.BORDER_REPLICATE,
         ).astype(np.float32)
 
-        # Space dome + crisp stars above y_limb + luminous Google Earth Rayleigh blue atmosphere halo
-        d_limb = gy_grid - y_limb  # >= 0 on Earth, < 0 in space
+        d_limb = gy_grid - y_limb
         scale_h = max(0.5, out_h / 1080.0)
-
-        # Soft Rayleigh scatter veil fading over distant Earth horizon
         haze_w = np.where(d_limb >= 0.0, np.exp(-d_limb / (58.0 * scale_h)) * 0.52, 0.0).astype(np.float32)[..., None]
         atmo_rgb = np.array([92.0, 178.0, 250.0], dtype=np.float32)
         earth_lit = earth_warped * (1.0 - haze_w) + atmo_rgb * haze_w
 
-        # Deep cosmos backdrop with deterministic faint starlight above limb
         space_bg = np.full((out_h, out_w, 3), np.array([3.0, 6.0, 14.0], dtype=np.float32), dtype=np.float32)
         for st_x, st_y, br in zip(star_xs, star_ys, star_b):
             if st_y < y_limb[st_y, st_x] - 6.0:
                 space_bg[st_y, st_x] = [br * 0.88, br * 0.94, br]
 
-        # Atmospheric rim bloom fading outward into space & softening horizon seam
         rim_out = np.where(d_limb < 0.0, np.exp(d_limb / (14.0 * scale_h)) * 0.82, 0.0).astype(np.float32)[..., None]
         space_lit = space_bg * (1.0 - rim_out) + np.array([82.0, 172.0, 252.0], dtype=np.float32) * rim_out
 
-        # Smooth anti-aliased transition across +/- 2.5px of horizon limb + specular blue limb crest
         earth_mask = np.clip((d_limb + 2.5) / 5.0, 0.0, 1.0).astype(np.float32)[..., None]
         crest = np.exp(-(d_limb / (5.5 * scale_h)) ** 2) * 0.45
         comp = space_lit * (1.0 - earth_mask) + earth_lit * earth_mask
         comp = np.clip(comp + crest[..., None] * np.array([128.0, 208.0, 255.0], dtype=np.float32), 0, 255).astype(np.uint8)
 
-    def _proj_globe(wx: float, wy: float) -> tuple[float, float]:
-        pt = np.array([[[float(wx), float(wy)]]], dtype=np.float32)
-        res = cv2.perspectiveTransform(pt, h_fwd)
-        sx_p, sy_p = float(res[0, 0, 0]), float(res[0, 0, 1])
-        t_v = sy_p / max(1.0, float(out_h))
-        nx_approx = (2.0 * sx_p / max(1.0, float(out_w - 1))) - 1.0
-        yl_approx = y_h0 + curve_drop * (nx_approx * nx_approx) + bank_slope * nx_approx
-        sy_g = yl_approx + t_v * max(1.0, float(out_h) - yl_approx)
-        span_f = 1.0 + 0.08 * g_str * (max(0.0, 1.0 - t_v) ** 1.4)
-        sx_g = out_w * 0.5 + (sx_p - out_w * 0.5) / max(0.5, span_f)
-        return (sx_g, sy_g)
-
-    return comp, _proj_globe, _horizon_y
+    return comp, proj_fn, horizon_y_fn
 
 
 def _draw_hud_mode_glyph(
@@ -2845,6 +3164,31 @@ def _draw_hud_mode_glyph(
             draw.ellipse([cx + wx_o - r * 0.20, cy + r * 0.18, cx + wx_o + r * 0.20, cy + r * 0.56], fill=color_rgba)
 
 
+def _abbreviate_ribbon_label(label: str, max_chars: int = 12) -> str:
+    """Shorten a waypoint label cleanly for the journey ribbon without mid-word truncation."""
+    base = str(label or "").split("·")[0].strip()
+    if len(base) <= max_chars:
+        return base
+    # Strip common leading articles first ("Les Affranchis" -> "Affranchis", "Le Louvre" -> "Louvre")
+    words = base.split()
+    if len(words) >= 2 and words[0].lower() in ("the", "les", "la", "le", "l'", "el", "los", "las", "der", "die", "das"):
+        stripped = " ".join(words[1:])
+        if len(stripped) <= max_chars:
+            return stripped
+        words = words[1:]
+    # For multi-word monument names like "Arc de Triomphe", pick the distinctive headline noun ("Triomphe")
+    if len(words) >= 2 and len(words[-1]) >= 5 and len(words[-1]) <= max_chars:
+        return words[-1]
+    # Otherwise fit as many whole words as possible before hard fallback
+    acc = words[0]
+    for w_tok in words[1:]:
+        if len(acc) + 1 + len(w_tok) <= max_chars:
+            acc = f"{acc} {w_tok}"
+        else:
+            break
+    return acc if len(acc) <= max_chars else (acc[: max_chars - 1].rstrip() + ".")
+
+
 def _render_screen_hud(
     frame_rgba: Image.Image,
     style: str,
@@ -2854,22 +3198,28 @@ def _render_screen_hud(
     transport_mode: str,
     compact_hud: bool,
     hdr_safe: bool,
+    route_total_km: Optional[float] = None,
+    cur_latlon: Optional[tuple[float, float]] = None,
+    draw_compass: bool = True,
 ) -> None:
-    """Composite crisp post-warp frosted-glass route telemetry card & elevation sparkline."""
+    """Composite crisp post-warp frosted-glass route telemetry card, compass rose & journey/elevation card."""
     spec = CART_THEME_SPECS[style]
     w, h = frame_rgba.size
     s = w / 1920.0
-    draw = ImageDraw.Draw(frame_rgba, "RGBA")
+    shadow_rgb = (68, 54, 38) if spec.get("light_paper") else (6, 10, 16)
 
     i0 = max(0, min(len(waypoints) - 1, leg_index))
     i1 = min(len(waypoints) - 1, i0 + 1)
     orig = waypoints[i0]
     dest = waypoints[i1]
     u = _cartography_travel_progress(t_norm)
-    leg_km = haversine_km(orig.lat, orig.lon, dest.lat, dest.lon)
+    leg_km = float(route_total_km) if (route_total_km is not None and route_total_km > 0.0) else haversine_km(orig.lat, orig.lon, dest.lat, dest.lon)
     cur_km = leg_km * u
-    cur_lat = orig.lat + (dest.lat - orig.lat) * u
-    cur_lon = orig.lon + (dest.lon - orig.lon) * u
+    if cur_latlon is not None:
+        cur_lat, cur_lon = float(cur_latlon[0]), float(cur_latlon[1])
+    else:
+        cur_lat = orig.lat + (dest.lat - orig.lat) * u
+        cur_lon = orig.lon + (dest.lon - orig.lon) * u
     base_alt = orig.alt_m + (dest.alt_m - orig.alt_m) * u
     if transport_mode == "flight":
         cruise_peak = min(10950.0, max(1800.0, leg_km * 14.0))
@@ -2884,7 +3234,7 @@ def _render_screen_hud(
         strip = np.zeros((mist_h, 1, 4), dtype=np.uint8)
         for y in range(mist_h):
             k = 1.0 - (y / max(1, mist_h - 1))
-            strip[y, 0] = (mist_rgb[0], mist_rgb[1], mist_rgb[2], int(round(135 * (k * k))))
+            strip[y, 0] = (mist_rgb[0], mist_rgb[1], mist_rgb[2], int(round(130 * (k * k))))
         mist_img = Image.fromarray(strip).resize((w, mist_h), Image.Resampling.BILINEAR)
         frame_rgba.alpha_composite(mist_img, (0, 0))
 
@@ -2894,13 +3244,16 @@ def _render_screen_hud(
     sub_c = (*spec["hud_sub"], 226)
     metric_c = (*spec["hud_metric"], 248)
 
+    hud_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(hud_layer, "RGBA")
+
     if compact_hud:
-        # Compact bottom telemetry strip inside travel_map_pip_card
         ph = max(24, int(round(h * 0.18)))
         pt = h - ph - max(6, int(round(10 * s)))
         pl = max(8, int(round(14 * s)))
         pr = w - pl
         draw.rounded_rectangle([pl, pt, pr, pt + ph], radius=max(6, int(round(10 * s))), fill=hud_fill, outline=hud_border, width=max(1, int(round(1.5 * s))))
+        frame_rgba.alpha_composite(hud_layer)
         t_sz = max(11, int(round(24 * s)))
         m_sz = max(10, int(round(18 * s)))
         f_t = _load_font_tier(t_sz, tier=spec["title_tier"], bold=True)
@@ -2919,30 +3272,38 @@ def _render_screen_hud(
         draw_tracked_text(frame_rgba, (pr - km_w - max(8, int(round(14 * s))), pt + max(3, (ph - m_sz) // 2)), km_lbl, font=f_m, fill=metric_c, shadow=False, hdr_safe=hdr_safe)
         return
 
-    # Full-frame documentary HUD telemetry pill (upper-left)
+    # Full-frame documentary HUD telemetry pill (upper-left) with crisp vector arrow separator
     px = int(round(w * 0.045))
-    py = int(round(h * 0.065))
+    py = int(round(h * 0.060))
     f_over = _load_font_tier(max(10, int(round(13 * s))), tier=spec["sub_tier"], bold=True)
-    f_head = _load_font_tier(max(13, int(round(30 * s))), tier=spec["title_tier"], bold=True)
-    f_stat = _load_font_tier(max(10, int(round(16 * s))), tier=spec["sub_tier"], bold=False)
+    f_head = _load_font_tier(max(13, int(round(29 * s))), tier=spec["title_tier"], bold=True, text=f"{orig.label} {dest.label}")
+    f_stat = _load_font_tier(max(10, int(round(15 * s))), tier=spec["sub_tier"], bold=False)
 
-    route_line = f"{orig.label}  ->  {dest.label}"
-    km_disp = f"{cur_km:.1f} KM" if leg_km >= 10.0 else f"{cur_km:.2f} KM"
-    stat_line = f"{transport_mode.upper()}  |  {km_disp}  |  {_format_coord_dms(cur_lat, True)} {_format_coord_dms(cur_lon, False)}  |  {cur_alt:.0f}M"
+    orig_w, orig_h = measure_tracked_text(draw, orig.label, f_head)
+    dest_w, _ = measure_tracked_text(draw, dest.label, f_head)
+    arrow_span = int(round(36 * s))
+    rw1 = orig_w + arrow_span + dest_w
+    km_disp = f"{cur_km:.1f} / {leg_km:.1f} KM" if leg_km >= 10.0 else f"{cur_km:.2f} / {leg_km:.1f} KM"
+    stat_line = f"{transport_mode.upper()}  |  {km_disp}  |  {_format_coord_dms(cur_lat, True)} {_format_coord_dms(cur_lon, False)}"
     over_line = f"EXPEDITION LEG {i0 + 1:02d} OF {max(1, len(waypoints) - 1):02d}"
 
-    rw1, _ = measure_tracked_text(draw, route_line, f_head)
     rw2, _ = measure_tracked_text(draw, stat_line, f_stat)
     rw3, _ = measure_tracked_text(draw, over_line, f_over, letter_spacing_px=2.0 * s)
     glyph_pad = int(round(28 * s))
-    box_w = min(int(w * 0.68), max(int(round(360 * s)), max(rw1, rw2 + glyph_pad, rw3) + int(round(62 * s))))
-    box_h = max(68, int(round(108 * s)))
+    box_w = min(int(w * 0.68), max(int(round(370 * s)), max(rw1, rw2 + glyph_pad, rw3) + int(round(62 * s))))
+    box_h = max(68, int(round(106 * s)))
+    # Soft true-alpha drop shadow + frosted glass card
+    draw.rounded_rectangle(
+        [px + 3, py + 5, px + box_w + 4, py + box_h + 6],
+        radius=max(8, int(round(14 * s))),
+        fill=(*shadow_rgb, 48),
+    )
     draw.rounded_rectangle(
         [px, py, px + box_w, py + box_h],
         radius=max(8, int(round(14 * s))),
         fill=hud_fill,
         outline=hud_border,
-        width=max(1, int(round(2.0 * s))),
+        width=max(1, int(round(1.6 * s))),
     )
     bar_w = max(2, int(round(3.5 * s)))
     draw.rounded_rectangle(
@@ -2951,16 +3312,37 @@ def _render_screen_hud(
         fill=(*spec["accent"], 240),
     )
     tx = px + int(round(28 * s))
-    draw_tracked_text(frame_rgba, (tx, py + int(round(13 * s))), over_line, font=f_over, fill=metric_c, letter_spacing_px=2.0 * s, shadow=False, hdr_safe=hdr_safe)
-    draw_tracked_text(frame_rgba, (tx, py + int(round(34 * s))), route_line, font=f_head, fill=title_c, shadow=False, hdr_safe=hdr_safe)
-    _draw_hud_mode_glyph(draw, tx + int(round(9 * s)), py + int(round(82 * s)), 8.5 * s, transport_mode, (*spec["accent"], 242))
-    draw_tracked_text(frame_rgba, (tx + glyph_pad, py + int(round(74 * s))), stat_line, font=f_stat, fill=sub_c, shadow=False, hdr_safe=hdr_safe)
+    head_y = py + int(round(33 * s))
+    ax0 = tx + orig_w + int(round(10 * s))
+    ax1 = tx + orig_w + arrow_span - int(round(10 * s))
+    ay_mid = head_y + int(round(max(12.0, orig_h * 0.54)))
+    ar_col = (*spec["accent"], 245)
+    draw.line([(ax0, ay_mid), (ax1 - int(round(4 * s)), ay_mid)], fill=ar_col, width=max(2, int(round(2.4 * s))))
+    ah = max(4.0, 5.5 * s)
+    draw.polygon([(ax1, ay_mid), (ax1 - ah * 1.45, ay_mid - ah * 0.85), (ax1 - ah * 1.45, ay_mid + ah * 0.85)], fill=ar_col)
+    _draw_hud_mode_glyph(draw, tx + int(round(9 * s)), py + int(round(81 * s)), 8.5 * s, transport_mode, (*spec["accent"], 242))
 
-    # Lower-right synchronized elevation sparkline card (2x supersampled curve)
-    sp_w = max(140, int(round(310 * s)))
-    sp_h = max(56, int(round(92 * s)))
+    # Smart lower-right telemetry card:
+    # - Flights & mountain legs (>=180m relief or >=500m altitude): Altitude / Elevation Sparkline
+    # - Urban / flat multi-stop journeys: Multi-Stop Journey Progress Ribbon
+    alt_a = max(0.0, float(orig.alt_m))
+    alt_b = max(0.0, float(dest.alt_m))
+    show_elev_profile = (
+        transport_mode == "flight"
+        or abs(alt_b - alt_a) >= 180.0
+        or max(alt_a, alt_b) >= 500.0
+        or len(waypoints) < 2
+    )
+
+    sp_w = max(160, int(round((396 if not show_elev_profile else 310) * s)))
+    sp_h = max(60, int(round(94 * s)))
     sp_x = w - int(round(w * 0.045)) - sp_w
-    sp_y = h - int(round(h * 0.065)) - sp_h
+    sp_y = h - int(round(h * 0.060)) - sp_h
+    draw.rounded_rectangle(
+        [sp_x + 3, sp_y + 5, sp_x + sp_w + 4, sp_y + sp_h + 6],
+        radius=max(6, int(round(12 * s))),
+        fill=(*shadow_rgb, 48),
+    )
     draw.rounded_rectangle(
         [sp_x, sp_y, sp_x + sp_w, sp_y + sp_h],
         radius=max(6, int(round(12 * s))),
@@ -2969,75 +3351,460 @@ def _render_screen_hud(
         width=max(1, int(round(1.5 * s))),
     )
     f_sp = _load_font_tier(max(9, int(round(12 * s))), tier=spec["sub_tier"], bold=True)
-    draw_tracked_text(
-        frame_rgba,
-        (sp_x + int(round(14 * s)), sp_y + int(round(10 * s))),
-        f"ALT PROFILE  |  {cur_alt:.0f}M ASL" if transport_mode == "flight" else f"ELEV PROFILE  |  {cur_alt:.0f}M ASL",
-        font=f_sp,
-        fill=sub_c,
-        shadow=False,
-        hdr_safe=hdr_safe,
-    )
 
-    gx0 = sp_x + int(round(14 * s))
-    gx1 = sp_x + sp_w - int(round(14 * s))
-    gy_base = sp_y + sp_h - int(round(14 * s))
-    gy_top = sp_y + int(round(34 * s))
-    alt_a = max(0.0, float(orig.alt_m))
-    alt_b = max(0.0, float(dest.alt_m))
-    alt_max = max(alt_a, alt_b, 200.0)
-    n_sp = 32
-    prof_pts: list[tuple[float, float]] = []
-    for k in range(n_sp):
-        frac = k / float(n_sp - 1)
-        if transport_mode == "flight":
-            e_norm = 0.14 + 0.78 * math.sin(math.pi * frac)
-        else:
-            ridge = math.sin(math.pi * frac) * 0.14
-            e_norm = max(0.08, min(0.95, ((alt_a * (1.0 - frac) + alt_b * frac) / alt_max) * 0.72 + ridge))
-        prof_pts.append((gx0 + (gx1 - gx0) * frac, gy_base - (gy_base - gy_top) * e_norm))
+    if not show_elev_profile:
+        # Multi-stop Journey Progress Ribbon (all vector graphics on true-alpha hud_layer!)
+        n_wp = len(waypoints)
+        n_legs = max(1, n_wp - 1)
+        overall_pct = int(round(((i0 + u) / float(n_legs)) * 100.0))
+        rx0 = sp_x + int(round(32 * s))
+        rx1 = sp_x + sp_w - int(round(32 * s))
+        ry_line = sp_y + int(round(48 * s))
+        draw.line([(rx0, ry_line), (rx1, ry_line)], fill=(*spec["route_future"], 145), width=max(2, int(round(3.0 * s))))
+        prog_x = rx0 + (rx1 - rx0) * ((i0 + u) / float(n_legs))
+        draw.line([(rx0, ry_line), (prog_x, ry_line)], fill=(*spec["route_core"], 250), width=max(3, int(round(4.0 * s))))
+        f_node = _load_font_tier(max(8, int(round(10.5 * s))), tier="mono", bold=True)
+        for k_s in range(n_wp):
+            nx_s = rx0 + (rx1 - rx0) * (k_s / float(n_legs))
+            is_done = k_s <= i0
+            is_target = k_s == i1
+            nr = max(5, int(round((7.5 if (k_s in (i0, i1)) else 5.5) * s)))
+            ring_c = (*spec["accent"], 250) if (is_done or is_target) else (*spec["route_future"], 180)
+            fill_c = (*spec["route_core"], 255) if is_done else (*spec["pin_fill"], 248)
+            draw.ellipse([nx_s - nr - 1.5, ry_line - nr - 1.5, nx_s + nr + 1.5, ry_line + nr + 1.5], fill=ring_c)
+            draw.ellipse([nx_s - nr, ry_line - nr, nx_s + nr, ry_line + nr], fill=fill_c)
+            lbl_short = _abbreviate_ribbon_label(waypoints[k_s].label, max_chars=12)
+            if k_s in (i0, i1) or n_wp <= 4:
+                lw, _ = measure_tracked_text(draw, lbl_short, f_node)
+                lx = max(sp_x + int(round(10 * s)), min(sp_x + sp_w - lw - int(round(10 * s)), nx_s - lw * 0.5))
+                draw.text((lx, ry_line + int(round(13 * s))), lbl_short, font=f_node, fill=title_c if k_s in (i0, i1) else sub_c)
+        pr_r = max(3, int(round(5.0 * s)))
+        draw.ellipse([prog_x - pr_r * 2.0, ry_line - pr_r * 2.0, prog_x + pr_r * 2.0, ry_line + pr_r * 2.0], fill=(*spec["route_glow"], 88))
+        draw.ellipse([prog_x - pr_r, ry_line - pr_r, prog_x + pr_r, ry_line + pr_r], fill=(*spec["accent"], 255))
+        frame_rgba.alpha_composite(hud_layer)
 
-    poly_fill = [(gx0, gy_base)] + prof_pts + [(gx1, gy_base)]
-    draw.polygon(poly_fill, fill=(*spec["route_glow"], 54))
-    sp_layer = np.zeros((sp_h + 2, sp_w + 2, 4), dtype=np.uint8)
-    local_prof = [(px - sp_x, py - sp_y) for (px, py) in prof_pts]
-    _draw_aa_polyline(sp_layer, local_prof, (*spec["route_future"], 145), max(1, int(round(2.0 * s))))
-    active_cnt = max(2, int(round(u * (len(prof_pts) - 1))) + 1)
-    _draw_aa_polyline(sp_layer, local_prof[:active_cnt], (*spec["route_core"], 250), max(2, int(round(3.0 * s))))
-    frame_rgba.alpha_composite(Image.fromarray(sp_layer, mode="RGBA"), dest=(sp_x, sp_y))
-    draw = ImageDraw.Draw(frame_rgba, "RGBA")
-    hx, hy = prof_pts[min(len(prof_pts) - 1, active_cnt - 1)]
-    pr_r = max(3, int(round(4.5 * s)))
-    draw.ellipse([hx - pr_r * 1.8, hy - pr_r * 1.8, hx + pr_r * 1.8, hy + pr_r * 1.8], fill=(*spec["accent"], 90))
-    draw.ellipse([hx - pr_r, hy - pr_r, hx + pr_r, hy + pr_r], fill=(*spec["accent"], 255))
+        # Crisp text on top of composited HUD
+        draw_tracked_text(frame_rgba, (tx, py + int(round(12 * s))), over_line, font=f_over, fill=metric_c, letter_spacing_px=2.0 * s, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(frame_rgba, (tx, head_y), orig.label, font=f_head, fill=title_c, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(frame_rgba, (tx + orig_w + arrow_span, head_y), dest.label, font=f_head, fill=title_c, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(frame_rgba, (tx + glyph_pad, py + int(round(73 * s))), stat_line, font=f_stat, fill=sub_c, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(frame_rgba, (sp_x + int(round(14 * s)), sp_y + int(round(10 * s))), f"JOURNEY PROGRESS  |  {overall_pct:d}%", font=f_sp, fill=sub_c, shadow=False, hdr_safe=hdr_safe)
+    else:
+        gx0 = sp_x + int(round(14 * s))
+        gx1 = sp_x + sp_w - int(round(14 * s))
+        gy_base = sp_y + sp_h - int(round(14 * s))
+        gy_top = sp_y + int(round(34 * s))
+        alt_max = max(alt_a, alt_b, 200.0)
+        n_sp = 32
+        prof_pts: list[tuple[float, float]] = []
+        for k in range(n_sp):
+            frac = k / float(n_sp - 1)
+            if transport_mode == "flight":
+                e_norm = 0.14 + 0.78 * math.sin(math.pi * frac)
+            else:
+                ridge = math.sin(math.pi * frac) * 0.14
+                e_norm = max(0.08, min(0.95, ((alt_a * (1.0 - frac) + alt_b * frac) / alt_max) * 0.72 + ridge))
+            prof_pts.append((gx0 + (gx1 - gx0) * frac, gy_base - (gy_base - gy_top) * e_norm))
+
+        poly_fill = [(gx0, gy_base)] + prof_pts + [(gx1, gy_base)]
+        draw.polygon(poly_fill, fill=(*spec["route_glow"], 54))
+        active_cnt = max(2, int(round(u * (len(prof_pts) - 1))) + 1)
+        hx, hy = prof_pts[min(len(prof_pts) - 1, active_cnt - 1)]
+        pr_r = max(3, int(round(4.5 * s)))
+        draw.ellipse([hx - pr_r * 1.9, hy - pr_r * 1.9, hx + pr_r * 1.9, hy + pr_r * 1.9], fill=(*spec["accent"], 85))
+        draw.ellipse([hx - pr_r, hy - pr_r, hx + pr_r, hy + pr_r], fill=(*spec["accent"], 255))
+        frame_rgba.alpha_composite(hud_layer)
+
+        sp_layer = np.zeros((sp_h + 2, sp_w + 2, 4), dtype=np.uint8)
+        local_prof = [(px_p - sp_x, py_p - sp_y) for (px_p, py_p) in prof_pts]
+        _draw_aa_polyline(sp_layer, local_prof, (*spec["route_future"], 145), max(1, int(round(2.0 * s))))
+        _draw_aa_polyline(sp_layer, local_prof[:active_cnt], (*spec["route_core"], 250), max(2, int(round(3.0 * s))))
+        frame_rgba.alpha_composite(Image.fromarray(sp_layer, mode="RGBA"), dest=(sp_x, sp_y))
+
+        draw_tracked_text(frame_rgba, (tx, py + int(round(12 * s))), over_line, font=f_over, fill=metric_c, letter_spacing_px=2.0 * s, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(frame_rgba, (tx, head_y), orig.label, font=f_head, fill=title_c, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(frame_rgba, (tx + orig_w + arrow_span, head_y), dest.label, font=f_head, fill=title_c, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(frame_rgba, (tx + glyph_pad, py + int(round(73 * s))), stat_line, font=f_stat, fill=sub_c, shadow=False, hdr_safe=hdr_safe)
+        draw_tracked_text(
+            frame_rgba,
+            (sp_x + int(round(14 * s)), sp_y + int(round(10 * s))),
+            f"ALT PROFILE  |  {cur_alt:.0f}M ASL" if transport_mode == "flight" else f"ELEV PROFILE  |  {cur_alt:.0f}M ASL",
+            font=f_sp,
+            fill=sub_c,
+            shadow=False,
+            hdr_safe=hdr_safe,
+        )
+
+    # Crisp anchored screen-space compass rose (bottom-left safe corner, never drifts across route!)
+    if draw_compass:
+        f_comp = _load_font_tier(max(9, int(round(11 * s))), tier="mono", bold=True)
+        _draw_compass_rose(
+            frame_rgba,
+            cx=int(round(w * 0.055)),
+            cy=int(round(h * 0.892)),
+            radius=max(22, int(round(32 * s))),
+            color_rgb=spec["compass_color"],
+            sub_font=f_comp,
+            light_paper=bool(spec["light_paper"]),
+        )
 
 
-def render_travel_map_frame(
+@dataclass
+class _LegLayoutPlan:
+    """Locked per-leg screen-space slots preventing mid-clip Polaroid, label, or annotation teleports."""
+
+    orig_polaroid_slot: Optional[int] = None
+    dest_polaroid_slot: Optional[int] = None
+    label_slots: dict[int, int] = None  # type: ignore[assignment]
+    annotation_offsets: dict[int, tuple[float, float]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.label_slots is None:
+            self.label_slots = {}
+        if self.annotation_offsets is None:
+            self.annotation_offsets = {}
+
+
+@dataclass
+class _PreparedLegContext:
+    """Precomputed static geometry, VRAM-cached world baseplate, thumbs & locked layout for a map leg."""
+
+    use_style: str
+    spec: dict[str, Any]
+    norm_wps: list[MapWaypointSpec]
+    i0: int
+    i1: int
+    width: int
+    height: int
+    world_w: int
+    world_h: int
+    vp: _MapViewport
+    px_stops: list[tuple[float, float]]
+    all_leg_splines: list[list[tuple[float, float]]]
+    ground_arc_path: _ArcLengthPath
+    leg_km: float
+    route_total_km: float
+    resolved_mode: str
+    use_globe: bool
+    pitch_deg: float
+    compact_hud: bool
+    static_world_rgb: Image.Image
+    static_cuda_t: Optional[Any]
+    orig_thumb_rgb: Optional[Image.Image]
+    dest_thumb_rgb: Optional[Image.Image]
+    layout_plan: _LegLayoutPlan
+
+    def release_cuda(self) -> None:
+        if self.static_cuda_t is not None:
+            try:
+                with _CUDA_MAP_LOCK:
+                    self.static_cuda_t = None
+            except Exception:
+                self.static_cuda_t = None
+
+
+def _compute_leg_camera_state(
+    orig_px: tuple[float, float],
+    dest_px: tuple[float, float],
+    ground_arc_path: _ArcLengthPath,
+    u: float,
+    world_w: int,
+    leg_km: float,
+    use_globe: bool,
+    compact_hud: bool,
+) -> tuple[float, float, float]:
+    """Compute serene overview-breathing camera center & zoom at progress u in [0..1]."""
+    s_w = world_w / 1920.0
+    smooth_cam_pt = ground_arc_path.smoothed_camera_point(u, window_px=165.0 * s_w)
+    mid_x = 0.5 * (orig_px[0] + dest_px[0])
+    mid_y = 0.5 * (orig_px[1] + dest_px[1])
+    # Keep balanced corridor framing (46% midpoint, 54% smoothed head) so origin/dest pins never get pushed off-edge
+    cam_cx = 0.46 * mid_x + 0.54 * smooth_cam_pt[0]
+    cam_cy = 0.46 * mid_y + 0.54 * smooth_cam_pt[1]
+    e_u = _ease_in_out_cubic(u)
+    breath = math.sin(math.pi * u)  # Gentle wide overview mid-journey -> serene arrival settle
+    if compact_hud:
+        cam_zoom = 1.06 + 0.04 * e_u
+    elif use_globe:
+        cam_zoom = 0.98 - 0.04 * breath + 0.06 * e_u
+    elif leg_km < 15.0:
+        cam_zoom = 1.12 - 0.08 * breath + 0.05 * e_u
+    else:
+        cam_zoom = 1.05 - 0.07 * breath + 0.05 * e_u
+    return cam_cx, cam_cy, cam_zoom
+
+
+def _base_occupied_rects(width: int, height: int, horizon_y_fn: Any, compact_hud: bool) -> list[tuple[float, float, float, float]]:
+    if compact_hud:
+        return [(0.0, height * 0.78, float(width), float(height))]
+    return [
+        (0.0, 0.0, width * 0.47, height * 0.21),                                          # Top-left HUD card
+        (width * 0.67, height * 0.74, float(width), float(height)),                        # Bottom-right Journey/Elev card
+        (0.0, height * 0.78, width * 0.14, float(height)),                                 # Bottom-left Compass rose
+        (0.0, 0.0, float(width), max(height * 0.14, horizon_y_fn(width * 0.5) + 12.0)),   # Top horizon band
+    ]
+
+
+def _waypoint_label_candidates(
+    sx_w: float,
+    sy_w: float,
+    pin_r: float,
+    tw: float,
+    th: float,
+    tb0: tuple[int, int, int, int],
+    s_out: float,
+    is_dest: bool,
+) -> list[tuple[float, float]]:
+    cands = [
+        (sx_w + pin_r + 14 * s_out, sy_w - th * 0.55 - tb0[1]),
+        (sx_w - tw * 0.5 - tb0[0], sy_w + pin_r + 18 * s_out - tb0[1]),
+        (sx_w - tw * 0.5 - tb0[0], sy_w - pin_r - th - 18 * s_out - tb0[1]),
+        (sx_w - pin_r - tw - 24 * s_out - tb0[0], sy_w - th * 0.55 - tb0[1]),
+        (sx_w + pin_r + 14 * s_out, sy_w + pin_r + 14 * s_out - tb0[1]),
+        (sx_w + pin_r + 14 * s_out, sy_w - pin_r - th - 14 * s_out - tb0[1]),
+    ]
+    if is_dest:
+        return [cands[0], cands[1], cands[3], cands[2], cands[4], cands[5]]
+    return cands
+
+
+def _solve_leg_layout_plan(
+    norm_wps: list[MapWaypointSpec],
+    i0: int,
+    i1: int,
+    px_stops: list[tuple[float, float]],
+    ground_arc_path: _ArcLengthPath,
+    vp: _MapViewport,
+    spec: dict[str, Any],
+    width: int,
+    height: int,
+    world_w: int,
+    world_h: int,
+    leg_km: float,
+    use_globe: bool,
+    pitch_deg: float,
+    compact_hud: bool,
+    annotations: Optional[list[dict[str, Any]]],
+    has_orig_thumb: bool,
+    has_dest_thumb: bool,
+) -> _LegLayoutPlan:
+    """Solve collision-free Polaroid quadrants, label slots & annotation offsets ONCE across start/mid/end frames."""
+    plan = _LegLayoutPlan()
+    if compact_hud:
+        return plan
+
+    s_out = width / 1920.0
+    dummy = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+    od = ImageDraw.Draw(dummy, "RGBA")
+    all_lbl_txt = " ".join(w.label for w in norm_wps)
+    f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_out))), tier=spec["title_tier"], bold=True, text=all_lbl_txt)
+
+    # Project anchor frames (departure u=0.05, mid u=0.50, arrival u=0.95)
+    sample_us = (0.05, 0.50, 0.95)
+    proj_states: list[tuple[Any, Any, list[tuple[float, float]], list[tuple[float, float]]]] = []
+    world_route_samples = [
+        ground_arc_path.point_at_s((idx_r / 23.0) * ground_arc_path.total_len) for idx_r in range(24)
+    ]
+    for u_s in sample_us:
+        cam_cx, cam_cy, cam_zoom = _compute_leg_camera_state(
+            px_stops[i0], px_stops[i1], ground_arc_path, u_s, world_w, leg_km, use_globe, compact_hud
+        )
+        _, _, p_fn, h_fn, _, _, _ = _compute_camera_projection(
+            world_w, world_h, width, height, (cam_cx, cam_cy), cam_zoom, pitch_deg, 0.0, 1.0 if use_globe else 0.0
+        )
+        scr_stops = [p_fn(wx, wy) for wx, wy in px_stops]
+        scr_route = [p_fn(rx, ry) for rx, ry in world_route_samples]
+        proj_states.append((p_fn, h_fn, scr_stops, scr_route))
+
+    # Track per-anchor occupied rects so labels, Polaroids, and annotations never overlap each other
+    occ_by_t: list[list[tuple[float, float, float, float]]] = []
+    for _, h_fn, scr_stops, _ in proj_states:
+        rects = _base_occupied_rects(width, height, h_fn, compact_hud=False)
+        for sx_w, sy_w in scr_stops:
+            if -40 <= sx_w <= width + 40 and -40 <= sy_w <= height + 40:
+                pr = max(12.0, 22.0 * s_out)
+                rects.append((sx_w - pr, sy_w - pr, sx_w + pr, sy_w + pr))
+        occ_by_t.append(rects)
+
+    # 1. Lock waypoint label slots jointly across departure, mid & arrival frames
+    pad_x = int(round(10 * s_out))
+    pad_y = int(round(7 * s_out))
+    tag_order = [i0, i1] + [k for k in range(len(px_stops)) if k not in (i0, i1)]
+    for k in tag_order:
+        is_orig = k == i0
+        is_dest = k == i1
+        pin_r = max(6.0, float(round((11 if (is_orig or is_dest) else 8) * s_out)))
+        tag = norm_wps[k].label
+        tb0 = od.textbbox((0, 0), tag, font=f_wp_lbl)
+        tw, th = float(tb0[2] - tb0[0]), float(tb0[3] - tb0[1])
+        best_slot = 0
+        best_sc = -1e12
+        for slot_i in range(6):
+            tot_sc = 0.0
+            for t_idx in (0, 1, 2):
+                _, _, scr_stops, scr_route = proj_states[t_idx]
+                sx_w, sy_w = scr_stops[k]
+                cands = _waypoint_label_candidates(sx_w, sy_w, pin_r, tw, th, tb0, s_out, is_dest)
+                cx_c, cy_c = cands[slot_i]
+                tx_c = max(18.0, min(float(width - tw - 22), cx_c))
+                ty_c = max(float(height * 0.19), min(float(height - th - 20), cy_c))
+                tot_sc += _score_rect_against_obstacles(
+                    tx_c - pad_x, ty_c - pad_y, tw + 2 * pad_x, th + 2 * pad_y,
+                    width, height, s_out, [], occ_by_t[t_idx], scr_route,
+                )
+            if tot_sc > best_sc:
+                best_sc = tot_sc
+                best_slot = slot_i
+        plan.label_slots[k] = best_slot
+        for t_idx in (0, 1, 2):
+            _, _, scr_stops, _ = proj_states[t_idx]
+            sx_w, sy_w = scr_stops[k]
+            cands = _waypoint_label_candidates(sx_w, sy_w, pin_r, tw, th, tb0, s_out, is_dest)
+            cx_c, cy_c = cands[best_slot]
+            tx_c = max(18.0, min(float(width - tw - 22), cx_c))
+            ty_c = max(float(height * 0.19), min(float(height - th - 20), cy_c))
+            occ_by_t[t_idx].append((tx_c - pad_x, ty_c - pad_y, tx_c + tw + pad_x, ty_c + th + pad_y))
+
+    # Approximate rotated Polaroid dimensions at full bloom
+    est_cw = 256.0 * s_out + 24.0
+    est_ch = (256.0 * 0.60 + 36.0) * s_out + 24.0
+
+    # 2. Lock FROM Polaroid quadrant (evaluated over departure & mid frames when FROM is visible)
+    if has_orig_thumb:
+        best_slot = 0
+        best_sc = -1e12
+        for slot_i in range(8):
+            tot_sc = 0.0
+            for t_idx in (0, 1):
+                _, _, scr_stops, scr_route = proj_states[t_idx]
+                dx, dy = scr_stops[i0]
+                cx_r, cy_r = _polaroid_candidate_slots(dx, dy, est_cw, est_ch, s_out)[slot_i]
+                px_c = max(14.0, min(float(width - est_cw - 14), cx_r))
+                py_c = max(float(height * 0.19), min(float(height - est_ch - 14), cy_r))
+                others = [p for idx_p, p in enumerate(scr_stops) if idx_p != i0]
+                tot_sc += _score_rect_against_obstacles(
+                    px_c, py_c, est_cw, est_ch, width, height, s_out, others, occ_by_t[t_idx], scr_route
+                )
+            if tot_sc > best_sc:
+                best_sc = tot_sc
+                best_slot = slot_i
+        plan.orig_polaroid_slot = best_slot
+        for t_idx in (0, 1):
+            _, _, scr_stops, _ = proj_states[t_idx]
+            dx, dy = scr_stops[i0]
+            cx_r, cy_r = _polaroid_candidate_slots(dx, dy, est_cw, est_ch, s_out)[best_slot]
+            px_c = max(14.0, min(float(width - est_cw - 14), cx_r))
+            py_c = max(float(height * 0.19), min(float(height - est_ch - 14), cy_r))
+            occ_by_t[t_idx].append((px_c, py_c, px_c + est_cw, py_c + est_ch))
+
+    # 3. Lock TO Polaroid quadrant (evaluated over mid & arrival frames when TO is visible)
+    if has_dest_thumb:
+        best_slot = 0
+        best_sc = -1e12
+        for slot_i in range(8):
+            tot_sc = 0.0
+            for t_idx in (1, 2):
+                _, _, scr_stops, scr_route = proj_states[t_idx]
+                dx, dy = scr_stops[i1]
+                cx_r, cy_r = _polaroid_candidate_slots(dx, dy, est_cw, est_ch, s_out)[slot_i]
+                px_c = max(14.0, min(float(width - est_cw - 14), cx_r))
+                py_c = max(float(height * 0.19), min(float(height - est_ch - 14), cy_r))
+                others = [p for idx_p, p in enumerate(scr_stops) if idx_p != i1]
+                tot_sc += _score_rect_against_obstacles(
+                    px_c, py_c, est_cw, est_ch, width, height, s_out, others, occ_by_t[t_idx], scr_route
+                )
+            if tot_sc > best_sc:
+                best_sc = tot_sc
+                best_slot = slot_i
+        plan.dest_polaroid_slot = best_slot
+        for t_idx in (1, 2):
+            _, _, scr_stops, _ = proj_states[t_idx]
+            dx, dy = scr_stops[i1]
+            cx_r, cy_r = _polaroid_candidate_slots(dx, dy, est_cw, est_ch, s_out)[best_slot]
+            px_c = max(14.0, min(float(width - est_cw - 14), cx_r))
+            py_c = max(float(height * 0.19), min(float(height - est_ch - 14), cy_r))
+            occ_by_t[t_idx].append((px_c, py_c, px_c + est_cw, py_c + est_ch))
+
+    # 4. Lock collision-free screen-space offset for each corridor annotation
+    if annotations:
+        f_t = _load_font_tier(max(11, int(round(15 * s_out))), tier=spec["title_tier"], bold=True)
+        f_s = _load_font_tier(max(9, int(round(11 * s_out))), tier="mono", bold=True)
+        for idx_a, ann in enumerate(annotations):
+            if "lat" not in ann or "lon" not in ann:
+                continue
+            title = str(ann.get("title") or "").strip()
+            sub = str(ann.get("sub") or "").strip()
+            if not title:
+                continue
+            bb_t = od.textbbox((0, 0), title, font=f_t)
+            wt, ht = bb_t[2] - bb_t[0], bb_t[3] - bb_t[1]
+            ws, hs = (0, 0)
+            if sub:
+                bb_s = od.textbbox((0, 0), sub, font=f_s)
+                ws, hs = bb_s[2] - bb_s[0], bb_s[3] - bb_s[1]
+            bw = float(max(wt, ws) + int(round(22 * s_out)))
+            bh = float(ht + (hs + int(round(10 * s_out)) if sub else 0) + int(round(15 * s_out)))
+            wx_a, wy_a = vp.latlon_to_px(float(ann["lat"]), float(ann["lon"]))
+            cand_offs: list[tuple[float, float]] = []
+            raw_off = ann.get("offset")
+            if raw_off is not None and len(raw_off) >= 2:
+                cand_offs.append((float(raw_off[0]) * 0.78 * s_out, float(raw_off[1]) * 0.78 * s_out))
+            cand_offs.extend([
+                (22 * s_out, -bh - 20 * s_out),
+                (-bw - 22 * s_out, -bh - 20 * s_out),
+                (22 * s_out, 20 * s_out),
+                (-bw - 22 * s_out, 20 * s_out),
+                (-bw * 0.5, -bh - 28 * s_out),
+                (-bw * 0.5, 28 * s_out),
+            ])
+            best_off = cand_offs[0]
+            best_sc = -1e12
+            for ox_c, oy_c in cand_offs:
+                tot_sc = 0.0
+                for t_idx in (1, 2):
+                    p_fn, _, _, scr_route = proj_states[t_idx]
+                    ax, ay = p_fn(wx_a, wy_a)
+                    tx_c = max(16.0, min(float(width - bw - 16), ax + ox_c))
+                    ty_c = max(float(height * 0.19), min(float(height - bh - 16), ay + oy_c))
+                    tot_sc += _score_rect_against_obstacles(
+                        tx_c, ty_c, bw, bh, width, height, s_out, [], occ_by_t[t_idx], scr_route
+                    )
+                if tot_sc > best_sc:
+                    best_sc = tot_sc
+                    best_off = (ox_c, oy_c)
+            plan.annotation_offsets[idx_a] = best_off
+            for t_idx in (1, 2):
+                p_fn, _, _, _ = proj_states[t_idx]
+                ax, ay = p_fn(wx_a, wy_a)
+                tx_c = max(16.0, min(float(width - bw - 16), ax + best_off[0]))
+                ty_c = max(float(height * 0.19), min(float(height - bh - 16), ay + best_off[1]))
+                occ_by_t[t_idx].append((tx_c, ty_c, tx_c + bw, ty_c + bh))
+
+    return plan
+
+
+def _prepare_travel_map_leg(
     waypoints: list[MapWaypointSpec | dict[str, Any]],
-    style: str = "midnight_vox_atlas",
+    style: str = "archival_expedition_parchment",
     width: int = 1920,
     height: int = 1080,
     leg_index: int = 0,
-    t_norm: float = 0.65,
     transport_mode: str = "auto",
-    hdr_safe: bool = False,
     compact_hud: bool = False,
     allow_tile_fetch: bool = False,
     cache_dir: Optional[str | Path] = None,
     annotations: Optional[list[dict[str, Any]]] = None,
-) -> Image.Image:
-    """
-    Render a single keyframe of the Cinema 2.5D Travel Map engine as an RGB PIL Image.
-
-    Combines cached/procedural hillshaded terrain, geodesic splines + parabolic 3D flight arcs,
-    2x-supersampled vector vehicles, destination hero thumbnail callouts, 2.5D virtual drone
-    camera homography, synchronized elevation sparklines, and strict hdr_safe clamping.
-    """
+    leg_via_points: Optional[dict[int, list[tuple[float, float]]]] = None,
+    upload_cuda: bool = False,
+) -> _PreparedLegContext:
+    """Precompute static world atlas, OSRM routes, VRAM tensor & zero-teleport layout once per leg."""
     norm_wps: list[MapWaypointSpec] = []
     for idx_w, w in enumerate(waypoints):
         if isinstance(w, MapWaypointSpec):
             norm_wps.append(w)
         else:
+            raw_vias = w.get("via_points") or []
+            vias = [(float(vp_i[0]), float(vp_i[1])) for vp_i in raw_vias if len(vp_i) >= 2]
             norm_wps.append(
                 MapWaypointSpec(
                     waypoint_id=str(w.get("waypoint_id") or f"wp_{idx_w + 1:02d}"),
@@ -3049,6 +3816,7 @@ def render_travel_map_frame(
                     alt_m=float(w.get("alt_m", 40.0)),
                     source=w.get("source", "exif_gps") if w.get("source") in ("exif_gps", "gazetteer", "synthetic") else "exif_gps",
                     hero_thumbnail_path=w.get("hero_thumbnail_path"),
+                    via_points=vias,
                 )
             )
     if len(norm_wps) < 2:
@@ -3057,10 +3825,25 @@ def render_travel_map_frame(
             MapWaypointSpec(waypoint_id="wp_02", label="Destination", lat=35.0116, lon=135.7681, alt_m=50.0),
         ]
 
-    use_style = style if style in CART_THEME_SPECS else "midnight_vox_atlas"
+    i0 = max(0, min(len(norm_wps) - 2, leg_index))
+    i1 = i0 + 1
+    orig = norm_wps[i0]
+    dest = norm_wps[i1]
+    leg_km = haversine_km(orig.lat, orig.lon, dest.lat, dest.lon)
+    resolved_mode = infer_transport_mode(leg_km, orig.label, dest.label, hint=transport_mode)
+
+    if style in CART_THEME_SPECS:
+        use_style = style
+    else:
+        lbl_blob = " ".join(f"{w.label} {w.subtitle}" for w in norm_wps)
+        use_style = resolve_travel_map_style(
+            style or "auto",
+            prompt_text=lbl_blob,
+            transport_mode=resolved_mode,
+            leg_km=leg_km,
+        )
     spec = CART_THEME_SPECS[use_style]
 
-    # Oversample world canvas up to 5184x2916 (1.30x at full 4K 3840x2160) for crisp perspective projection
     oversample = 1.30 if width > 2000 else 1.60
     world_w = max(640, min(5184, int(round(width * oversample))))
     world_h = max(360, min(2916, int(round(height * oversample))))
@@ -3069,63 +3852,66 @@ def render_travel_map_frame(
     focus_leg = max(0, min(len(norm_wps) - 2, leg_index)) if len(norm_wps) >= 2 else -1
     cache_dir_s = str(Path(cache_dir).resolve()) if cache_dir else ""
     base_rgb = _cached_world_baseplate(
-        use_style,
-        world_w,
-        world_h,
-        wp_sig,
-        bool(allow_tile_fetch),
-        cache_dir_s,
-        focus_leg,
+        use_style, world_w, world_h, wp_sig, bool(allow_tile_fetch), cache_dir_s, focus_leg
     )
     vp = _compute_viewport(norm_wps, world_w, world_h, focus_leg_index=focus_leg)
-
-    i0 = max(0, min(len(norm_wps) - 2, leg_index))
-    i1 = i0 + 1
-    orig = norm_wps[i0]
-    dest = norm_wps[i1]
-    leg_km = haversine_km(orig.lat, orig.lon, dest.lat, dest.lon)
-    resolved_mode = infer_transport_mode(leg_km, orig.label, dest.label, hint=transport_mode)
 
     px_stops = [vp.latlon_to_px(w.lat, w.lon) for w in norm_wps]
     c_dir_p = Path(cache_dir).resolve() if cache_dir else None
     all_leg_splines: list[list[tuple[float, float]]] = []
+    active_latlons: list[tuple[float, float]] = []
     for k in range(len(px_stops) - 1):
         leg_mode_k = resolved_mode if k == i0 else infer_transport_mode(
             haversine_km(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon),
-            norm_wps[k].label,
-            norm_wps[k + 1].label,
-            hint=transport_mode,
+            norm_wps[k].label, norm_wps[k + 1].label, hint=transport_mode,
         )
+        vias_k = list((leg_via_points or {}).get(k) or norm_wps[k + 1].via_points or [])
         road_lls: Optional[list[tuple[float, float]]] = None
         if allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
             if leg_mode_k in ("drive", "walk", "train"):
                 road_lls = _fetch_osrm_route_latlon(
-                    norm_wps[k],
-                    norm_wps[k + 1],
+                    norm_wps[k], norm_wps[k + 1],
                     cache_dir=c_dir_p,
                     profile="foot" if leg_mode_k == "walk" else "driving",
+                    via_latlons=vias_k or None,
                 )
         if road_lls:
             all_leg_splines.append([vp.latlon_to_px(lat, lon) for lat, lon in road_lls])
+            if k == i0:
+                active_latlons = road_lls
         elif leg_mode_k == "flight":
             gc_lls = _great_circle_latlon_pts(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon, n_samples=160)
             all_leg_splines.append(_project_flight_latlons_to_px(vp, norm_wps[k], norm_wps[k + 1], gc_lls))
+            if k == i0:
+                active_latlons = gc_lls
         else:
-            all_leg_splines.append(_catmull_rom_xy([px_stops[k], px_stops[k + 1]], samples_per_seg=140))
+            ctrl_pts = [px_stops[k]] + [vp.latlon_to_px(la, lo) for la, lo in vias_k] + [px_stops[k + 1]]
+            spl = _catmull_rom_xy(ctrl_pts, samples_per_seg=100 if vias_k else 140)
+            all_leg_splines.append(spl)
+            if k == i0:
+                active_latlons = [vp.px_to_latlon(px_s, py_s) for px_s, py_s in spl[::4]]
 
-    # Composite dynamic route layer onto world canvas
+    # Compute exact total path length in km along the actual spline (instead of crow-flies haversine!)
+    route_total_km = leg_km
+    if len(active_latlons) >= 2:
+        km_sum = sum(
+            haversine_km(active_latlons[j][0], active_latlons[j][1], active_latlons[j + 1][0], active_latlons[j + 1][1])
+            for j in range(len(active_latlons) - 1)
+        )
+        if km_sum > 0.01:
+            route_total_km = km_sum
+
+    # Bake static history legs + dashed active future track + place labels overlay ONCE onto static_world_rgb
     world_rgba = base_rgb.convert("RGBA")
     route_arr = np.zeros((world_h, world_w, 4), dtype=np.uint8)
     s_w = world_w / 1920.0
     stroke_w = max(2, int(round(5.0 * s_w)))
-
-    # 1. History legs (< i0) + subtle dashed ground-track chord on active leg (projected onto Earth's surface)
     for k, seg_pts in enumerate(all_leg_splines):
         if k < i0:
             hist_km = haversine_km(norm_wps[k].lat, norm_wps[k].lon, norm_wps[k + 1].lat, norm_wps[k + 1].lon)
             if leg_km < 120.0 and hist_km > max(150.0, leg_km * 30.0):
                 continue
-            _draw_aa_polyline(route_arr, seg_pts, (*spec["route_history"], 170), max(2, stroke_w - 1))
+            _draw_aa_polyline(route_arr, seg_pts, (*spec["route_history"], 165), max(2, stroke_w - 1))
         elif k == i0:
             _draw_dashed_aa_polyline(
                 route_arr,
@@ -3135,230 +3921,264 @@ def render_travel_map_frame(
                 dash_px=11.0 * s_w,
                 gap_px=8.0 * s_w,
             )
-
-    # 2. Ground route progress on Earth surface (flight arc & plane itself fly in crisp 3D screen space ABOVE Earth)
-    u = _cartography_travel_progress(t_norm)
-    active_pts = all_leg_splines[i0]
-    ground_arc_path = _ArcLengthPath(active_pts)
-    prog_ground = ground_arc_path.sample_prefix(u)
-
-    bank_factor = 0.0
-    ground_head_pt = ground_arc_path.point_at_s(u * ground_arc_path.total_len)
-    if resolved_mode == "flight":
-        # Draw subtle ground-projected flight track shadow ribbon along Earth's terrain
-        _draw_aa_polyline(route_arr, prog_ground, (12, 18, 28, 128), max(2, stroke_w))
-        _draw_aa_polyline(route_arr, prog_ground, (*spec["route_glow"], 115), max(1, stroke_w // 2))
-        smooth_cam_pt = ground_arc_path.smoothed_camera_point(u, window_px=160.0 * s_w)
-    else:
-        arc_pts = prog_ground
-        _draw_cased_route(route_arr, prog_ground, spec, stroke_w, s_w, is_flight=False)
-        head_pt = ground_head_pt
-        heading, bank_factor = ground_arc_path.tangent_and_curvature(u, window_px=22.0 * s_w)
-        smooth_cam_pt = ground_arc_path.smoothed_camera_point(u, window_px=160.0 * s_w)
-
     world_rgba = Image.alpha_composite(world_rgba, Image.fromarray(route_arr))
 
-    # 2a. Composite crisp floating place labels with dark contrast halo above satellite imagery
     labels_ov = _cached_labels_overlay(use_style, world_w, world_h, wp_sig, bool(allow_tile_fetch), cache_dir_s, focus_leg)
     if labels_ov is not None:
         l_rgb = np.asarray(labels_ov.convert("RGB"), dtype=np.float32)
         l_a = np.asarray(labels_ov.getchannel("A"), dtype=np.float32) / 255.0
         if float(l_a.max()) > 0.01:
-            shadow_a = cv2.dilate((l_a * 255.0).astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1).astype(np.float32) / 255.0
-            shadow_a = np.clip(shadow_a * 0.72, 0.0, 0.72)
-            base_w_arr = np.asarray(world_rgba.convert("RGB"), dtype=np.float32)
-            # Carve clean subtle dark contrast halo around satellite text, then composite crisp bright label
-            base_w_arr = base_w_arr * (1.0 - shadow_a[..., None])
+            shadow_a = np.clip(cv2.dilate((l_a * 255.0).astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1).astype(np.float32) / 255.0 * 0.72, 0.0, 0.72)
+            base_w_arr = np.asarray(world_rgba.convert("RGB"), dtype=np.float32) * (1.0 - shadow_a[..., None])
             lbl_mix = np.clip(l_a * 0.96, 0.0, 1.0)[..., None]
-            out_lbl_rgb = np.clip(base_w_arr * (1.0 - lbl_mix) + l_rgb * lbl_mix, 0, 255).astype(np.uint8)
-            world_rgba = Image.fromarray(out_lbl_rgb).convert("RGBA")
+            world_rgba = Image.fromarray(np.clip(base_w_arr * (1.0 - lbl_mix) + l_rgb * lbl_mix, 0, 255).astype(np.uint8)).convert("RGBA")
 
-    # 2b. Surface pins, destination arrival pulse & ground shadow riding Earth's terrain BEFORE orbital warp
-    wd = ImageDraw.Draw(world_rgba, "RGBA")
-    for k in [idx for idx in range(len(px_stops)) if idx not in (i0, i1)] + [i0, i1]:
-        wx, wy = px_stops[k]
-        if wx < -80 or wx > world_w + 80 or wy < -80 or wy > world_h + 80:
-            continue
-        is_orig = k == i0
-        is_dest = k == i1
-        pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_w)))
-        if is_dest and u >= 0.72:
-            pulse_p = (u - 0.72) / 0.28
-            r_pulse = pin_r + int(round(28 * s_w * pulse_p))
-            p_alpha = int(round(205 * (1.0 - pulse_p)))
-            wd.ellipse([wx - r_pulse, wy - r_pulse, wx + r_pulse, wy + r_pulse], outline=(*spec["accent"], p_alpha), width=max(1, int(round(2.5 * s_w))))
-            r_pulse2 = pin_r + int(round(15 * s_w * pulse_p))
-            wd.ellipse([wx - r_pulse2, wy - r_pulse2, wx + r_pulse2, wy + r_pulse2], outline=(*spec["route_core"], int(round(p_alpha * 0.8))), width=max(1, int(round(2.0 * s_w))))
-        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 210)
-        wd.ellipse([wx - pin_r - 3, wy - pin_r - 3, wx + pin_r + 3, wy + pin_r + 3], fill=ring_col)
-        wd.ellipse([wx - pin_r, wy - pin_r, wx + pin_r, wy + pin_r], fill=(*spec["pin_fill"], 248))
+    static_world_rgb = world_rgba.convert("RGB")
+    static_cuda_t = _upload_world_to_cuda(np.asarray(static_world_rgb, dtype=np.uint8)) if (upload_cuda and (width * height) >= 400_000) else None
 
-    # Draw aircraft ground shadow right on Earth terrain/ocean below the jet
-    veh_scale_w = s_w * (0.90 if compact_hud else 1.05)
-    stroke_col = spec["pin_fill"] if not spec["light_paper"] else (248, 244, 238)
-    if resolved_mode == "flight":
-        alt_sin = math.sin(math.pi * u)
-        g_heading, _ = ground_arc_path.tangent_and_curvature(u, window_px=24.0 * s_w)
-        _draw_aircraft_ground_shadow(
-            world_rgba,
-            gx=ground_head_pt[0] + 10.0 * s_w * alt_sin,
-            gy=ground_head_pt[1] + 12.0 * s_w * alt_sin,
-            angle_rad=g_heading,
-            scale=veh_scale_w * (0.92 - 0.28 * alt_sin),
-            alpha=int(round(125 - 65 * alt_sin)),
-        )
-    elif resolved_mode in ("train", "walk", "drive"):
-        _draw_glow_beacon_dot(
-            world_rgba,
-            cx=head_pt[0],
-            cy=head_pt[1],
-            glow_rgb=spec["route_glow"],
-            core_rgb=spec["accent"],
-            stroke_rgb=stroke_col,
-            scale=veh_scale_w,
-        )
-    elif resolved_mode == "boat":
-        _draw_boat_kelvin_wake(world_rgba, arc_path=ground_arc_path, u=u, scale=veh_scale_w)
-        _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode="boat", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=bank_factor)
-    else:
-        _draw_transport_icon(world_rgba, cx=head_pt[0], cy=head_pt[1], angle_rad=heading, mode=resolved_mode, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scale_w, bank_factor=bank_factor)
-
-    # Corridor annotations rendered onto Earth's terrain before camera warp
-    _draw_route_annotations(world_rgba, annotations, vp, u, spec, world_w, world_h)
-
-    # 3. Google Earth 3D Globe / Drone Chase-Camera Projection
-    orig_px = px_stops[i0]
-    dest_px = px_stops[i1]
-    mid_cam_x = 0.5 * (orig_px[0] + dest_px[0])
-    mid_cam_y = 0.5 * (orig_px[1] + dest_px[1])
-    cam_cx = 0.34 * mid_cam_x + 0.66 * smooth_cam_pt[0]
-    cam_cy = 0.34 * mid_cam_y + 0.66 * smooth_cam_pt[1]
+    ground_arc_path = _ArcLengthPath(all_leg_splines[i0])
     use_globe = (
         not compact_hud
         and resolved_mode == "flight"
         and leg_km >= 180.0
         and use_style in ("satellite_hybrid_4k", "aerial_relief_hybrid", "midnight_vox_atlas", "archival_expedition_parchment")
     )
-    if use_globe:
-        cam_zoom = 0.98 + 0.06 * _ease_in_out_cubic(u)
-    elif leg_km < 15.0:
-        cam_zoom = 1.18 + 0.06 * _ease_in_out_cubic(u)
-    else:
-        cam_zoom = 1.04 + 0.06 * _ease_in_out_cubic(u)
     crisp_real_tiles = bool(allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1")
-    # Lock horizon completely level (bank_deg = 0.0) and use constant pitch so the camera never wobbles or shakes
-    bank_deg = 0.0
     if compact_hud:
         pitch_deg = 0.0 if crisp_real_tiles else 14.0
     elif use_globe:
         pitch_deg = 24.0
     elif crisp_real_tiles:
-        pitch_deg = 8.0
+        pitch_deg = 7.5
     else:
         pitch_deg = 20.0
 
+    # Pre-decode Polaroid thumbnails ONCE per leg (instead of decoding 33MP JPEGs 180 times!)
+    orig_thumb_rgb: Optional[Image.Image] = None
+    dest_thumb_rgb: Optional[Image.Image] = None
+    if orig.hero_thumbnail_path and Path(orig.hero_thumbnail_path).exists():
+        try:
+            orig_thumb_rgb = _load_clean_callout_rgb(Path(orig.hero_thumbnail_path))
+        except Exception:
+            orig_thumb_rgb = None
+    if dest.hero_thumbnail_path and Path(dest.hero_thumbnail_path).exists():
+        try:
+            dest_thumb_rgb = _load_clean_callout_rgb(Path(dest.hero_thumbnail_path))
+        except Exception:
+            dest_thumb_rgb = None
+
+    layout_plan = _solve_leg_layout_plan(
+        norm_wps=norm_wps, i0=i0, i1=i1, px_stops=px_stops,
+        ground_arc_path=ground_arc_path, vp=vp, spec=spec,
+        width=width, height=height, world_w=world_w, world_h=world_h,
+        leg_km=leg_km, use_globe=use_globe, pitch_deg=pitch_deg,
+        compact_hud=compact_hud, annotations=annotations,
+        has_orig_thumb=orig_thumb_rgb is not None,
+        has_dest_thumb=dest_thumb_rgb is not None,
+    )
+
+    return _PreparedLegContext(
+        use_style=use_style, spec=spec, norm_wps=norm_wps, i0=i0, i1=i1,
+        width=width, height=height, world_w=world_w, world_h=world_h,
+        vp=vp, px_stops=px_stops, all_leg_splines=all_leg_splines,
+        ground_arc_path=ground_arc_path, leg_km=leg_km, route_total_km=route_total_km,
+        resolved_mode=resolved_mode, use_globe=use_globe, pitch_deg=pitch_deg,
+        compact_hud=compact_hud, static_world_rgb=static_world_rgb,
+        static_cuda_t=static_cuda_t, orig_thumb_rgb=orig_thumb_rgb,
+        dest_thumb_rgb=dest_thumb_rgb, layout_plan=layout_plan,
+    )
+
+
+def render_travel_map_frame(
+    waypoints: list[MapWaypointSpec | dict[str, Any]],
+    style: str = "auto",
+    width: int = 1920,
+    height: int = 1080,
+    leg_index: int = 0,
+    t_norm: float = 0.65,
+    transport_mode: str = "auto",
+    hdr_safe: bool = False,
+    compact_hud: bool = False,
+    allow_tile_fetch: bool = False,
+    cache_dir: Optional[str | Path] = None,
+    annotations: Optional[list[dict[str, Any]]] = None,
+    leg_via_points: Optional[dict[int, list[tuple[float, float]]]] = None,
+    _prepared: Optional[_PreparedLegContext] = None,
+) -> Image.Image:
+    """
+    Render a single keyframe of the Cinema 2.5D Travel Map engine as an RGB PIL Image.
+
+    Uses GPU-accelerated VRAM-cached baseplate warping with crisp post-warp screen-space routes,
+    tapered comet-tail beacon, zero-teleport Polaroids, post-warp annotations, and accurate HUD telemetry.
+    """
+    ctx = _prepared if _prepared is not None else _prepare_travel_map_leg(
+        waypoints=waypoints, style=style, width=width, height=height,
+        leg_index=leg_index, transport_mode=transport_mode, compact_hud=compact_hud,
+        allow_tile_fetch=allow_tile_fetch, cache_dir=cache_dir,
+        annotations=annotations, leg_via_points=leg_via_points, upload_cuda=False,
+    )
+
+    spec = ctx.spec
+    norm_wps = ctx.norm_wps
+    i0, i1 = ctx.i0, ctx.i1
+    orig, dest = norm_wps[i0], norm_wps[i1]
+    vp = ctx.vp
+    px_stops = ctx.px_stops
+    ground_arc_path = ctx.ground_arc_path
+    resolved_mode = ctx.resolved_mode
+
+    u = _cartography_travel_progress(t_norm)
+    prog_ground = ground_arc_path.sample_prefix(u)
+    ground_head_pt = ground_arc_path.point_at_s(u * ground_arc_path.total_len)
+    cur_latlon = vp.px_to_latlon(ground_head_pt[0], ground_head_pt[1])
+
+    # 1. Smooth overview-breathing 2.5D GPU camera warp of static world baseplate
+    cam_cx, cam_cy, cam_zoom = _compute_leg_camera_state(
+        px_stops[i0], px_stops[i1], ground_arc_path, u, ctx.world_w, ctx.leg_km, ctx.use_globe, compact_hud
+    )
     warped_rgb, proj_fn, horizon_y_fn = _apply_camera_homography(
-        world_rgba.convert("RGB"),
+        ctx.static_world_rgb,
         out_w=width,
         out_h=height,
         center_xy=(cam_cx, cam_cy),
         zoom=cam_zoom,
-        pitch_deg=pitch_deg,
-        bank_deg=bank_deg,
-        globe_strength=1.0 if use_globe else 0.0,
+        pitch_deg=ctx.pitch_deg,
+        bank_deg=0.0,
+        globe_strength=1.0 if ctx.use_globe else 0.0,
+        src_cuda_t=ctx.static_cuda_t,
+        vignette_strength=0.0 if (compact_hud or ctx.use_globe) else 0.10,
+        sharpen_amount=0.22 if not ctx.use_globe else 0.0,
     )
-    warped_im = Image.fromarray(warped_rgb).filter(ImageFilter.UnsharpMask(radius=0.7, percent=24, threshold=2))
-    out_rgba = warped_im.convert("RGBA")
+    out_rgba = Image.fromarray(warped_rgb).convert("RGBA")
     s_out = width / 1920.0
     screen_stops = [proj_fn(wx, wy) for wx, wy in px_stops]
+    scr_route_all = [
+        proj_fn(*ground_arc_path.point_at_s((idx_r / 23.0) * ground_arc_path.total_len))
+        for idx_r in range(24)
+    ]
 
-    # 4. Screen-space crisp pin numerals + 3D Elevated Flight Arc + Contrails + Un-squashed Jetliner ABOVE Earth!
+    # 2. Razor-sharp post-warp active route + tapered comet tail + arrival radar + beacon/vehicle
+    scr_ground = [proj_fn(gx, gy) for gx, gy in prog_ground]
+    scr_head = proj_fn(ground_head_pt[0], ground_head_pt[1])
+    stroke_w_scr = max(2, int(round(5.2 * s_out)))
+    stroke_col = spec["pin_fill"] if not spec["light_paper"] else (248, 244, 238)
+    veh_scr_scale = s_out * (0.90 if compact_hud else 1.08)
+
+    route_scr_arr = np.zeros((height, width, 4), dtype=np.uint8)
+    if resolved_mode == "flight":
+        if len(scr_ground) >= 2:
+            _draw_aa_polyline(route_scr_arr, scr_ground, (12, 18, 28, 128), max(2, stroke_w_scr))
+            _draw_aa_polyline(route_scr_arr, scr_ground, (*spec["route_glow"], 115), max(1, stroke_w_scr // 2))
+            out_rgba = Image.alpha_composite(out_rgba, Image.fromarray(route_scr_arr))
+        alt_sin = math.sin(math.pi * u)
+        g_heading, _ = ground_arc_path.tangent_and_curvature(u, window_px=24.0 * (ctx.world_w / 1920.0))
+        _draw_aircraft_ground_shadow(
+            out_rgba,
+            gx=scr_head[0] + 10.0 * s_out * alt_sin,
+            gy=scr_head[1] + 12.0 * s_out * alt_sin,
+            angle_rad=g_heading,
+            scale=veh_scr_scale * (0.92 - 0.28 * alt_sin),
+            alpha=int(round(125 - 65 * alt_sin)),
+        )
+    else:
+        if len(scr_ground) >= 2:
+            _draw_cased_route(route_scr_arr, scr_ground, spec, stroke_w_scr, s_out, is_flight=False)
+            out_rgba = Image.alpha_composite(out_rgba, Image.fromarray(route_scr_arr))
+
+    # 3. Crisp post-warp surface pins, destination arrival radar pulse & pin numerals (true alpha layer)
+    pin_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    od = ImageDraw.Draw(pin_layer, "RGBA")
+    shadow_rgb = (68, 54, 38) if spec.get("light_paper") else (6, 10, 16)
+    f_pin = _load_font_tier(max(10, int(round(13 * s_out))), tier="mono", bold=True)
+    for k in [idx for idx in range(len(screen_stops)) if idx not in (i0, i1)] + [i0, i1]:
+        sx_w, sy_w = screen_stops[k]
+        if sx_w < -50 or sx_w > width + 50 or sy_w < -50 or sy_w > height + 50:
+            continue
+        is_orig, is_dest = (k == i0), (k == i1)
+        if not (is_orig or is_dest):
+            if min(math.hypot(sx_w - screen_stops[i0][0], sy_w - screen_stops[i0][1]), math.hypot(sx_w - screen_stops[i1][0], sy_w - screen_stops[i1][1])) < 26.0 * s_out:
+                continue
+        pin_r = max(6, int(round((12 if (is_orig or is_dest) else 8.5) * s_out)))
+        if is_dest and u >= 0.70:
+            pulse_p = (u - 0.70) / 0.30
+            r_pulse = pin_r + int(round(32 * s_out * pulse_p))
+            p_alpha = int(round(215 * (1.0 - pulse_p)))
+            od.ellipse([sx_w - r_pulse, sy_w - r_pulse, sx_w + r_pulse, sy_w + r_pulse], outline=(*spec["accent"], p_alpha), width=max(1, int(round(2.5 * s_out))))
+            r_pulse2 = pin_r + int(round(16 * s_out * pulse_p))
+            od.ellipse([sx_w - r_pulse2, sy_w - r_pulse2, sx_w + r_pulse2, sy_w + r_pulse2], outline=(*spec["route_core"], int(round(p_alpha * 0.85))), width=max(1, int(round(2.0 * s_out))))
+        ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 220)
+        # Soft translucent shadow under pin
+        od.ellipse([sx_w - pin_r - 2, sy_w - pin_r, sx_w + pin_r + 3, sy_w + pin_r + 5], fill=(*shadow_rgb, 62))
+        od.ellipse([sx_w - pin_r - 3, sy_w - pin_r - 3, sx_w + pin_r + 3, sy_w + pin_r + 3], fill=ring_col)
+        od.ellipse([sx_w - pin_r, sy_w - pin_r, sx_w + pin_r, sy_w + pin_r], fill=(*spec["pin_fill"], 250))
+        num_str = f"{k + 1:02d}"
+        nw, nh = measure_tracked_text(od, num_str, f_pin)
+        od.text((sx_w - nw * 0.5, sy_w - nh * 0.62), num_str, font=f_pin, fill=(*spec["pin_text"], 252))
+    out_rgba.alpha_composite(pin_layer)
+
+    # 4. Pulsing glowing beacon (ground modes) OR boat wake OR elevated 3D flight arc + jetliner
     if resolved_mode == "flight":
         alt_sin = math.sin(math.pi * u)
-        scr_ground = [proj_fn(gx, gy) for gx, gy in prog_ground]
         if len(scr_ground) >= 2:
             gx0, gy0 = screen_stops[i0]
             gx1, gy1 = screen_stops[i1]
             scr_span = math.hypot(gx1 - gx0, gy1 - gy0)
             lift_px = min(height * 0.25, max(54.0 * s_out, scr_span * 0.26))
-            scr_arc_pts: list[tuple[float, float]] = []
-            # Smooth arc-length fraction in screen space for parabolic atmospheric climb
             cum_s = [0.0]
             for j in range(1, len(scr_ground)):
                 cum_s.append(cum_s[-1] + math.hypot(scr_ground[j][0] - scr_ground[j - 1][0], scr_ground[j][1] - scr_ground[j - 1][1]))
-            # Estimate total chord fraction using world progress ratio u
             tot_s = max(1e-6, cum_s[-1] / max(1e-4, u))
-            for j, (sx_g, sy_g) in enumerate(scr_ground):
-                g_frac = min(1.0, cum_s[j] / tot_s)
-                scr_arc_pts.append((sx_g, sy_g - lift_px * math.sin(math.pi * g_frac)))
+            scr_arc_pts = [(sx_g, sy_g - lift_px * math.sin(math.pi * min(1.0, cum_s[j] / tot_s))) for j, (sx_g, sy_g) in enumerate(scr_ground)]
 
-            # Subtle dashed vertical altitude tethers linking arc down to Earth ground track
             sky_arr = np.zeros((height, width, 4), dtype=np.uint8)
             if len(scr_ground) >= 12:
                 step_teth = max(8, len(scr_ground) // 6)
                 for j in range(step_teth, len(scr_ground) - 2, step_teth):
-                    _draw_dashed_aa_polyline(
-                        sky_arr,
-                        [scr_ground[j], scr_arc_pts[j]],
-                        (*spec["route_future"], 92),
-                        max(1, int(round(1.4 * s_out))),
-                        dash_px=4.0 * s_out,
-                        gap_px=5.0 * s_out,
-                    )
-
-            sky_sw = max(2, int(round(5.5 * s_out)))
-            _draw_cased_route(sky_arr, scr_arc_pts, spec, sky_sw, s_out, is_flight=False)
+                    _draw_dashed_aa_polyline(sky_arr, [scr_ground[j], scr_arc_pts[j]], (*spec["route_future"], 92), max(1, int(round(1.4 * s_out))), dash_px=4.0 * s_out, gap_px=5.0 * s_out)
+            _draw_cased_route(sky_arr, scr_arc_pts, spec, max(2, int(round(5.5 * s_out))), s_out, is_flight=False)
             out_rgba = Image.alpha_composite(out_rgba, Image.fromarray(sky_arr))
 
             elev_scr_path = _ArcLengthPath(scr_arc_pts)
-            scr_head = elev_scr_path.point_at_s(elev_scr_path.total_len)
+            e_head = elev_scr_path.point_at_s(elev_scr_path.total_len)
             scr_heading, scr_bank = elev_scr_path.tangent_and_curvature(1.0, window_px=26.0 * s_out)
-            veh_scr_scale = s_out * (0.95 if compact_hud else 1.12) * (0.86 + 0.44 * alt_sin)
-            _draw_flight_contrails(out_rgba, scr_arc_pts, scale=veh_scr_scale, alt_sin=alt_sin)
-            _draw_transport_icon(
-                out_rgba,
-                cx=scr_head[0],
-                cy=scr_head[1],
-                angle_rad=scr_heading,
-                mode="flight",
-                fill_rgb=spec["route_core"],
-                stroke_rgb=stroke_col,
-                scale=veh_scr_scale,
-                bank_factor=scr_bank,
-            )
+            jet_scale = s_out * (0.95 if compact_hud else 1.12) * (0.86 + 0.44 * alt_sin)
+            _draw_flight_contrails(out_rgba, scr_arc_pts, scale=jet_scale, alt_sin=alt_sin)
+            _draw_transport_icon(out_rgba, cx=e_head[0], cy=e_head[1], angle_rad=scr_heading, mode="flight", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=jet_scale, bank_factor=scr_bank)
+    elif resolved_mode in ("train", "walk", "drive"):
+        _draw_glow_beacon_dot(
+            out_rgba,
+            cx=scr_head[0],
+            cy=scr_head[1],
+            glow_rgb=spec["route_glow"],
+            core_rgb=spec["accent"],
+            stroke_rgb=stroke_col,
+            scale=veh_scr_scale,
+            pulse_phase=float(t_norm) * 2.5,
+        )
+    elif resolved_mode == "boat":
+        scr_arc_p = _ArcLengthPath(scr_ground) if len(scr_ground) >= 2 else _ArcLengthPath([scr_head, (scr_head[0] + 1.0, scr_head[1])])
+        scr_heading, scr_bank = scr_arc_p.tangent_and_curvature(1.0, window_px=22.0 * s_out)
+        _draw_boat_kelvin_wake(out_rgba, arc_path=scr_arc_p, u=1.0, scale=veh_scr_scale)
+        _draw_transport_icon(out_rgba, cx=scr_head[0], cy=scr_head[1], angle_rad=scr_heading, mode="boat", fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scr_scale, bank_factor=scr_bank)
+    else:
+        scr_arc_p = _ArcLengthPath(scr_ground) if len(scr_ground) >= 2 else _ArcLengthPath([scr_head, (scr_head[0] + 1.0, scr_head[1])])
+        scr_heading, scr_bank = scr_arc_p.tangent_and_curvature(1.0, window_px=22.0 * s_out)
+        _draw_transport_icon(out_rgba, cx=scr_head[0], cy=scr_head[1], angle_rad=scr_heading, mode=resolved_mode, fill_rgb=spec["route_core"], stroke_rgb=stroke_col, scale=veh_scr_scale, bank_factor=scr_bank)
 
-    # 5. Crisp Screen-Space Collision-Free Waypoint Labels & FROM / TO Polaroids (never clip HUD!)
+    # 5. Zero-Teleport Collision-Free Waypoint Labels, Smooth FROM/TO Polaroids & Crisp Screen-Space Annotations
     od = ImageDraw.Draw(out_rgba, "RGBA")
-    f_pin = _load_font_tier(max(10, int(round(13 * s_out))), tier="mono", bold=True)
     all_lbl_txt = " ".join(w.label for w in norm_wps)
     f_wp_lbl = _load_font_tier(max(11, int(round(17 * s_out))), tier=spec["title_tier"], bold=True, text=all_lbl_txt)
 
-    for k in [idx for idx in range(len(screen_stops)) if idx not in (i0, i1)] + [i0, i1]:
-        sx_w, sy_w = screen_stops[k]
-        if k not in (i0, i1):
-            if min(math.hypot(sx_w - screen_stops[i0][0], sy_w - screen_stops[i0][1]), math.hypot(sx_w - screen_stops[i1][0], sy_w - screen_stops[i1][1])) < 26.0 * s_out:
-                continue
-        if -40 <= sx_w <= width + 40 and -40 <= sy_w <= height + 40:
-            num_str = f"{k + 1:02d}"
-            nw, nh = measure_tracked_text(od, num_str, f_pin)
-            od.text((sx_w - nw * 0.5, sy_w - nh * 0.62), num_str, font=f_pin, fill=(*spec["pin_text"], 250))
-
-    occupied_rects: list[tuple[float, float, float, float]] = [
-        (0.0, 0.0, width * 0.45, height * 0.22),                          # Top-left HUD bar
-        (width * 0.69, height * 0.74, float(width), float(height)),       # Bottom-right Elevation box
-        (0.0, 0.0, float(width), max(height * 0.14, horizon_y_fn(width * 0.5) + 12.0)),  # Earth horizon sky band
-    ]
-    for k, (sx_w, sy_w) in enumerate(screen_stops):
+    occupied_rects = _base_occupied_rects(width, height, horizon_y_fn, compact_hud=compact_hud)
+    for sx_w, sy_w in screen_stops:
         if -40 <= sx_w <= width + 40 and -40 <= sy_w <= height + 40:
             pr = max(12.0, 22.0 * s_out)
             occupied_rects.append((sx_w - pr, sy_w - pr, sx_w + pr, sy_w + pr))
 
     def _overlaps_any(box: tuple[float, float, float, float], pad: float = 4.0) -> bool:
         bx0, by0, bx1, by1 = box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad
-        for rx0, ry0, rx1, ry1 in occupied_rects:
-            if not (bx1 < rx0 or bx0 > rx1 or by1 < ry0 or by0 > ry1):
-                return True
-        return False
+        return any(not (bx1 < rx0 or bx0 > rx1 or by1 < ry0 or by0 > ry1) for rx0, ry0, rx1, ry1 in occupied_rects)
 
     pending_labels: list[tuple[tuple[int, int, int, int], int, int, str, tuple[int, int, int, int], bool, bool]] = []
     tag_order = [i0, i1] + [k for k in range(len(screen_stops)) if k not in (i0, i1)]
@@ -3366,82 +4186,81 @@ def render_travel_map_frame(
         sx_w, sy_w = screen_stops[k]
         if sx_w < -60 or sx_w > width + 60 or sy_w < -60 or sy_w > height + 60:
             continue
-        is_orig = k == i0
-        is_dest = k == i1
-        is_done = k <= i0
-        # Skip inactive cluster stop tags within 72px of active origin/destination pins (clean readability)
+        is_orig, is_dest, is_done = (k == i0), (k == i1), (k <= i0)
         if not (is_orig or is_dest):
             if min(math.hypot(sx_w - screen_stops[i0][0], sy_w - screen_stops[i0][1]), math.hypot(sx_w - screen_stops[i1][0], sy_w - screen_stops[i1][1])) < 72.0 * s_out:
                 continue
 
-        pin_r = max(6, int(round((11 if (is_orig or is_dest) else 8) * s_out)))
+        pin_r = max(6.0, float(round((12 if (is_orig or is_dest) else 8.5) * s_out)))
         ring_col = (*spec["accent"], 255) if (is_orig or is_dest) else (*spec["route_history"], 220)
         tag = norm_wps[k].label
         tb0 = od.textbbox((0, 0), tag, font=f_wp_lbl)
-        tw = tb0[2] - tb0[0]
-        th = tb0[3] - tb0[1]
-        pad_x = int(round(10 * s_out))
-        pad_y = int(round(7 * s_out))
+        tw, th = float(tb0[2] - tb0[0]), float(tb0[3] - tb0[1])
+        pad_x, pad_y = int(round(10 * s_out)), int(round(7 * s_out))
+        candidates = _waypoint_label_candidates(sx_w, sy_w, pin_r, tw, th, tb0, s_out, is_dest)
 
-        candidates: list[tuple[float, float]] = [
-            (sx_w + pin_r + 14 * s_out, sy_w - th * 0.55 - tb0[1]),
-            (sx_w - tw * 0.5 - tb0[0], sy_w + pin_r + 18 * s_out - tb0[1]),
-            (sx_w - tw * 0.5 - tb0[0], sy_w - pin_r - th - 18 * s_out - tb0[1]),
-            (sx_w - pin_r - tw - 24 * s_out - tb0[0], sy_w - th * 0.55 - tb0[1]),
-            (sx_w + pin_r + 14 * s_out, sy_w + pin_r + 14 * s_out - tb0[1]),
-            (sx_w + pin_r + 14 * s_out, sy_w - pin_r - th - 14 * s_out - tb0[1]),
-        ]
-        if is_dest:
-            candidates = [candidates[0], candidates[1], candidates[3], candidates[2], candidates[4], candidates[5]]
-
-        chosen: Optional[tuple[int, int]] = None
-        for cx_c, cy_c in candidates:
-            tx_c = int(round(max(18, min(width - tw - 22, cx_c))))
-            ty_c = int(round(max(int(round(height * 0.21)), min(height - th - 20, cy_c))))
-            tb_c = od.textbbox((tx_c, ty_c), tag, font=f_wp_lbl)
-            cand_box = (tb_c[0] - pad_x, tb_c[1] - pad_y, tb_c[2] + pad_x, tb_c[3] + pad_y)
-            if not _overlaps_any(cand_box):
-                chosen = (tx_c, ty_c)
-                occupied_rects.append(cand_box)
-                break
-
-        if chosen is None:
-            if not (is_orig or is_dest):
-                continue
-            tx = int(round(max(18, min(width - tw - 22, candidates[0][0]))))
-            ty = int(round(max(int(round(height * 0.23)), min(height - th - 20, candidates[0][1]))))
-            tb_f = od.textbbox((tx, ty), tag, font=f_wp_lbl)
-            occupied_rects.append((tb_f[0] - pad_x, tb_f[1] - pad_y, tb_f[2] + pad_x, tb_f[3] + pad_y))
+        locked_idx = ctx.layout_plan.label_slots.get(k)
+        if locked_idx is not None and 0 <= locked_idx < len(candidates):
+            cx_c, cy_c = candidates[locked_idx]
+            tx = int(round(max(18.0, min(float(width - tw - 22), cx_c))))
+            ty = int(round(max(float(height * 0.19), min(float(height - th - 20), cy_c))))
+            tb_l = od.textbbox((tx, ty), tag, font=f_wp_lbl)
+            occupied_rects.append((tb_l[0] - pad_x, tb_l[1] - pad_y, tb_l[2] + pad_x, tb_l[3] + pad_y))
         else:
-            tx, ty = chosen
+            chosen: Optional[tuple[int, int]] = None
+            for cx_c, cy_c in candidates:
+                tx_c = int(round(max(18.0, min(float(width - tw - 22), cx_c))))
+                ty_c = int(round(max(float(height * 0.19), min(float(height - th - 20), cy_c))))
+                tb_c = od.textbbox((tx_c, ty_c), tag, font=f_wp_lbl)
+                cand_box = (tb_c[0] - pad_x, tb_c[1] - pad_y, tb_c[2] + pad_x, tb_c[3] + pad_y)
+                if not _overlaps_any(cand_box):
+                    chosen = (tx_c, ty_c)
+                    occupied_rects.append(cand_box)
+                    break
+            if chosen is None:
+                if not (is_orig or is_dest):
+                    continue
+                tx = int(round(max(18.0, min(float(width - tw - 22), candidates[0][0]))))
+                ty = int(round(max(float(height * 0.21), min(float(height - th - 20), candidates[0][1]))))
+                tb_f = od.textbbox((tx, ty), tag, font=f_wp_lbl)
+                occupied_rects.append((tb_f[0] - pad_x, tb_f[1] - pad_y, tb_f[2] + pad_x, tb_f[3] + pad_y))
+            else:
+                tx, ty = chosen
 
         tb = od.textbbox((tx, ty), tag, font=f_wp_lbl)
         pending_labels.append(
             ((tb[0] - pad_x, tb[1] - pad_y, tb[2] + pad_x, tb[3] + pad_y), tx, ty, tag, ring_col, is_orig or is_dest, is_done or is_dest)
         )
 
-    # Screen-space FROM / TO hero photo Polaroids placed cleanly outside label/HUD rects, BEFORE drawing text pills on top
+    # Smooth FROM -> TO Polaroid Choreography (zero teleport, route-line avoidance, graceful FROM fade-out!)
     orig_card_center: Optional[tuple[float, float]] = None
-    if orig.hero_thumbnail_path:
-        orig_bloom = min(1.0, 0.72 + float(t_norm) * 3.0)
-        orig_card_center = _paste_hero_photo_callout(
-            world_rgba=out_rgba,
-            dest_px=screen_stops[i0],
-            thumb_path=orig.hero_thumbnail_path,
-            label=orig.label,
-            bloom_p=orig_bloom,
-            spec=spec,
-            world_w=width,
-            world_h=height,
-            avoid_pts=[p for idx_p, p in enumerate(screen_stops) if idx_p != i0],
-            caption_prefix="FROM",
-            tilt_deg=-1.6,
-            accent_override=spec["route_history"],
-            avoid_rects=occupied_rects,
-        )
+    if not compact_hud and (ctx.orig_thumb_rgb is not None or orig.hero_thumbnail_path):
+        intro_p = min(1.0, 0.78 + float(t_norm) * 2.4)
+        # Gracefully fade FROM out as arrival approaches so it never crowds or pins against screen edges
+        fade_out_p = 1.0 if u <= 0.48 else max(0.0, 1.0 - (u - 0.48) / 0.24)
+        orig_bloom = intro_p * fade_out_p
+        if orig_bloom > 0.02:
+            orig_card_center = _paste_hero_photo_callout(
+                world_rgba=out_rgba,
+                dest_px=screen_stops[i0],
+                thumb_path=orig.hero_thumbnail_path,
+                label=orig.label,
+                bloom_p=orig_bloom,
+                spec=spec,
+                world_w=width,
+                world_h=height,
+                avoid_pts=[p for idx_p, p in enumerate(screen_stops) if idx_p != i0],
+                caption_prefix="FROM",
+                tilt_deg=-1.6,
+                accent_override=spec["route_history"],
+                avoid_rects=occupied_rects,
+                route_avoid_pts=scr_route_all,
+                locked_slot_idx=ctx.layout_plan.orig_polaroid_slot,
+                preloaded_thumb_rgb=ctx.orig_thumb_rgb,
+            )
 
-    if u >= 0.45 and dest.hero_thumbnail_path:
-        bloom_p = min(1.0, (u - 0.45) / 0.28)
+    if not compact_hud and u >= 0.44 and (ctx.dest_thumb_rgb is not None or dest.hero_thumbnail_path):
+        bloom_p = min(1.0, (u - 0.44) / 0.28)
         dest_avoid = [p for idx_p, p in enumerate(screen_stops) if idx_p != i1]
         if orig_card_center is not None:
             dest_avoid.append(orig_card_center)
@@ -3458,34 +4277,64 @@ def render_travel_map_frame(
             caption_prefix="TO",
             tilt_deg=2.0,
             avoid_rects=occupied_rects,
+            route_avoid_pts=scr_route_all,
+            locked_slot_idx=ctx.layout_plan.dest_polaroid_slot,
+            preloaded_thumb_rgb=ctx.dest_thumb_rgb,
         )
 
-    od_top = ImageDraw.Draw(out_rgba, "RGBA")
-    for pill_box, tx, ty, tag, ring_col, is_active_pin, is_bright in pending_labels:
-        od_top.rounded_rectangle(
-            list(pill_box),
-            radius=max(4, int(round(6 * s_out))),
-            fill=(*spec["hud_fill"][:3], 238 if is_bright else 180),
-            outline=ring_col if is_active_pin else (*spec["hud_border"][:3], 125),
-            width=1,
+    # Crisp post-warp screen-space corridor annotations (sharing unified collision layout!)
+    if not compact_hud and annotations:
+        _draw_route_annotations_screen(
+            out_rgba=out_rgba,
+            annotations=annotations,
+            vp=vp,
+            proj_fn=proj_fn,
+            u=u,
+            spec=spec,
+            width=width,
+            height=height,
+            occupied_rects=occupied_rects,
+            route_avoid_pts=scr_route_all,
+            locked_offsets=ctx.layout_plan.annotation_offsets,
         )
-        od_top.text((tx, ty), tag, font=f_wp_lbl, fill=(*spec["hud_title"], 252))
 
-    # 6. Composite crisp screen-space HUD over 2.5D/Globe scene
+    # Draw waypoint pills cleanly on top (true alpha shadow & frosted pill layer)
+    if pending_labels:
+        pill_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        od_top = ImageDraw.Draw(pill_layer, "RGBA")
+        for pill_box, tx, ty, tag, ring_col, is_active_pin, is_bright in pending_labels:
+            od_top.rounded_rectangle(
+                [pill_box[0] + 2, pill_box[1] + 4, pill_box[2] + 3, pill_box[3] + 5],
+                radius=max(4, int(round(6 * s_out))),
+                fill=(*shadow_rgb, 48 if is_bright else 28),
+            )
+            od_top.rounded_rectangle(
+                list(pill_box),
+                radius=max(4, int(round(6 * s_out))),
+                fill=(*spec["hud_fill"][:3], 240 if is_bright else 188),
+                outline=ring_col if is_active_pin else (*spec["hud_border"][:3], 130),
+                width=max(1, int(round(1.4 * s_out))) if is_active_pin else 1,
+            )
+            od_top.text((tx, ty), tag, font=f_wp_lbl, fill=(*spec["hud_title"], 252))
+        out_rgba.alpha_composite(pill_layer)
+
+    # 6. Composite crisp screen-space HUD, anchored compass rose & Journey/Elevation telemetry card
     _render_screen_hud(
         frame_rgba=out_rgba,
-        style=use_style,
+        style=ctx.use_style,
         waypoints=norm_wps,
         leg_index=i0,
         t_norm=t_norm,
         transport_mode=resolved_mode,
         compact_hud=compact_hud,
         hdr_safe=hdr_safe,
+        route_total_km=ctx.route_total_km,
+        cur_latlon=cur_latlon,
+        draw_compass=not compact_hud,
     )
 
     out_arr = np.asarray(out_rgba.convert("RGB"), dtype=np.uint8)
     if hdr_safe:
-        # Smooth proportional luminance ceiling <= 192 (~203 nits diffuse white) preserving hue & contrast
         max_ch = np.max(out_arr, axis=2, keepdims=True).astype(np.float32)
         scale = np.where(max_ch > float(HDR_DIFFUSE_WHITE_PEAK_RGB), float(HDR_DIFFUSE_WHITE_PEAK_RGB) / np.maximum(1.0, max_ch), 1.0)
         out_arr = np.clip(np.round(out_arr.astype(np.float32) * scale), 0, HDR_DIFFUSE_WHITE_PEAK_RGB).astype(np.uint8)
@@ -4169,7 +5018,7 @@ def render_google_earth_flyover_frame(
 def render_travel_map_clip(
     waypoints: list[MapWaypointSpec | dict[str, Any]],
     output_mp4: str | Path,
-    style: str = "midnight_vox_atlas",
+    style: str = "auto",
     duration: float = 5.2,
     width: int = 1920,
     height: int = 1080,
@@ -4183,12 +5032,14 @@ def render_travel_map_clip(
     annotations: Optional[list[dict[str, Any]]] = None,
     leg_modes: Optional[list[str]] = None,
     dynamic_zoom: bool = False,
+    leg_via_points: Optional[dict[int, list[tuple[float, float]]]] = None,
 ) -> Path:
     """
     Encode a multi-frame Cinema 2.5D Travel Map sequence to an H.264 MP4 clip.
 
     Pass `leg_index=0..N` for a single chapter leg transition, or `leg_index=None` to
     animate across all legs sequentially inside a standalone demo reel.
+    Automatically precomputes per-leg routes, zero-teleport layout plans, and CUDA VRAM baseplates.
     """
     out_path = Path(output_mp4).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4199,6 +5050,37 @@ def render_travel_map_clip(
 
     norm_count = max(2, len(waypoints))
     n_legs = max(1, norm_count - 1)
+
+    # Estimate leg distance & mode for intelligent auto-style and orbital-flight routing
+    norm_preview = _normalize_flyover_waypoints(waypoints)
+    focus_i_clip = max(0, min(len(norm_preview) - 2, int(leg_index or 0)))
+    est_leg_km = haversine_km(
+        norm_preview[focus_i_clip].lat,
+        norm_preview[focus_i_clip].lon,
+        norm_preview[focus_i_clip + 1].lat,
+        norm_preview[focus_i_clip + 1].lon,
+    )
+    eff_mode_hint = (
+        leg_modes[focus_i_clip]
+        if (leg_modes and leg_index is not None and focus_i_clip < len(leg_modes))
+        else transport_mode
+    )
+    eff_resolved_mode = infer_transport_mode(
+        est_leg_km,
+        norm_preview[focus_i_clip].label,
+        norm_preview[focus_i_clip + 1].label,
+        hint=eff_mode_hint,
+    )
+
+    # Intelligently resolve style when 'auto' is passed (never blindly hardcodes midnight_vox_atlas!)
+    if str(style or "auto").strip().lower() == "auto":
+        lbl_blob = " ".join(f"{w.label} {w.subtitle}" for w in norm_preview)
+        style = resolve_travel_map_style(
+            "auto",
+            prompt_text=lbl_blob,
+            transport_mode=eff_resolved_mode,
+            leg_km=est_leg_km,
+        )
 
     wav_tmp: Optional[Path] = None
     if with_audio:
@@ -4264,9 +5146,41 @@ def render_travel_map_clip(
         )
         return c
 
+    # Precompute static per-leg baseplates, routes, Polaroid thumbs, zero-teleport layouts & CUDA VRAM tensors ONCE!
+    # Reserve multi-zoom Google Earth pyramid streaming strictly for long-haul orbital flights (>= 250 km) without corridor annotations;
+    # all ground/regional/heritage/editorial legs automatically get the GPU-VRAM-cached post-warp screen-space engine by default!
+    use_ge_dynamic = bool(
+        dynamic_zoom
+        and allow_tile_fetch
+        and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1"
+        and eff_resolved_mode == "flight"
+        and est_leg_km >= 250.0
+        and style == "satellite_hybrid_4k"
+        and not annotations
+    )
+    prepared_legs: dict[int, _PreparedLegContext] = {}
+    if not use_ge_dynamic:
+        needed_legs = list(range(n_legs)) if (leg_index is None and n_legs > 1) else [max(0, min(n_legs - 1, int(leg_index or 0)))]
+        for k_leg in needed_legs:
+            lm = leg_modes[k_leg] if (leg_modes and k_leg < len(leg_modes)) else transport_mode
+            prepared_legs[k_leg] = _prepare_travel_map_leg(
+                waypoints=waypoints,
+                style=style,
+                width=w_even,
+                height=h_even,
+                leg_index=k_leg,
+                transport_mode=lm,
+                compact_hud=False,
+                allow_tile_fetch=allow_tile_fetch,
+                cache_dir=cache_dir,
+                annotations=annotations,
+                leg_via_points=leg_via_points,
+                upload_cuda=True,
+            )
+
     def _render_frame_bytes(f_idx: int) -> bytes:
         global_p = f_idx / float(max(1, total_frames - 1))
-        if dynamic_zoom and allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
+        if use_ge_dynamic:
             im = render_google_earth_flyover_frame(
                 waypoints=waypoints,
                 style=style,
@@ -4306,12 +5220,14 @@ def render_travel_map_clip(
             allow_tile_fetch=allow_tile_fetch,
             cache_dir=cache_dir,
             annotations=annotations,
+            leg_via_points=leg_via_points,
+            _prepared=prepared_legs.get(cur_leg),
         )
         if im.size != (w_even, h_even):
             im = im.resize((w_even, h_even), Image.Resampling.BILINEAR)
         return im.tobytes()
 
-    if dynamic_zoom and allow_tile_fetch and os.environ.get("AI_EDITOR_OFFLINE_MAPS") != "1":
+    if use_ge_dynamic:
         prefetch_google_earth_tiles(
             waypoints=waypoints,
             style=style,
@@ -4324,59 +5240,60 @@ def render_travel_map_clip(
         )
 
     # Pre-warm tile/font caches on frame 0, then render remaining frames in parallel chunks
-    frame0_bytes = _render_frame_bytes(0)
-    map_workers = max(1, min(get_io_worker_count(12), total_frames - 1))
+    try:
+        frame0_bytes = _render_frame_bytes(0)
+        map_workers = max(1, min(get_io_worker_count(12), total_frames - 1))
 
-    def _encode_all(force_sw: bool) -> tuple[int, bytes]:
-        # Avoid OpenCV internal threadpool oversubscription when ThreadPoolExecutor fans out frames
-        prev_cv_threads = cv2.getNumThreads()
-        if map_workers > 1 and prev_cv_threads != 1:
-            cv2.setNumThreads(1)
-        proc = subprocess.Popen(_build_map_cmd(force_sw=force_sw), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert proc.stdin is not None and proc.stderr is not None
-        try:
-            proc.stdin.write(frame0_bytes)
-            if total_frames > 1:
-                if map_workers == 1:
-                    for f_i in range(1, total_frames):
-                        proc.stdin.write(_render_frame_bytes(f_i))
-                else:
-                    chunk_sz = max(map_workers * 2, 12)
-                    with ThreadPoolExecutor(max_workers=map_workers) as pool:
-                        for c_start in range(1, total_frames, chunk_sz):
-                            c_end = min(total_frames, c_start + chunk_sz)
-                            for fb in pool.map(_render_frame_bytes, range(c_start, c_end)):
-                                proc.stdin.write(fb)
-            proc.stdin.close()
-        except (BrokenPipeError, OSError):
+        def _encode_all(force_sw: bool) -> tuple[int, bytes]:
+            prev_cv_threads = cv2.getNumThreads()
+            if map_workers > 1 and prev_cv_threads != 1:
+                cv2.setNumThreads(1)
+            proc = subprocess.Popen(_build_map_cmd(force_sw=force_sw), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert proc.stdin is not None and proc.stderr is not None
             try:
+                proc.stdin.write(frame0_bytes)
+                if total_frames > 1:
+                    if map_workers == 1:
+                        for f_i in range(1, total_frames):
+                            proc.stdin.write(_render_frame_bytes(f_i))
+                    else:
+                        chunk_sz = max(map_workers * 2, 12)
+                        with ThreadPoolExecutor(max_workers=map_workers) as pool:
+                            for c_start in range(1, total_frames, chunk_sz):
+                                c_end = min(total_frames, c_start + chunk_sz)
+                                for fb in pool.map(_render_frame_bytes, range(c_start, c_end)):
+                                    proc.stdin.write(fb)
                 proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+                err_b = proc.stderr.read()
+                rc_val = proc.wait()
+                return (rc_val if rc_val != 0 else 1), err_b
             except Exception:
-                pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                raise
+            finally:
+                if map_workers > 1 and prev_cv_threads != 1:
+                    cv2.setNumThreads(prev_cv_threads)
             err_b = proc.stderr.read()
             rc_val = proc.wait()
-            return (rc_val if rc_val != 0 else 1), err_b
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            raise
-        finally:
-            if map_workers > 1 and prev_cv_threads != 1:
-                cv2.setNumThreads(prev_cv_threads)
-        err_b = proc.stderr.read()
-        rc_val = proc.wait()
-        return rc_val, err_b
+            return rc_val, err_b
 
-    from ..hardware import nvenc_encode_guard
+        from ..hardware import nvenc_encode_guard
 
-    try:
         with nvenc_encode_guard(["-c:v", best_sdr]):
             rc, stderr_bytes = _encode_all(force_sw=False)
         if rc != 0 and best_sdr == "h264_nvenc":
             rc, stderr_bytes = _encode_all(force_sw=True)
     finally:
+        for p_ctx in prepared_legs.values():
+            p_ctx.release_cuda()
         if wav_tmp is not None and wav_tmp.exists():
             try:
                 wav_tmp.unlink()

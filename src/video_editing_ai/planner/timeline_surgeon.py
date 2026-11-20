@@ -393,14 +393,23 @@ def apply_surgical_edit(
             op_leg_modes = op.get("leg_modes") if isinstance(op.get("leg_modes"), list) else None
             if req_style in VALID_TRAVEL_MAP_STYLES and req_style != "auto":
                 tm_style = req_style
-            elif allow_tiles and (t_mode in ("flight", "boat") or (t_mode == "train" and dist_km >= 10.0)):
-                tm_style = "satellite_hybrid_4k"
             else:
+                ctx_blob = " ".join(
+                    part for part in (
+                        str(timeline.project_title or ""),
+                        wp_orig.label,
+                        wp_dest.label,
+                        wp_orig.subtitle,
+                        wp_dest.subtitle,
+                    )
+                    if part
+                )
                 tm_style = resolve_travel_map_style(
                     "auto",
                     timeline.subtitles.theme or "apple_tv_glass",
-                    f"{wp_orig.label} {wp_dest.label}",
+                    ctx_blob,
                     transport_mode=t_mode,
+                    leg_km=dist_km,
                 )
             placement = str(op.get("placement") or "v2_flyover").strip().lower()
             req_dur = max(1.4, min(12.0, float(op.get("duration") or op.get("new_duration") or (4.8 if placement in ("v1_interlude", "v1", "interlude") else 3.8))))
@@ -468,7 +477,7 @@ def apply_surgical_edit(
                     with_audio=True,
                     cache_dir=proj / "cache" / "maps" / "tiles",
                     leg_modes=op_leg_modes,
-                    dynamic_zoom=allow_tiles,
+                    dynamic_zoom=bool(allow_tiles and t_mode == "flight" and dist_km >= 250.0),
                 )
                 existing_ids = {v.id for v in timeline.visual_track}
                 new_id = f"clip_map_{len(timeline.visual_track) + 1:03d}"
@@ -517,7 +526,7 @@ def apply_surgical_edit(
                     with_audio=False,
                     cache_dir=proj / "cache" / "maps" / "tiles",
                     leg_modes=op_leg_modes,
-                    dynamic_zoom=allow_tiles,
+                    dynamic_zoom=bool(allow_tiles and t_mode == "flight" and dist_km >= 250.0),
                 )
                 broll_id = f"broll_map_{len(timeline.broll_track) + 1:02d}"
                 timeline.broll_track.append(

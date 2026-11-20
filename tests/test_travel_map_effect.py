@@ -645,5 +645,124 @@ def test_glow_beacon_dot_default_for_all_ground_modes_and_vfx_skip(tmp_path: Pat
     assert "clip_broll_01" in target_ids
 
 
+def test_intelligent_travel_map_style_selection_and_no_blind_midnight_default() -> None:
+    """Verify resolve_travel_map_style picks context-matched cartography rather than defaulting to midnight_vox_atlas."""
+    # European heritage / museum / palace / Kodak -> archival_expedition_parchment
+    assert (
+        resolve_travel_map_style("auto", prompt_text="Paris La Seine to Versailles Palace", transport_mode="train")
+        == "archival_expedition_parchment"
+    )
+    assert (
+        resolve_travel_map_style("auto", title_theme="criterion_atelier", transport_mode="train")
+        == "archival_expedition_parchment"
+    )
+    # Scenic nature / national park / coastal / long overland drive -> aerial_relief_hybrid
+    assert (
+        resolve_travel_map_style("auto", prompt_text="Yosemite Valley scenic road trip to Big Sur coast", transport_mode="drive")
+        == "aerial_relief_hybrid"
+    )
+    assert (
+        resolve_travel_map_style("auto", prompt_text="Point A to Point B", transport_mode="drive", leg_km=185.0)
+        == "aerial_relief_hybrid"
+    )
+    # Editorial / bistro / garden / Kinfolk -> kinfolk_minimal_monograph
+    assert (
+        resolve_travel_map_style("auto", prompt_text="Napa winery and botanical garden bistro", transport_mode="drive")
+        == "kinfolk_minimal_monograph"
+    )
+    assert (
+        resolve_travel_map_style("auto", title_theme="kinfolk_magazine", transport_mode="walk")
+        == "kinfolk_minimal_monograph"
+    )
+    # Flights & boats -> satellite_hybrid_4k
+    assert resolve_travel_map_style("auto", prompt_text="Paris to Tokyo", transport_mode="flight") == "satellite_hybrid_4k"
+    assert resolve_travel_map_style("auto", prompt_text="Lucerne Lake Ferry", transport_mode="boat") == "satellite_hybrid_4k"
+    # Night / modern skyline -> midnight_vox_atlas
+    assert (
+        resolve_travel_map_style("auto", prompt_text="Shinjuku neon night metro to Shibuya", transport_mode="train")
+        == "midnight_vox_atlas"
+    )
+    # Explicit override always wins
+    assert resolve_travel_map_style("google_road_navigator", prompt_text="Paris Versailles", transport_mode="train") == "google_road_navigator"
+
+
+def test_travel_map_v3_zero_teleport_layout_via_points_annotations_and_cuda_vram(tmp_path: Path) -> None:
+    """Verify via_points routing, locked zero-teleport layout, post-warp annotations, ribbon vs elev HUD & CUDA VRAM reuse."""
+    import torch
+    from video_editing_ai.renderer import travel_map as tm
+
+    thumb_a = _make_test_photo(tmp_path / "seine.jpg")
+    thumb_b = _make_test_photo(tmp_path / "versailles.jpg")
+    paris_wps = [
+        {"label": "Paris · La Seine", "subtitle": "RER C", "lat": 48.8452, "lon": 2.3662, "alt_m": 35.0, "hero_thumbnail_path": str(thumb_a)},
+        {
+            "label": "Versailles",
+            "subtitle": "Cour Royale",
+            "lat": 48.8018,
+            "lon": 2.1287,
+            "alt_m": 135.0,
+            "hero_thumbnail_path": str(thumb_b),
+            "via_points": [(48.8556, 2.2880), (48.8030, 2.1860)],
+        },
+        {"label": "Arc de Triomphe", "subtitle": "Étoile", "lat": 48.8738, "lon": 2.2950, "alt_m": 58.0},
+    ]
+    anns = [
+        {"lat": 48.8556, "lon": 2.2880, "title": "Tour Eiffel · Rive Gauche", "sub": "RER C Corridor", "u_min": 0.15, "u_max": 0.90},
+        {"lat": 48.8030, "lon": 2.1860, "title": "Meudon · Viroflay", "sub": "Forest Climb", "u_min": 0.35, "u_max": 0.95},
+    ]
+
+    ctx = tm._prepare_travel_map_leg(
+        waypoints=paris_wps,
+        style="auto",
+        width=960,
+        height=540,
+        leg_index=0,
+        transport_mode="train",
+        allow_tile_fetch=False,
+        annotations=anns,
+        upload_cuda=True,
+    )
+    try:
+        # Auto-style for Paris/Versailles resolves intelligently to archival_expedition_parchment
+        assert ctx.use_style == "archival_expedition_parchment"
+        # Locked layout slots prevent Polaroid & waypoint label teleportation across frames
+        assert ctx.layout_plan.orig_polaroid_slot is not None
+        assert ctx.layout_plan.dest_polaroid_slot is not None
+        assert 0 in ctx.layout_plan.label_slots and 1 in ctx.layout_plan.label_slots
+        # Real spline km along via_points exceeds straight crow-flies distance
+        assert ctx.route_total_km >= ctx.leg_km
+        # CUDA VRAM baseplate tensor is uploaded once when GPU is available
+        if torch.cuda.is_available() and tm._cuda_map_enabled():
+            assert ctx.static_cuda_t is not None
+            assert tuple(ctx.static_cuda_t.shape)[0:2] == (1, 3)
+
+        # Render departure, mid, arrival reusing prepared context (including post-warp annotations & ribbon HUD)
+        f_dep = tm.render_travel_map_frame(waypoints=paris_wps, style="auto", width=960, height=540, leg_index=0, t_norm=0.10, hdr_safe=True, allow_tile_fetch=False, annotations=anns, _prepared=ctx)
+        f_mid = tm.render_travel_map_frame(waypoints=paris_wps, style="auto", width=960, height=540, leg_index=0, t_norm=0.50, hdr_safe=True, allow_tile_fetch=False, annotations=anns, _prepared=ctx)
+        f_arr = tm.render_travel_map_frame(waypoints=paris_wps, style="auto", width=960, height=540, leg_index=0, t_norm=0.90, hdr_safe=True, allow_tile_fetch=False, annotations=anns, _prepared=ctx)
+        for im_f in (f_dep, f_mid, f_arr):
+            arr = np.asarray(im_f, dtype=np.uint8)
+            assert arr.shape == (540, 960, 3)
+            assert int(arr.max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+        # Visual difference between departure and arrival confirms live beacon/comet/Polaroid choreography
+        assert float(np.mean(np.abs(np.asarray(f_arr, dtype=np.float32) - np.asarray(f_dep, dtype=np.float32)))) > 2.0
+    finally:
+        ctx.release_cuda()
+        assert ctx.static_cuda_t is None
+
+    # Mountain leg (high elevation delta) renders Elevation Profile cleanly without error
+    alpine_wps = [
+        {"label": "Lucerne", "lat": 47.0502, "lon": 8.3093, "alt_m": 434.0},
+        {"label": "Rigi Kulm", "lat": 47.0567, "lon": 8.4855, "alt_m": 1798.0},
+    ]
+    f_mtn = tm.render_travel_map_frame(
+        waypoints=alpine_wps, style="auto", width=640, height=360, leg_index=0, t_norm=0.65,
+        transport_mode="train", hdr_safe=True, allow_tile_fetch=False,
+    )
+    assert np.asarray(f_mtn).shape == (360, 640, 3)
+    assert int(np.asarray(f_mtn).max()) <= HDR_DIFFUSE_WHITE_PEAK_RGB
+
+
+
 
 
