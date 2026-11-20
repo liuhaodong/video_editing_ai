@@ -26,7 +26,7 @@ from ..hardware import (
     nvenc_encode_guard,
 )
 from ..models.schema import EditTimeline, EffectTrackItem, TitleOverlayItem, VisualTrackItem
-from .color_grading import CINEMA_FILM_STOCK_SPECS, apply_color_grade_to_pil_image, write_film_stock_cube_lut
+from .color_grading import CINEMA_FILM_STOCK_SPECS, write_film_stock_cube_lut
 from .ken_burns import (
     build_hdr_color_filters,
     build_segment_overlay_filtergraph,
@@ -485,18 +485,21 @@ def _render_video_segment(
 
         if has_paired_photo and item.paired_visual_source:
             try:
-                from PIL import Image, ImageOps
-                from .ken_burns import _build_double_matte_card
+                from PIL import Image
+                from .ken_burns import _build_double_matte_card, _load_graded_photo_rgb
 
                 base_ov = Image.open(card_png).convert("RGBA")
-                p_img = ImageOps.exif_transpose(Image.open(item.paired_visual_source)).convert("RGB")
-                color_fx = next((fx for fx in (attached_effects or []) if fx.effect_type == "color_grade"), None)
-                if color_fx is not None:
-                    p_img = apply_color_grade_to_pil_image(p_img, color_fx)
+                p_max_w = int(width * 0.40)
                 p_max_h = int(height * (0.68 if has_bottom_seg_title else (0.74 if has_doc_card else 0.80)))
+                color_fx = next((fx for fx in (attached_effects or []) if fx.effect_type == "color_grade"), None)
+                p_img = _load_graded_photo_rgb(
+                    item.paired_visual_source,
+                    color_grade_fx=color_fx,
+                    max_dim=max(p_max_w, p_max_h),
+                )
                 p_card = _build_double_matte_card(
                     p_img,
-                    max_w=int(width * 0.40),
+                    max_w=p_max_w,
                     max_h=p_max_h,
                     scale_factor=width / 1920.0,
                 )

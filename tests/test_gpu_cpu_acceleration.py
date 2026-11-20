@@ -704,3 +704,31 @@ def test_cuda_4k_non_mpi_unlock_and_gpu_pixel_encoders(tmp_path: Path) -> None:
     joined = ";".join(parts)
     assert "loop=loop=-1:size=1:start=0" in joined
 
+
+def test_paired_photo_diptych_pre_scales_before_grading(tmp_path: Path) -> None:
+    """Verify paired-photo diptychs downscale high-MP stills via _load_graded_photo_rgb before 3D LUT grading."""
+    import inspect
+    from video_editing_ai.models.schema import EffectTrackItem
+    from video_editing_ai.renderer import ffmpeg_composer, ken_burns
+
+    big_photo = tmp_path / "sony_highres.jpg"
+    Image.new("RGB", (4000, 2666), (120, 140, 160)).save(big_photo, quality=85)
+    fx = EffectTrackItem(
+        id="fx_diptych_lut",
+        target_clip_id="clip_vid",
+        effect_type="color_grade",
+        timeline_start=0.0,
+        duration=4.0,
+        parameters={
+            "lut_intensity": 0.48,
+            "chapter_look": "archival_kodak_2383",
+        },
+    )
+    graded = ken_burns._load_graded_photo_rgb(big_photo, color_grade_fx=fx, max_dim=1728)
+    assert max(graded.width, graded.height) <= 1728
+
+    src = inspect.getsource(ffmpeg_composer._render_video_segment)
+    assert "_load_graded_photo_rgb(" in src
+    assert "apply_color_grade_to_pil_image(" not in src
+
+
