@@ -536,7 +536,11 @@ class CullerAgent(BaseEditingAgent):
 
         precomputed_vid_map: dict[str, tuple[list[str], Optional[dict[str, Any]], dict[str, Any]]] = {}
         if sorted_videos:
-            vid_workers = max(1, min(get_io_worker_count(12), len(sorted_videos)))
+            import sys as _sys
+
+            # Cap macOS concurrent 4K VideoToolbox decodes to 6 so hardware decoder doesn't thrash
+            max_vid_cap = 6 if _sys.platform == "darwin" else 12
+            vid_workers = max(1, min(get_io_worker_count(max_vid_cap), len(sorted_videos)))
             if vid_workers == 1:
                 vid_rows = [_precompute_vid(v) for v in sorted_videos]
             else:

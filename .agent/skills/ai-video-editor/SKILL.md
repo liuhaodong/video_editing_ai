@@ -68,17 +68,18 @@ When the user points you to **Google Photos** with a date range (`YYYY-MM-DD` to
    .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --search-url-only --date-from 2026-07-01 --date-to 2026-07-07
    ```
    Returns `search_url`, `favorites_search_url`, `videos_search_url`, `max_items_per_zip` (`450`), and exact batch instructions.
-2. **Fast Browser Selection (Never Click 100+ Tiles One-by-One!)**:
-   - Launch `invoke_subagent(TypeName="browser", Model="flash", ...)` on `search_url` (or `--album-url`). If redirected to Google Sign-In (`accounts.google.com`), pause and ask the user to log in inside the browser pane, then call `send_message` on the same subagent `conversationId` to resume.
-   - **Speed & Completeness Rules inside `photos.google.com`**:
-     - Keep Google Photos **Photo Stacks** ON (collapses burst sequences into a single "Top Pick" tile automatically, cutting raw download size by 50–65%).
-     - Select whole days in 1 click using **Day-Header checkboxes** or **`Shift+Click` first → last tile** (never spend 100 turns clicking individual thumbnails in the virtualized grid).
-     - Stay safely under Google Photos' 500-item web cap by splitting multi-day shoots into **`<= 450`-item batches** (e.g. 1–2 days per `Shift+D` ZIP: `Photos-day1.zip`, `Photos-day2.zip`, ...).
-     - Optionally check `favorites_search_url` (2 seconds) to capture `★` starred filenames so every favorite gets guaranteed selection immunity (`--favorites`).
-3. **Parallel Pass-1 Video-Editing Funnel + Pass-1.5 AI Vision Rescue Gate (`--plan-only` → `apply-cloud-picks`)**:
-   - Ingest one or multiple downloaded ZIPs in parallel (auto-removes screenshots/receipts while keeping camera-captured signs/menus, suppresses Live Photo `.MOV` micro-clips & duplicate videos, performs non-adjacent cross-camera dedup + smartphone-to-camera GPS inheritance, and selects an Event-Clustered Submodular MMR portfolio with **`1.6×` recall headroom** & 16:9 / vertical-diptych pair balance):
+2. **Proven Two-Step Google Photos Curation & Small-Batch Download Routine (Default Browser Workflow)**:
+   - Launch `invoke_subagent(TypeName="browser", Model="flash", ...)` on `https://photos.google.com` (or `search_url` / `--album-url`). If redirected to Google Sign-In (`accounts.google.com`), pause and ask the user to log in inside the browser pane, then call `send_message` on the same subagent `conversationId` to resume.
+   - **Step 1 — Browse Overview Previews First to Understand Timeline & Pick Good Media**:
+     - Work cleanly in ONE tab on the **main library timeline (`photos.google.com`)** + sidebar **Favorites** tab (keep `Include: Shared with me` unchecked when partner-shared photos are already saved in the main library; keep **Photo Stacks** ON). This avoids Google Photos search RPC (`EzkLib`) gRPC `[8] RESOURCE_EXHAUSTED` rate-limits and Person+Date search returning 0 results.
+     - Scroll/scrub through the preview grid across the target date range (jumping briskly across months/chapters with the right-hand timeline scrubber) to **understand the chronological timeline, trips, and events first**, then **pick only the good, story-worthy photos & videos** (skipping burst duplicates, blurry frames, screenshots, and whiteboard/utility clutter BEFORE downloading).
+   - **Step 2 — Download Curated Picks One-by-One or in Small Batches (`5–15` items)**:
+     - Download your picked highlights **in small curated batches (`5–15` items per `Shift+D` / `⋮ -> Download` ZIP)** or **one-by-one** so you never trigger Google Photos' oversized-ZIP `accounts.google.com` download-redirect error.
+     - Visit the sidebar **Favorites** tab for the target date range, download starred highlights as a dedicated small ZIP, and pass those filenames via `--favorites` for guaranteed selection immunity.
+3. **Parallel Ingest, Dedup & Pass-1.5 AI Vision Rescue Gate (`sync-google-photos` → `apply-cloud-picks`)**:
+   - Ingest all curated browser-downloaded ZIPs in parallel (retaining 100% original EXIF timestamps & GPS, suppressing Live Photo `.MOV` micro-clips & exact duplicates, and performing cross-camera GPS inheritance). For pre-curated small-batch downloads (~60–150 standout items), pass `--download-all` so every hand-picked highlight is staged into `<project_dir>/cloud_media/` for full contact-sheet & 22-agent review; for bulk uncurated dumps, pass `--plan-only` to run Event-Clustered Submodular MMR (`1.6×` recall headroom) + `5×4` scan sheets (`cloud_scan_sheet_*.jpg`) first:
      ```bash
-     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --project-dir "<project_dir>" --from-downloads "<zip_or_dir_of_zips>" --date-from 2026-07-01 --date-to 2026-07-07 --plan-only
+     .venv/bin/python .agent/skills/ai-video-editor/scripts/ai_video_studio_skill.py sync-google-photos --project-dir "<project_dir>" --from-downloads "<zip_or_dir_of_zips>" --date-from 2026-06-01 --date-to 2026-08-31 --favorites "<starred_filenames>" --download-all
      ```
    - Inspect the paginated `5×4` scan sheets (`<project_dir>/contact_sheets/cloud_scan_sheet_01.jpg`, `02.jpg`, ...) via `read_file` to rescue any standout `RUNNER-UP` shots or drop unwanted frames, then finalize `<project_dir>/cloud_media/` staging (or Pass-2 Picker/Takeout extraction):
      ```bash

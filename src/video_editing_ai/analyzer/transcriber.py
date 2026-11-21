@@ -144,12 +144,13 @@ def _transcribe_pcm_raw(
         return []
     try:
         model = _get_whisper_model(model_size)
+        is_cuda_whisper = str(getattr(getattr(model, "model", None), "device", "")).lower().startswith("cuda")
         segments, info = model.transcribe(
             pcm,
             language=language,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=400),
-            beam_size=5,
+            beam_size=5 if is_cuda_whisper else 2,
         )
         results: list[dict[str, Any]] = []
         speaker = f"Speaker ({info.language.upper()})" if getattr(info, "language", None) else "Speaker"

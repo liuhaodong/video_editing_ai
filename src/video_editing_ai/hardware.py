@@ -55,6 +55,7 @@ class HardwareProfile:
     has_cuda: bool = False
     has_cuda_hwaccel: bool = False
     cuda_vram_gb: float = 0.0
+    discrete_gpu_vram_gb: float = 0.0
 
 
 def reset_hardware_cache() -> None:
@@ -103,12 +104,33 @@ def get_render_worker_count(hw: Optional[HardwareProfile] = None) -> int:
             pass
     prof = hw or get_hardware_profile()
     if prof.platform == "darwin":
+        if prof.cpu_count >= 12 and prof.discrete_gpu_vram_gb >= 6.0:
+            return min(6, max(4, prof.cpu_count // 3))
         return min(5, max(1, prof.cpu_count // 4))
     if prof.has_cuda or "nvenc" in prof.best_hdr_encoder:
         if prof.cuda_vram_gb >= 12.0:
             return min(8, max(6, prof.cpu_count // 4))
         return min(6, max(4, prof.cpu_count // 5))
     return min(8, max(2, prof.cpu_count // 4))
+
+
+def get_mps_photo_batch_size(width: int, hw: Optional[HardwareProfile] = None) -> int:
+    """Return optimal PyTorch MPS FP16 photo batch size tuned to discrete AMD/Apple GPU VRAM."""
+    raw = os.environ.get("AI_EDITOR_MPS_BATCH_SIZE", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed >= 1:
+                return parsed
+        except ValueError:
+            pass
+    prof = hw or get_hardware_profile()
+    high_vram_mps = bool(prof.has_mps and prof.discrete_gpu_vram_gb >= 6.0)
+    # 4K GPU-native p010le synthesis peaks at ~4.5 GB VRAM at batch=4 on 8 GB AMD Radeon Pro 5500M
+    # (batch>=6 spills past 7.8 GB into PCIe swap and slows down 3-4x).
+    if width >= 3840:
+        return 4
+    return 12 if high_vram_mps else 8
 
 
 def select_torch_device(policy: Optional[str] = None) -> str:
@@ -234,6 +256,21 @@ def _detect_macos_gpus() -> list[dict[str, str]]:
         return _MACOS_GPUS_CACHE
 
 
+def _parse_vram_gb(vram_str: str) -> float:
+    """Parse macOS system_profiler VRAM text such as '8 GB' or '8192 MB' into GiB."""
+    import re
+
+    s = (vram_str or "").strip().lower()
+    if not s:
+        return 0.0
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(gb|gib|mb|mib)", s)
+    if not m:
+        return 0.0
+    val = float(m.group(1))
+    unit = m.group(2)
+    return round(val / 1024.0, 2) if unit.startswith("m") else round(val, 2)
+
+
 def _find_amd_gpu_index_and_name(gpus: list[dict[str, str]]) -> tuple[int, str]:
     """Return (index, name) of the discrete AMD GPU on dual-GPU Intel+AMD Macs, else (-1, '')."""
     for idx, g in enumerate(gpus):
@@ -243,6 +280,14 @@ def _find_amd_gpu_index_and_name(gpus: list[dict[str, str]]) -> tuple[int, str]:
         if "amd" in combined or "radeon" in combined or "0x1002" in combined:
             return idx, name or "AMD Radeon"
     return -1, ""
+
+
+def _find_discrete_gpu_vram_gb(gpus: list[dict[str, str]]) -> float:
+    """Return parsed VRAM in GiB for the discrete AMD GPU on macOS (0.0 if integrated/unknown)."""
+    idx, _ = _find_amd_gpu_index_and_name(gpus)
+    if 0 <= idx < len(gpus):
+        return _parse_vram_gb(gpus[idx].get("vram", ""))
+    return 0.0
 
 
 def configure_opencv_amd_opencl() -> bool:
@@ -503,12 +548,16 @@ def get_hardware_profile() -> HardwareProfile:
         vt_q_hdr = supports_videotoolbox_qscale("hevc_videotoolbox", "p010le") if best_hdr == "hevc_videotoolbox" else False
         vt_q_sdr = supports_videotoolbox_qscale("h264_videotoolbox", "yuv420p") if best_sdr == "h264_videotoolbox" else False
 
-        _, discrete_name = _find_amd_gpu_index_and_name(_detect_macos_gpus())
+        mac_gpus = _detect_macos_gpus()
+        _, discrete_name = _find_amd_gpu_index_and_name(mac_gpus)
+        discrete_vram_gb = _find_discrete_gpu_vram_gb(mac_gpus)
         cuda_vram_gb = 0.0
         if policy != "cpu":
             cuda_name, cuda_vram_gb = _detect_cuda_device_info(has_cuda)
             if not discrete_name and cuda_name:
                 discrete_name = cuda_name
+            if discrete_vram_gb <= 0.0 and cuda_vram_gb > 0.0:
+                discrete_vram_gb = cuda_vram_gb
 
         prof = HardwareProfile(
             platform=sys.platform,
@@ -531,6 +580,7 @@ def get_hardware_profile() -> HardwareProfile:
             has_cuda=has_cuda,
             has_cuda_hwaccel=cuda_hwaccel,
             cuda_vram_gb=cuda_vram_gb if has_cuda else 0.0,
+            discrete_gpu_vram_gb=discrete_vram_gb,
         )
         _PROFILE_CACHE[cache_key] = prof
         return prof

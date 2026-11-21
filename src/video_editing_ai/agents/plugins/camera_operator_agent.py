@@ -103,14 +103,14 @@ class CameraOperatorAgent(BaseEditingAgent):
                         ),
                     )
                 )
-            elif cam_move in ("walk_forward", "pan_left", "pan_right", "tilt_up") or item.roll_type == "b_roll":
+            elif cam_move in ("walk_forward", "handheld_shaky") and float(getattr(sc_meta, "stability_score", 0.8) or 0.8) < 0.60:
                 stabilized_count += 1
                 operations.append(
                     ClipCameraOperation(
                         clip_id=item.id,
                         operation_type="optical_stabilize",
                         stabilize_strength=0.35,
-                        rationale=f"Applied smooth handheld motion damping for '{cam_move}' camera movement.",
+                        rationale=f"Applied smooth handheld motion damping for genuinely shaky '{cam_move}' footage.",
                     )
                 )
                 stabilize_effects.append(
@@ -121,7 +121,7 @@ class CameraOperatorAgent(BaseEditingAgent):
                         timeline_start=item.timeline_start,
                         duration=item.duration,
                         intensity=0.35,
-                        parameters={"rx": 16, "ry": 16},
+                        parameters={"rx": 12, "ry": 12},
                         created_by_agent=self.role_id,
                     )
                 )

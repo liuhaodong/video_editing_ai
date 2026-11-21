@@ -5095,11 +5095,12 @@ def render_travel_map_clip(
         cq_val = "14" if w_even >= 3000 else "17"
         vb_val = "35M" if w_even >= 3000 else "18M"
         crf_val = "15" if w_even >= 3000 else "17"
-        enc_args = (
-            ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", cq_val, "-b:v", vb_val]
-            if (best_sdr == "h264_nvenc" and not force_sw)
-            else ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf_val]
-        )
+        if best_sdr == "h264_nvenc" and not force_sw:
+            enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", cq_val, "-b:v", vb_val]
+        elif best_sdr == "h264_videotoolbox" and not force_sw:
+            enc_args = ["-c:v", "h264_videotoolbox", "-b:v", vb_val, "-allow_sw", "1"]
+        else:
+            enc_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf_val]
         c = [
             "ffmpeg",
             "-y",

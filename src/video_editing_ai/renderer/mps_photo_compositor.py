@@ -17,7 +17,7 @@ from ..hardware import select_torch_device
 
 
 # Serialize Metal command buffer submissions across threads to avoid PyTorch 2.2 MPS driver races.
-_MPS_LOCK = threading.Lock()
+_MPS_LOCK = threading.RLock()
 _CUDA_MEM_FRACTION_SET: set[int] = set()
 
 
@@ -153,13 +153,20 @@ def _get_hlg_gpu_constants(device: torch.device) -> tuple[torch.Tensor, torch.Te
     return cached
 
 
+_TORCH_UINT16 = getattr(torch, "uint16", torch.int16)
+_TORCH_OOM_TYPES = tuple(
+    t for t in (getattr(torch, "OutOfMemoryError", None), getattr(torch.cuda, "OutOfMemoryError", None), RuntimeError) if t is not None
+)
+
+
 def _rgb_to_hlg_p010le_gpu(canvas: torch.Tensor, npl_nits: float = 380.0) -> torch.Tensor:
     """
-    Convert `(B, 3, H, W)` sRGB [0..255] tensor directly on GPU to packed 10-bit BT.2020 HLG
-    `p010le` tensor `(B, H * 3 // 2, W)` uint16, matching FFmpeg `zscale` (`MAE ~1.16/255`).
+    Convert `(B, 3, H, W)` sRGB [0..255] tensor directly on GPU (CUDA or Apple/AMD Metal MPS) to
+    packed 10-bit BT.2020 HLG `p010le` tensor `(B, H * 3 // 2, W)` (uint16 on CUDA, bit-identical
+    little-endian int16 on MPS), matching FFmpeg `zscale` (`MAE ~1.16/255`).
     """
     scale = max(100.0, min(1000.0, float(npl_nits))) / 1000.0
-    if canvas.device.type == "cuda":
+    if canvas.device.type in ("cuda", "mps"):
         m709, y_w, srgb_lut = _get_hlg_gpu_constants(canvas.device)
         idx = (canvas.clamp(0.0, 255.0) * (1023.0 / 255.0)).to(torch.long)
         lin = srgb_lut[idx]
@@ -176,7 +183,8 @@ def _rgb_to_hlg_p010le_gpu(canvas: torch.Tensor, npl_nits: float = 380.0) -> tor
         rgb_h = torch.where(rgb_s <= (1.0 / 12.0), low, hi).clamp_(0.0, 1.0)
         del rgb_s, low, hi
         y = (rgb_h * y_w).sum(dim=1)
-        y10 = (y * 876.0 + 64.0).round_().clamp_(64.0, 940.0).to(torch.int16) << 6
+        # Use * 64 in int32 -> int16 instead of << 6 because PyTorch 2.2 MPS lacks aten::__lshift__.Scalar
+        y10 = ((y * 876.0 + 64.0).round_().clamp_(64.0, 940.0).to(torch.int32) * 64).to(torch.int16)
         uv_in = torch.stack(
             (
                 (rgb_h[:, 2] - y) * (896.0 / 1.8814) + 512.0,
@@ -185,11 +193,15 @@ def _rgb_to_hlg_p010le_gpu(canvas: torch.Tensor, npl_nits: float = 380.0) -> tor
             dim=1,
         )
         del rgb_h, y
-        uv_sub = F.avg_pool2d(uv_in, kernel_size=2, stride=2).round_().clamp_(64.0, 960.0).to(torch.int16) << 6
+        uv_sub = ((F.avg_pool2d(uv_in, kernel_size=2, stride=2).round_().clamp_(64.0, 960.0).to(torch.int32)) * 64).to(torch.int16)
         del uv_in
         b_sz, h, w = y10.shape
         uv_inter = uv_sub.permute(0, 2, 3, 1).reshape(b_sz, h // 2, w)
-        return torch.cat((y10, uv_inter), dim=1).view(torch.uint16).contiguous()
+        packed = torch.cat((y10, uv_inter), dim=1).contiguous()
+        if canvas.device.type == "cuda":
+            return packed.view(_TORCH_UINT16).contiguous()
+        # MPS returns int16 with bit-identical little-endian 16-bit raw bytes for FFmpeg p010le pipe
+        return packed
 
     x = canvas.float().mul_(1.0 / 255.0).clamp_(0.0, 1.0)
     # 1. IEC 61966-2-1 sRGB EOTF -> scene/display linear [0..1]
@@ -230,7 +242,7 @@ def _rgb_to_hlg_p010le_gpu(canvas: torch.Tensor, npl_nits: float = 380.0) -> tor
 
     b_sz, h, w = y10.shape
     uv_interleaved = torch.stack((cb10, cr10), dim=-1).reshape(b_sz, h // 2, w)
-    return torch.cat((y10, uv_interleaved), dim=1).to(torch.uint16).contiguous()
+    return torch.cat((y10, uv_interleaved), dim=1).to(_TORCH_UINT16).contiguous()
 
 
 def _rgb_to_bt709_yuv420p_gpu(canvas: torch.Tensor) -> torch.Tensor:
@@ -264,8 +276,8 @@ def _pil_to_tensor(
     arr = np.array(src, dtype=np.uint8, copy=True)
     if arr.ndim == 2:
         arr = arr[:, :, None]
-    t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
-    return t.to(device=device, dtype=dtype)
+    t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).contiguous()
+    return t.to(device=device, dtype=dtype).contiguous()
 
 
 class MPSPhotoCompositor:
@@ -622,11 +634,12 @@ class MPSPhotoCompositor:
         gy = ((2.0 / max(1, src_h)) * iy - 1.0).clamp(-1.0, 1.0).expand(batch_n, out_h, out_w)
         grid = torch.stack((gx, gy), dim=-1)
 
-        # PyTorch MPS/CPU F.grid_sample expects matching float32 inputs & grid for exact sub-pixel stability
-        src_f32 = src.float() if int(src.shape[0]) == batch_n else src.float().expand(batch_n, -1, -1, -1)
+        # PyTorch 2.2 MPS F.grid_sample misreads non-contiguous NHWC-strided inputs as NCHW; always enforce NCHW contiguous!
+        src_contig = src.float().contiguous()
+        src_f32 = src_contig if int(src_contig.shape[0]) == batch_n else src_contig.expand(batch_n, -1, -1, -1)
         warped = F.grid_sample(src_f32, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
-        out = warped.to(dtype=self.work_dtype)
-        del grid, src_f32, warped
+        out = warped.to(dtype=self.work_dtype).contiguous()
+        del grid, src_contig, src_f32, warped
         return out
 
     def _crop_plane_batch(
@@ -2051,7 +2064,7 @@ class MPSPhotoCompositor:
         """Synthesize a batch of frames in `rgb24`, `p010le` (BT.2020 HLG), or `yuv420p` (BT.709 SDR)."""
         if not frame_indices:
             if output_pix_fmt == "p010le":
-                return torch.empty((0, self.height * 3 // 2, self.width), dtype=torch.uint16)
+                return torch.empty((0, self.height * 3 // 2, self.width), dtype=_TORCH_UINT16)
             if output_pix_fmt == "yuv420p":
                 return torch.empty((0, self.height * self.width * 3 // 2), dtype=torch.uint8)
             return torch.empty((0, self.height, self.width, 3), dtype=torch.uint8)
@@ -2068,16 +2081,24 @@ class MPSPhotoCompositor:
                 hlg_npl_nits=hlg_npl_nits,
                 pinned_dst=pinned_dst,
             )
-        except (torch.OutOfMemoryError, RuntimeError) as exc:
-            is_oom = isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower()
-            if self.device.type != "cuda" or not is_oom:
+        except _TORCH_OOM_TYPES as exc:
+            is_oom = (
+                (getattr(torch, "OutOfMemoryError", None) is not None and isinstance(exc, torch.OutOfMemoryError))
+                or (getattr(torch.cuda, "OutOfMemoryError", None) is not None and isinstance(exc, torch.cuda.OutOfMemoryError))
+                or "out of memory" in str(exc).lower()
+            )
+            if self.device.type not in ("cuda", "mps") or not is_oom:
                 raise
             try:
-                if self._cuda_stream is not None:
-                    self._cuda_stream.synchronize()
+                if self.device.type == "cuda":
+                    if self._cuda_stream is not None:
+                        self._cuda_stream.synchronize()
+                    torch.cuda.empty_cache()
+                elif self.device.type == "mps":
+                    torch.mps.synchronize()
+                    torch.mps.empty_cache()
             except Exception:
                 pass
-            torch.cuda.empty_cache()
             if len(frame_indices) <= 1:
                 raise
             singles = [
@@ -2117,16 +2138,24 @@ class MPSPhotoCompositor:
                 duration=duration,
                 fps=fps,
             )
-        except (torch.OutOfMemoryError, RuntimeError) as exc:
-            is_oom = isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower()
-            if self.device.type != "cuda" or not is_oom:
+        except _TORCH_OOM_TYPES as exc:
+            is_oom = (
+                (getattr(torch, "OutOfMemoryError", None) is not None and isinstance(exc, torch.OutOfMemoryError))
+                or (getattr(torch.cuda, "OutOfMemoryError", None) is not None and isinstance(exc, torch.cuda.OutOfMemoryError))
+                or "out of memory" in str(exc).lower()
+            )
+            if self.device.type not in ("cuda", "mps") or not is_oom:
                 raise
             try:
-                if self._cuda_stream is not None:
-                    self._cuda_stream.synchronize()
+                if self.device.type == "cuda":
+                    if self._cuda_stream is not None:
+                        self._cuda_stream.synchronize()
+                    torch.cuda.empty_cache()
+                elif self.device.type == "mps":
+                    torch.mps.synchronize()
+                    torch.mps.empty_cache()
             except Exception:
                 pass
-            torch.cuda.empty_cache()
             if len(frame_indices) <= 1:
                 raise
             singles = [
@@ -2176,8 +2205,11 @@ def stream_photo_frames_to_pipe(
     bounded async queue (using pinned host staging buffers on CUDA) so GPU compute overlaps FFmpeg encoding.
     """
     comp = MPSPhotoCompositor(ctx=ctx, device_override=device_override)
+    from ..hardware import get_mps_photo_batch_size
+
+    mps_cap = get_mps_photo_batch_size(width=int(ctx.get("width", 0))) if comp.device.type == "mps" else 4
     eff_batch = (
-        min(max(1, batch_size), 4)
+        min(max(1, batch_size), mps_cap)
         if (comp.device.type != "cuda" and int(ctx.get("width", 0)) >= 3840)
         else max(1, batch_size)
     )
@@ -2189,7 +2221,7 @@ def stream_photo_frames_to_pipe(
             w, h = comp.width, comp.height
             if output_pix_fmt == "p010le":
                 slot_shape: tuple[int, ...] = (eff_batch, h * 3 // 2, w)
-                slot_dtype = torch.uint16
+                slot_dtype = _TORCH_UINT16
             elif output_pix_fmt == "yuv420p":
                 slot_shape = (eff_batch, h * w * 3 // 2)
                 slot_dtype = torch.uint8

@@ -5491,6 +5491,7 @@ def build_segment_overlay_filtergraph(
 
 
 _PHOTO_PREBUFFER_SEM = threading.BoundedSemaphore(2)
+_MPS_PHOTO_COMPUTE_LOCK = threading.Lock()
 _CUDA_PHOTO_SEM = threading.BoundedSemaphore(2)
 _CUDA_4K_LOCK = threading.Lock()
 
@@ -5909,63 +5910,90 @@ def render_photo_clip(
                 os.replace(sw_out, out_path)
                 return out_path
 
+        from ..hardware import get_mps_photo_batch_size
+
         used_mps = False
-        mps_batch_size = 4 if width >= 3840 else 8
-        frame_bytes = max(1, width * height * 3)
+        use_mps_direct_yuv = (
+            os.environ.get("AI_EDITOR_MPS_PHOTO_DIRECT", "1").strip().lower() not in ("0", "false", "no")
+            and width % 2 == 0
+            and height % 2 == 0
+        )
+        mps_pipe_fmt: Literal["rgb24", "p010le", "yuv420p"] = (
+            ("p010le" if hdr else "yuv420p") if use_mps_direct_yuv else "rgb24"
+        )
+        # Keep batch <= 6 at 4K when doing GPU-native p010le inside _MPS_PHOTO_COMPUTE_LOCK so
+        # discrete 8 GB AMD Radeon Pro 5500M stays at peak compute without VRAM paging!
+        raw_mps_batch = get_mps_photo_batch_size(width=width, hw=hw)
+        mps_batch_size = min(raw_mps_batch, 4 if width >= 3840 else 12)
+        frame_bytes = max(1, (width * height * 3) if mps_pipe_fmt != "yuv420p" else (width * height * 3 // 2))
         pre_frames = min(total_frames, max(mps_batch_size, _MAX_PHOTO_PREBUFFER_BYTES // frame_bytes))
         sem_held = False
         pre_batches: list[Optional[Any]] = []
         rem_comp: Optional[Any] = None
 
         try:
-            # Stage A: Pre-synthesize MPS photo frames outside _VT_HDR_ENCODE_LOCK so AMD MPS
-            # compute on Clip N+1 overlaps Apple T2 hevc_videotoolbox encoding on Clip N.
+            # Stage A: Pre-synthesize MPS photo frames (and BT.2020 HLG p010le + fades on GPU!)
+            # outside _VT_HDR_ENCODE_LOCK so AMD Metal compute on Clip N+1 overlaps T2 encoding on Clip N.
+            # _MPS_PHOTO_COMPUTE_LOCK prevents two 4K workers from oversubscribing 8 GB AMD VRAM.
             if hw.has_mps and total_frames > 0:
                 _PHOTO_PREBUFFER_SEM.acquire()
                 sem_held = True
-                comp: Optional[Any] = None
-                try:
-                    from .mps_photo_compositor import MPSPhotoCompositor
+                attempt_batches = [mps_batch_size]
+                if mps_batch_size > 4:
+                    attempt_batches.append(4)
+                last_mps_exc: Optional[Exception] = None
+                for try_batch in attempt_batches:
+                    comp: Optional[Any] = None
+                    try:
+                        from .mps_photo_compositor import MPSPhotoCompositor, _MPS_LOCK
 
-                    comp = MPSPhotoCompositor(ctx=ctx)
-                    for start_idx in range(0, pre_frames, mps_batch_size):
-                        batch_indices = list(range(start_idx, min(pre_frames, start_idx + mps_batch_size)))
-                        pre_batches.append(
-                            comp.render_batch_rgb(
-                                frame_indices=batch_indices,
-                                total_frames=total_frames,
-                                duration=duration,
-                                fps=fps,
-                            )
-                        )
-                    if pre_frames >= total_frames:
-                        comp.close()
-                        comp = None
-                    else:
-                        rem_comp = comp
-                    used_mps = True
-                except Exception as exc:
-                    pre_batches.clear()
-                    if comp is not None:
-                        try:
-                            comp.close()
-                        except Exception:
-                            pass
-                    if rem_comp is not None:
-                        try:
-                            rem_comp.close()
-                        except Exception:
-                            pass
-                        rem_comp = None
+                        with _MPS_LOCK:
+                            comp = MPSPhotoCompositor(ctx=ctx)
+                            for start_idx in range(0, pre_frames, try_batch):
+                                batch_indices = list(range(start_idx, min(pre_frames, start_idx + try_batch)))
+                                pre_batches.append(
+                                    comp.render_batch_raw(
+                                        frame_indices=batch_indices,
+                                        total_frames=total_frames,
+                                        duration=duration,
+                                        fps=fps,
+                                        output_pix_fmt=mps_pipe_fmt,
+                                        transition_in=transition_in if mps_pipe_fmt != "rgb24" else None,
+                                        transition_out=transition_out if mps_pipe_fmt != "rgb24" else None,
+                                    )
+                                )
+                            mps_batch_size = try_batch
+                            if pre_frames >= total_frames:
+                                comp.close()
+                                comp = None
+                            else:
+                                rem_comp = comp
+                        used_mps = True
+                        break
+                    except Exception as exc:
+                        last_mps_exc = exc
+                        pre_batches.clear()
+                        if comp is not None:
+                            try:
+                                comp.close()
+                            except Exception:
+                                pass
+                        if rem_comp is not None:
+                            try:
+                                rem_comp.close()
+                            except Exception:
+                                pass
+                            rem_comp = None
+                if not used_mps:
                     if sem_held:
                         _PHOTO_PREBUFFER_SEM.release()
                         sem_held = False
-                    used_mps = False
-                    print(f"[ken_burns] MPS photo compositor fallback to CPU Pillow: {exc}", file=sys.stderr)
+                    print(f"[ken_burns] MPS photo compositor fallback to CPU Pillow: {last_mps_exc}", file=sys.stderr)
 
-            # Stage B: Serialized HDR VideoToolbox encode consumes pre-buffered frames fast
+            # Stage B: Serialized HDR VideoToolbox encode consumes pre-buffered GPU p010le frames directly
+            stage_b_cmd = _build_photo_cmd(force_sw=False, raw_pix_fmt=mps_pipe_fmt if used_mps else "rgb24")
             with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=v_enc):
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                proc = subprocess.Popen(stage_b_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
                 assert proc.stdin is not None
                 pipe_broken = False
                 try:
@@ -5991,12 +6019,16 @@ def render_photo_clip(
                         if not pipe_broken and rem_comp is not None and pre_frames < total_frames:
                             for start_idx in range(pre_frames, total_frames, mps_batch_size):
                                 batch_indices = list(range(start_idx, min(total_frames, start_idx + mps_batch_size)))
-                                batch_t = rem_comp.render_batch_rgb(
-                                    frame_indices=batch_indices,
-                                    total_frames=total_frames,
-                                    duration=duration,
-                                    fps=fps,
-                                )
+                                with _MPS_PHOTO_COMPUTE_LOCK:
+                                    batch_t = rem_comp.render_batch_raw(
+                                        frame_indices=batch_indices,
+                                        total_frames=total_frames,
+                                        duration=duration,
+                                        fps=fps,
+                                        output_pix_fmt=mps_pipe_fmt,
+                                        transition_in=transition_in if mps_pipe_fmt != "rgb24" else None,
+                                        transition_out=transition_out if mps_pipe_fmt != "rgb24" else None,
+                                    )
                                 mv = memoryview(np.ascontiguousarray(batch_t.numpy()))
                                 try:
                                     proc.stdin.write(mv)

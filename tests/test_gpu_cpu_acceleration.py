@@ -682,8 +682,9 @@ def test_cuda_4k_non_mpi_unlock_and_gpu_pixel_encoders(tmp_path: Path) -> None:
     # Verify GPU HLG p010le & BT.709 yuv420p shapes & TV-range bounds
     canvas = torch.linspace(0.0, 255.0, 2 * 3 * 16 * 16, dtype=torch.float32).reshape(2, 3, 16, 16)
     p010 = mpc._rgb_to_hlg_p010le_gpu(canvas, npl_nits=380.0)
-    assert p010.shape == (2, 24, 16) and p010.dtype == torch.uint16
-    y_10 = (p010[:, :16, :].to(torch.int32) >> 6)
+    expected_u16 = getattr(torch, "uint16", torch.int16)
+    assert p010.shape == (2, 24, 16) and p010.dtype == expected_u16
+    y_10 = p010[:, :16, :].cpu().numpy().view(np.uint16).astype(np.int32) >> 6
     assert int(y_10.min()) >= 64 and int(y_10.max()) <= 940
 
     yuv420 = mpc._rgb_to_bt709_yuv420p_gpu(canvas)

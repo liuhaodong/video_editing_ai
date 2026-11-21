@@ -366,6 +366,9 @@ def _probe_duration_sec(video_path: Path) -> float:
         return 0.0
 
 
+_COLORIMETRY_CACHE: dict[tuple[str, int, float, float], dict[str, Any]] = {}
+
+
 def _decode_video_sample_frames(
     video_path: Path,
     timestamps: list[float],
@@ -375,14 +378,19 @@ def _decode_video_sample_frames(
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not video_path.exists():
         return []
+    from ..hardware import get_hardware_profile
+
+    hw = get_hardware_profile()
+    hw_prefix = (
+        ["-hwaccel", "videotoolbox"]
+        if hw.has_videotoolbox_hwaccel
+        else (["-hwaccel", "cuda"] if hw.has_cuda_hwaccel else [])
+    )
     frames: list[np.ndarray] = []
     expected_bytes = sample_width * sample_height * 3
     for ts in timestamps:
         try:
-            cmd = [
-                ffmpeg,
-                "-v",
-                "error",
+            base_tail = [
                 "-ss",
                 f"{max(0.0, float(ts)):.3f}",
                 "-i",
@@ -397,7 +405,10 @@ def _decode_video_sample_frames(
                 "rgb24",
                 "pipe:1",
             ]
+            cmd = [ffmpeg, "-v", "error", *hw_prefix, *base_tail]
             res = subprocess.run(cmd, capture_output=True, timeout=6)
+            if (res.returncode != 0 or len(res.stdout) < expected_bytes) and hw_prefix:
+                res = subprocess.run([ffmpeg, "-v", "error", *base_tail], capture_output=True, timeout=6)
             if res.returncode == 0 and len(res.stdout) >= expected_bytes:
                 buf = np.frombuffer(res.stdout[:expected_bytes], dtype=np.uint8)
                 frames.append(buf.reshape((sample_height, sample_width, 3)))
@@ -417,6 +428,15 @@ def measure_media_colorimetry(
     if not path.exists():
         return analyze_rgb_sample_array(np.empty((0, 0, 3), dtype=np.uint8))
 
+    try:
+        mtime_ns = int(path.stat().st_mtime_ns)
+    except OSError:
+        mtime_ns = 0
+    cache_key = (str(path.resolve()), mtime_ns, round(float(start_offset or 0.0), 2), round(float(duration or 0.0), 2))
+    cached = _COLORIMETRY_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
     ext = path.suffix.lower()
     is_photo = media_type == "photo" or ext in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff", ".tif"}
     if is_photo:
@@ -425,7 +445,9 @@ def measure_media_colorimetry(
                 im = ImageOps.exif_transpose(img).convert("RGB")
                 im.thumbnail((192, 192), Image.Resampling.BILINEAR)
                 arr = np.asarray(im, dtype=np.uint8)
-            return analyze_rgb_sample_array(arr)
+            res_dict = analyze_rgb_sample_array(arr)
+            _COLORIMETRY_CACHE[cache_key] = dict(res_dict)
+            return res_dict
         except Exception as exc:
             logger.debug("Photo colorimetry fallback for %s: %s", path.name, exc)
             return analyze_rgb_sample_array(np.empty((0, 0, 3), dtype=np.uint8))
@@ -444,7 +466,9 @@ def measure_media_colorimetry(
         frames = _decode_video_sample_frames(path, timestamps=[0.1])
     if not frames:
         return analyze_rgb_sample_array(np.empty((0, 0, 3), dtype=np.uint8))
-    return analyze_rgb_sample_array(np.stack(frames, axis=0))
+    res_dict = analyze_rgb_sample_array(np.stack(frames, axis=0))
+    _COLORIMETRY_CACHE[cache_key] = dict(res_dict)
+    return res_dict
 
 
 def build_film_stock_lut_table(look_name: str, lut_size: int = DEFAULT_LUT_SIZE) -> np.ndarray:

@@ -138,7 +138,7 @@ def _build_color_grade_filter(fx: EffectTrackItem, hdr: Optional[bool] = None) -
                 cube_p.with_name(f"{look_name}_i{int(round(lut_int * 100))}.cube"),
                 intensity=lut_int,
             )
-        parts.append(f"lut3d=file='{_escape_ffmpeg_filter_path(cube_p)}':interp=tetrahedral")
+        parts.append(f"lut3d=file='{_escape_ffmpeg_filter_path(cube_p)}':interp=trilinear")
 
     if use_lut or use_colorlevels:
         # lut3d/colorlevels may emit planar RGB (gbrp); restore explicit YUV matrix before zscale/encoder
@@ -153,12 +153,15 @@ def _build_color_grade_filter(fx: EffectTrackItem, hdr: Optional[bool] = None) -
     return ",".join(parts)
 
 
+_MACOS_HDR_STAGE_A_SEM = threading.BoundedSemaphore(3)
+
+
 def _build_video_stabilize_filter(fx: EffectTrackItem) -> str:
-    """Stabilize handheld clips and crop out mirrored deshake border margins."""
-    rx = max(4, min(32, int(fx.parameters.get("rx", 16)))) & ~1
-    ry = max(4, min(32, int(fx.parameters.get("ry", 16)))) & ~1
+    """Stabilize genuinely shaky handheld clips fast (blocksize=32, search=less) and crop mirrored margins."""
+    rx = max(4, min(24, int(fx.parameters.get("rx", 12)))) & ~1
+    ry = max(4, min(24, int(fx.parameters.get("ry", 12)))) & ~1
     return (
-        f"deshake=rx={rx}:ry={ry}:edge=mirror,"
+        f"deshake=rx={rx}:ry={ry}:edge=mirror:blocksize=32:search=less,"
         f"crop=iw-{rx * 2}:ih-{ry * 2}:{rx}:{ry},"
         f"scale=iw+{rx * 2}:ih+{ry * 2}:flags=lanczos"
     )
@@ -467,9 +470,75 @@ def _render_video_segment(
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = output_mp4.with_name(f".{output_mp4.stem}.tmp_{os.getpid()}_{threading.get_ident()}.mp4")
     card_png: Optional[Path] = None
-    if has_doc_card or has_paired_photo:
+    has_portrait_editorial_side = bool(is_portrait and not has_paired_photo and has_doc_card)
+    if has_doc_card or has_paired_photo or is_portrait:
         card_png = output_mp4.with_name(f".{output_mp4.stem}.card_{os.getpid()}_{threading.get_ident()}.png")
-        if has_doc_card:
+        from PIL import Image, ImageDraw, ImageFilter
+        from .ken_burns import _build_double_matte_card, _load_editorial_font, _load_graded_photo_rgb, _wrap_editorial_text
+
+        if has_portrait_editorial_side:
+            # Luxury Kinfolk / Criterion Asymmetric Editorial Right-Panel Card for standalone 9:16 videos
+            base_ov = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            sf = width / 1920.0
+            draw = ImageDraw.Draw(base_ov)
+            # Soft ambient drop-shadow halo strictly OUTSIDE the left-offset 9:16 live video matte frame
+            fg_h_est = int(round(height * (0.76 if has_bottom_seg_title else 0.82))) & ~1
+            fg_w_est = int(round(fg_h_est * (src_w / max(1.0, float(src_h))))) & ~1
+            inner_px_est = max(2, int(round(3 * sf))) & ~1
+            outer_px_est = max(10, int(round(18 * sf))) & ~1
+            pad_tot = inner_px_est + outer_px_est
+            frame_w = fg_w_est + pad_tot * 2
+            frame_h = fg_h_est + pad_tot * 2
+            vx0 = int(round(width * 0.31)) - frame_w // 2
+            vy0 = int(round(height * (0.06 if has_bottom_seg_title else 0.09)))
+            sh_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            ImageDraw.Draw(sh_layer).rectangle(
+                [vx0 - int(6 * sf), vy0 + int(14 * sf), vx0 + frame_w + int(10 * sf), vy0 + frame_h + int(22 * sf)],
+                fill=(0, 0, 0, 175),
+            )
+            sh_layer = sh_layer.filter(ImageFilter.GaussianBlur(radius=max(8, int(round(22 * sf)))))
+            # Punch out the framed video window to pure transparent so the live video & ivory matte stay 100% bright
+            ImageDraw.Draw(sh_layer).rectangle([vx0, vy0, vx0 + frame_w, vy0 + frame_h], fill=(0, 0, 0, 0))
+            base_ov.alpha_composite(sh_layer)
+
+            # Editorial Right-Side Monograph Typography Panel (frosted obsidian pill + champagne accent rule)
+            px0 = int(round(width * 0.54))
+            px1 = int(round(width * 0.92))
+            py_mid = int(round(height * (0.44 if has_bottom_seg_title else 0.48)))
+            panel_w = px1 - px0
+            panel_h = int(round(270 * sf))
+            py0 = max(int(60 * sf), py_mid - panel_h // 2)
+            py1 = min(height - int(80 * sf), py0 + panel_h)
+            draw.rounded_rectangle(
+                [px0, py0, px1, py1],
+                radius=max(10, int(round(18 * sf))),
+                fill=(14, 16, 22, 168),
+                outline=(214, 198, 165, 115),
+                width=max(1, int(round(1.5 * sf))),
+            )
+            tx = px0 + int(round(44 * sf))
+            ty = py0 + int(round(48 * sf))
+            # Champagne accent hairline + kicker
+            draw.rectangle([tx, ty, tx + int(round(62 * sf)), ty + max(2, int(round(3 * sf)))], fill=(218, 194, 148, 235))
+            ty += int(round(22 * sf))
+            kicker_txt = (kb.camera_badge or "SUMMER BREAK · 2026").strip().upper()
+            f_kick = _load_editorial_font(max(11, int(round(16 * sf))), bold=False, serif=False, text=kicker_txt)
+            draw.text((tx, ty), kicker_txt, font=f_kick, fill=(218, 198, 162, 225))
+            ty += int(round(34 * sf))
+            title_txt = (kb.caption_title or "").strip()
+            f_title = _load_editorial_font(max(18, int(round(44 * sf))), bold=True, serif=True, text=title_txt)
+            for ln in _wrap_editorial_text(draw, title_txt, f_title, panel_w - int(88 * sf), max_lines=2):
+                draw.text((tx, ty), ln, font=f_title, fill=(246, 243, 236, 250))
+                ty += int(round(54 * sf))
+            sub_txt = (kb.caption_subtitle or "").strip()
+            if sub_txt:
+                ty += int(round(8 * sf))
+                f_sub = _load_editorial_font(max(12, int(round(24 * sf))), bold=False, serif=False, text=sub_txt)
+                for ln in _wrap_editorial_text(draw, sub_txt, f_sub, panel_w - int(88 * sf), max_lines=2):
+                    draw.text((tx, ty), ln, font=f_sub, fill=(214, 210, 202, 228))
+                    ty += int(round(32 * sf))
+            base_ov.save(card_png, "PNG")
+        elif has_doc_card:
             render_frosted_video_overlay_png(
                 output_png=card_png,
                 width=width,
@@ -479,18 +548,15 @@ def _render_video_segment(
                 camera_badge=kb.camera_badge or "",
             )
         else:
-            from PIL import Image
-
             Image.new("RGBA", (width, height), (0, 0, 0, 0)).save(card_png, "PNG")
 
         if has_paired_photo and item.paired_visual_source:
             try:
-                from PIL import Image
-                from .ken_burns import _build_double_matte_card, _load_graded_photo_rgb
-
                 base_ov = Image.open(card_png).convert("RGBA")
-                p_max_w = int(width * 0.40)
-                p_max_h = int(height * (0.68 if has_bottom_seg_title else (0.74 if has_doc_card else 0.80)))
+                sf = width / 1920.0
+                # Soft gallery drop shadow behind left live video + double-matted companion photo on right
+                p_max_w = int(width * 0.41)
+                p_max_h = int(height * (0.68 if has_bottom_seg_title else (0.76 if has_doc_card else 0.82)))
                 color_fx = next((fx for fx in (attached_effects or []) if fx.effect_type == "color_grade"), None)
                 p_img = _load_graded_photo_rgb(
                     item.paired_visual_source,
@@ -501,15 +567,27 @@ def _render_video_segment(
                     p_img,
                     max_w=p_max_w,
                     max_h=p_max_h,
-                    scale_factor=width / 1920.0,
+                    scale_factor=sf,
                 )
                 rx = int(width * 0.72) - p_card.width // 2
-                ry_anchor = 0.40 if has_bottom_seg_title else (0.43 if has_doc_card else 0.48)
+                ry_anchor = 0.42 if has_bottom_seg_title else (0.44 if has_doc_card else 0.48)
                 ry = int(height * ry_anchor) - p_card.height // 2
+                # Drop shadow under companion photo card
+                sh_p = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                ImageDraw.Draw(sh_p).rectangle(
+                    [rx - int(4 * sf), max(8, ry) + int(14 * sf), rx + p_card.width + int(4 * sf), max(8, ry) + p_card.height + int(20 * sf)],
+                    fill=(0, 0, 0, 175),
+                )
+                sh_p = sh_p.filter(ImageFilter.GaussianBlur(radius=max(8, int(round(22 * sf)))))
+                base_ov.alpha_composite(sh_p)
                 base_ov.paste(p_card, (rx, max(8, ry)), p_card)
                 base_ov.save(card_png, "PNG")
             except Exception:
                 has_paired_photo = False
+        elif not has_doc_card and not has_paired_photo:
+            # Clean unused blank PNG for plain portrait clips without doc card
+            card_png.unlink(missing_ok=True)
+            card_png = None
 
     hw = get_hardware_profile()
     same_aspect = abs((src_w / max(1, src_h)) - (width / max(1, height))) < 0.02
@@ -592,21 +670,31 @@ def _render_video_segment(
 
     speed_prefix = f"setpts={1.0 / item.speed:.4f}*PTS," if (item.speed != 1.0 and item.speed > 0) else ""
 
-    # Build filtergraph: handles portrait 9:16 ambient blurred backdrop (+ optional Live Video+Photo Diptych) + frosted card
+    # Build filtergraph: luxury velvet darkroom bokeh + double-matted 9:16 live video (+ Diptych / Editorial Side Panel)
     filter_complex_parts: list[str] = []
     if is_portrait:
-        fg_h = int(round(height * (0.68 if has_bottom_seg_title else (0.74 if (has_doc_card or has_paired_photo) else 0.84))))
-        fg_h = fg_h - (fg_h % 2)
-        pad_px = max(6, int(round(12 * (width / 1920.0))))
-        pad_px = pad_px - (pad_px % 2)
-        y_pos = int(round(height * (0.05 if (has_doc_card or has_paired_photo or has_bottom_seg_title) else 0.08)))
-        x_expr = "(W*28/100)-(w/2)" if has_paired_photo else "(W-w)/2"
+        if has_portrait_editorial_side:
+            fg_h = int(round(height * (0.76 if has_bottom_seg_title else 0.82))) & ~1
+            y_pos = int(round(height * (0.06 if has_bottom_seg_title else 0.09)))
+            x_expr = "(W*31/100)-(w/2)"
+        elif has_paired_photo:
+            fg_h = int(round(height * (0.68 if has_bottom_seg_title else (0.76 if has_doc_card else 0.82)))) & ~1
+            y_pos = int(round(height * (0.06 if (has_doc_card or has_bottom_seg_title) else 0.09)))
+            x_expr = "(W*28/100)-(w/2)"
+        else:
+            fg_h = int(round(height * (0.70 if has_bottom_seg_title else 0.84))) & ~1
+            y_pos = int(round(height * (0.06 if has_bottom_seg_title else 0.08)))
+            x_expr = "(W-w)/2"
+        inner_px = max(2, int(round(3 * (width / 1920.0)))) & ~1
+        outer_px = max(10, int(round(18 * (width / 1920.0)))) & ~1
         filter_complex_parts.append(
             f"[0:v]{speed_prefix}split=2[vbg][vfg];"
-            f"[vbg]scale={width // 4}:{height // 4}:force_original_aspect_ratio=increase,"
-            f"crop={width // 4}:{height // 4},boxblur=16:8,eq=brightness=-0.18:saturation=0.85,"
-            f"scale={width}:{height}[bg_blur];"
-            f"[vfg]scale=-2:{fg_h},pad=iw+{pad_px * 2}:ih+{pad_px * 2}:{pad_px}:{pad_px}:color=#F8F6F0[fg_framed];"
+            f"[vbg]scale={width // 6}:{height // 6}:force_original_aspect_ratio=increase,"
+            f"crop={width // 6}:{height // 6},gblur=sigma=22,eq=brightness=-0.20:contrast=0.95:saturation=0.60,"
+            f"scale={width}:{height}:flags=bilinear,vignette=PI/3.6[bg_blur];"
+            f"[vfg]scale=-2:{fg_h}:flags=lanczos,"
+            f"pad=iw+{inner_px * 2}:ih+{inner_px * 2}:{inner_px}:{inner_px}:color=#24262C,"
+            f"pad=iw+{outer_px * 2}:ih+{outer_px * 2}:{outer_px}:{outer_px}:color=#F4EFE6[fg_framed];"
             f"[bg_blur][fg_framed]overlay={x_expr}:{y_pos}[vbase]"
         )
     else:
@@ -744,35 +832,233 @@ def _render_video_segment(
 
     from ..hardware import videotoolbox_hdr_encode_guard
 
+    def _build_stage_a_cmd(stage_a_video: Path, stage_a_audio: Path, use_hw_decode: bool = True) -> list[str]:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{src_in:.3f}",
+        ]
+        if use_hw_decode and hw.has_videotoolbox_hwaccel:
+            cmd.extend(["-hwaccel", "videotoolbox"])
+        cmd.extend(["-i", str(item.source)])
+
+        if not has_audio or item.volume <= 0.0:
+            cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
+        if card_png is not None and card_png.exists():
+            cmd.extend(["-loop", "1", "-t", f"{dur:.3f}", "-i", str(card_png)])
+        if extra_ov_inputs:
+            cmd.extend(extra_ov_inputs)
+
+        fc_str = ";".join(filter_complex_parts)
+        cmd.extend(["-filter_complex_threads", "6", "-filter_complex", fc_str])
+        # Output 1: Pre-filtered 10-bit p010le rawvideo (written outside _VT_HDR_ENCODE_LOCK)
+        cmd.extend(["-map", out_v_label, "-an", "-t", f"{dur:.3f}", "-f", "rawvideo", "-pix_fmt", "p010le", str(stage_a_video)])
+        # Output 2: Pre-mixed AAC audio
+        if not has_audio or item.volume <= 0.0:
+            cmd.extend(["-map", "1:a:0", "-vn", "-t", f"{dur:.3f}", "-c:a", "aac", "-b:a", "256k", str(stage_a_audio)])
+        else:
+            af_parts = [
+                "aresample=48000",
+                "aformat=sample_fmts=fltp:channel_layouts=stereo",
+                f"volume={item.volume:.3f}",
+            ]
+            if item.speed != 1.0 and 0.5 <= item.speed <= 2.0:
+                af_parts.append(f"atempo={item.speed:.3f}")
+            cf_in = max(item.audio_crossfade_sec, item.transition_in.duration)
+            cf_out = max(item.audio_crossfade_sec, item.transition_out.duration)
+            if cf_in > 0:
+                af_parts.append(f"afade=t=in:st=0:d={min(0.45, cf_in):.3f}")
+            if cf_out > 0:
+                fd = min(0.45, cf_out)
+                af_parts.append(f"afade=t=out:st={max(0.0, dur - fd):.3f}:d={fd:.3f}")
+            cmd.extend(
+                [
+                    "-map",
+                    f"0:a:{audio_pos}",
+                    "-vn",
+                    "-t",
+                    f"{dur:.3f}",
+                    "-af",
+                    ",".join(af_parts),
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "256k",
+                    str(stage_a_audio),
+                ]
+            )
+        return cmd
+
     try:
         hw_enc_args = _video_encoder_args(hdr, force_software=False)
         # Keep VideoToolbox hwdecode on macOS; use deterministic CPU decode before CPU 10-bit filters on CUDA systems
         # so multi-worker runs never trigger NVDEC OpenGOP -ss surface tears or WDDM VRAM contention.
         prefer_hw_dec = bool(hw.has_videotoolbox_hwaccel)
-        with nvenc_encode_guard(hw_enc_args), videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
-            proc = subprocess.run(
-                _build_cmd(force_sw=False, use_zero_copy_vt=can_zero_copy_vt, use_hw_decode=prefer_hw_dec),
-                capture_output=True,
-                text=True,
-                check=False,
+        has_stab_fx = any(fx.effect_type == "video_stabilize" for fx in (attached_effects or []))
+        has_gpu_grade_fx = any(
+            fx.effect_type in ("color_grade", "contrast_pop", "warm_glow") for fx in (attached_effects or [])
+        )
+        use_gpu_video_grader = (
+            os.environ.get("AI_EDITOR_GPU_VIDEO_GRADE", "1").strip().lower() not in ("0", "false", "no")
+            and hw.has_mps
+            and (has_gpu_grade_fx or is_portrait)
+            and not can_zero_copy_vt
+            and not has_seg_overlays
+            and not has_stab_fx
+            and not is_log_clip
+            and dur <= 12.0
+            and width % 2 == 0
+            and height % 2 == 0
+        )
+
+        proc: Optional[subprocess.CompletedProcess[str]] = None
+        if use_gpu_video_grader:
+            from .mps_video_grader import render_video_segment_gpu
+
+            gpu_ok = render_video_segment_gpu(
+                source=item.source,
+                src_in=src_in,
+                dur=dur,
+                speed=item.speed,
+                width=width,
+                height=height,
+                fps=fps,
+                hdr=hdr,
+                is_portrait=is_portrait,
+                has_audio=has_audio,
+                audio_pos=audio_pos,
+                volume=item.volume,
+                audio_crossfade_sec=item.audio_crossfade_sec,
+                transition_in=item.transition_in,
+                transition_out=item.transition_out,
+                attached_effects=attached_effects,
+                src_trc=src_trc,
+                src_space=src_space,
+                diffuse_white_nits=diffuse_nits,
+                v_enc_args=hw_enc_args,
+                mux_args=build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=hw_enc_args),
+                tmp_out=tmp_out,
+                use_hw_decode=prefer_hw_dec,
+                batch_size=4,
+                card_png=card_png,
+                has_paired_photo=has_paired_photo,
+                has_portrait_editorial_side=has_portrait_editorial_side,
+                has_doc_card=has_doc_card,
+                src_w=src_w,
+                src_h=src_h,
             )
-            if proc.returncode != 0 and can_zero_copy_vt:
+            if gpu_ok:
+                proc = subprocess.CompletedProcess(args=["mps_video_grader"], returncode=0, stdout="", stderr="")
+            else:
                 tmp_out.unlink(missing_ok=True)
+
+        use_macos_two_stage = (
+            (proc is None or proc.returncode != 0)
+            and sys.platform == "darwin"
+            and hdr
+            and "hevc_videotoolbox" in hw_enc_args
+            and not can_zero_copy_vt
+            and dur <= 12.0
+        )
+
+        if use_macos_two_stage:
+            stage_a_vid = tmp_out.with_suffix(".stage_a.p010")
+            stage_a_aud = tmp_out.with_suffix(".stage_a.m4a")
+            try:
+                # Stage A: Run heavy 10-bit filtergraph in parallel across workers OUTSIDE _VT_HDR_ENCODE_LOCK
+                with _MACOS_HDR_STAGE_A_SEM:
+                    p_a = subprocess.run(
+                        _build_stage_a_cmd(stage_a_vid, stage_a_aud, use_hw_decode=prefer_hw_dec),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if p_a.returncode != 0 and prefer_hw_dec:
+                        stage_a_vid.unlink(missing_ok=True)
+                        stage_a_aud.unlink(missing_ok=True)
+                        p_a = subprocess.run(
+                            _build_stage_a_cmd(stage_a_vid, stage_a_aud, use_hw_decode=False),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                    if p_a.returncode == 0 and stage_a_vid.exists() and stage_a_vid.stat().st_size > 0 and stage_a_aud.exists():
+                        # Stage B: Hold _VT_HDR_ENCODE_LOCK ONLY for the fast hardware HEVC Main10 encode
+                        stage_b_cmd = [
+                            "ffmpeg",
+                            "-y",
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-f",
+                            "rawvideo",
+                            "-pix_fmt",
+                            "p010le",
+                            "-s",
+                            f"{width}x{height}",
+                            "-r",
+                            str(fps),
+                            "-color_primaries",
+                            "bt2020",
+                            "-color_trc",
+                            "arib-std-b67",
+                            "-colorspace",
+                            "bt2020nc",
+                            "-color_range",
+                            "tv",
+                            "-i",
+                            str(stage_a_vid),
+                            "-i",
+                            str(stage_a_aud),
+                            "-map",
+                            "0:v:0",
+                            "-map",
+                            "1:a:0",
+                            "-vf",
+                            "setsar=1:1,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv",
+                            *hw_enc_args,
+                            *build_uniform_mux_args(fps=fps, hdr=hdr, v_enc_args=hw_enc_args),
+                            "-c:a",
+                            "copy",
+                            "-shortest",
+                            str(tmp_out),
+                        ]
+                        with videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
+                            proc = subprocess.run(stage_b_cmd, capture_output=True, text=True, check=False)
+            finally:
+                stage_a_vid.unlink(missing_ok=True)
+                stage_a_aud.unlink(missing_ok=True)
+
+        if proc is None or proc.returncode != 0:
+            tmp_out.unlink(missing_ok=True)
+            with nvenc_encode_guard(hw_enc_args), videotoolbox_hdr_encode_guard(hdr=hdr, v_enc_args=hw_enc_args):
                 proc = subprocess.run(
-                    _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=prefer_hw_dec),
+                    _build_cmd(force_sw=False, use_zero_copy_vt=can_zero_copy_vt, use_hw_decode=prefer_hw_dec),
                     capture_output=True,
                     text=True,
                     check=False,
                 )
-            if proc.returncode != 0 and prefer_hw_dec:
-                # Retry hardware encode with CPU decode if source pixel format rejects hwaccel
-                tmp_out.unlink(missing_ok=True)
-                proc = subprocess.run(
-                    _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=False),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                if proc.returncode != 0 and can_zero_copy_vt:
+                    tmp_out.unlink(missing_ok=True)
+                    proc = subprocess.run(
+                        _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=prefer_hw_dec),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                if proc.returncode != 0 and prefer_hw_dec:
+                    # Retry hardware encode with CPU decode if source pixel format rejects hwaccel
+                    tmp_out.unlink(missing_ok=True)
+                    proc = subprocess.run(
+                        _build_cmd(force_sw=False, use_zero_copy_vt=False, use_hw_decode=False),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
         if proc.returncode != 0:
             # Automatic retry with software libx265 if hardware encoder session limit was reached
             tmp_out.unlink(missing_ok=True)

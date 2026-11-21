@@ -2550,13 +2550,15 @@ def build_zero_setup_browser_plan(
         "videos_search_url": build_google_photos_web_search_url(date_from, date_to, media_filter="videos"),
         "date_query": format_picker_date_query(date_from, date_to),
         "max_items_per_zip": 450,
-        "recommended_pathway": "zero_setup_browser_batch",
+        "recommended_curated_batch_size": "5-15",
+        "recommended_pathway": "zero_setup_visual_curated_small_batch",
         "batch_strategy_hint": (
-            "Zero-Setup Fast Picking: 1) Keep Google Photos 'Photo Stacks' ON to collapse burst duplicates into 1 Top Pick tile; "
-            "2) Select whole days via Day-Header checkmarks or Shift+Click first->last tile (never click 100+ items one-by-one); "
-            "3) Keep each Shift+D ZIP <= 450 items (split multi-day shoots into 1-2 day ZIPs to stay under Google Photos' 500-item web cap); "
-            "4) Optionally check favorites_search_url to pass --favorites; "
-            "5) Pass all ZIPs to sync-google-photos --from-downloads --plan-only for parallel Pass-1 dedup + Pass-1.5 contact-sheet review."
+            "Proven Zero-Setup Visual Curation & Small-Batch Download Routine: "
+            "1) Inspect overview grids directly on the main library timeline (https://photos.google.com) using the right-hand date scrubber plus the sidebar Favorites tab — immune to Google Photos search RPC (EzkLib) RESOURCE_EXHAUSTED rate-limits and skips utility/whiteboard/burst clutter before downloading; "
+            "2) Work cleanly in ONE browser tab with 'Include: Shared with me' UNCHECKED when partner-shared photos are already saved in the main library; "
+            "3) Visually scan each chapter/month (jumping briskly across months rather than day-by-day over 90 days) to understand the full story arc, then download only curated standout photos & videos in small batches of 5-15 items per Shift+D ZIP (avoids accounts.google.com download-redirect blocks triggered by oversized 50+ item ZIPs; fall back to single-item download if needed); "
+            "4) Download starred Favorites from the requested date range as a dedicated small ZIP and pass their filenames via --favorites for guaranteed selection immunity; "
+            "5) Pass the downloads folder directly to sync-google-photos --from-downloads <dir> --favorites <names> --download-all (or --plan-only for Pass-1.5 contact-sheet review) to retain 100% original EXIF timestamps & GPS."
         ),
     }
 
