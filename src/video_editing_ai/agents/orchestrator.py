@@ -376,8 +376,12 @@ def run_multi_agent_pipeline(
     event_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     skip_whisper: bool = False,
     skip_auto_bgm: bool = False,
+    enable_color_grading: bool = False,
 ) -> PipelineBlackboard:
     """High-level entry point to run the coordinated multi-agent editing pipeline."""
+    opt_roles = list(enabled_optional_roles or [])
+    if enable_color_grading and "color_grader" not in opt_roles:
+        opt_roles.append("color_grader")
     blackboard = PipelineBlackboard(
         media_dir=media_dir,
         project_dir=project_dir,
@@ -392,9 +396,10 @@ def run_multi_agent_pipeline(
         whisper_model=whisper_model,
         skip_whisper=skip_whisper,
         skip_auto_bgm=skip_auto_bgm,
+        enable_color_grading=enable_color_grading,
     )
     orchestrator = MultiAgentOrchestrator(
-        enabled_optional_roles=enabled_optional_roles,
+        enabled_optional_roles=opt_roles,
         disabled_roles=disabled_roles,
     )
     return orchestrator.run(

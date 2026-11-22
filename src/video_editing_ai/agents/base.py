@@ -84,6 +84,7 @@ class PipelineBlackboard:
         max_revisions: int = 2,
         skip_whisper: bool = False,
         skip_auto_bgm: bool = False,
+        enable_color_grading: bool = False,
     ) -> None:
         self.media_dir = Path(media_dir).resolve()
         self.project_dir = Path(project_dir).resolve()
@@ -99,6 +100,7 @@ class PipelineBlackboard:
         self.whisper_model = whisper_model
         self.skip_whisper = bool(skip_whisper)
         self.skip_auto_bgm = bool(skip_auto_bgm)
+        self.enable_color_grading = bool(enable_color_grading)
 
         # Standard typed contracts
         self.catalog: Optional[MediaCatalog] = None

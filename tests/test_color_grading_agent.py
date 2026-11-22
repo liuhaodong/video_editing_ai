@@ -550,3 +550,43 @@ def test_color_scientist_suitability_regimes_and_natural_bypass(tmp_path: Path) 
 
     flt_haze = _build_color_grade_filter(fx_by_id["clip_hz"], hdr=True)
     assert "colorlevels=" in flt_haze and "scale=out_color_matrix=" in flt_haze
+
+
+def test_color_grading_disabled_by_default_and_opt_in_only(tmp_path: Path) -> None:
+    """Verify Stage 42 color_grader and Stage 40 creative film-stock looks are OFF by default."""
+    from video_editing_ai.agents.base import AgentRegistry
+    from video_editing_ai.agents.plugins.colorist_agent import HDRColoristAgent
+    from video_editing_ai.models.schema import TimelineSettings
+
+    assert CinemaColorGradingAgent.enabled_by_default is False
+    default_roles = [a.role_id for a in AgentRegistry.resolve_execution_plan()]
+    assert "color_grader" not in default_roles
+
+    opt_in_roles = [a.role_id for a in AgentRegistry.resolve_execution_plan(enabled_optional_roles=["color_grader"])]
+    assert "color_grader" in opt_in_roles
+
+    photo = tmp_path / "sample.jpg"
+    Image.new("RGB", (64, 64), (145, 138, 130)).save(photo)
+    tl = EditTimeline(
+        project_name="Natural Default Test",
+        settings=TimelineSettings(width=1920, height=1080, fps=30, hdr=True),
+        visual_track=[
+            VisualTrackItem(id="clip_nat", type="photo", source=str(photo), duration=2.0, timeline_start=0.0, act="Day")
+        ],
+    )
+    bb = PipelineBlackboard(media_dir=tmp_path, project_dir=tmp_path, use_antigravity=False)
+    bb.timeline = tl
+    HDRColoristAgent().run(bb)
+
+    # Technical HDR CST manifest still written, but zero creative color_grade effects attached by default
+    assert bb.color_transform_manifest is not None
+    assert len(bb.color_transform_manifest.clips) == 1
+    assert [fx for fx in tl.effects_track if fx.effect_type == "color_grade"] == []
+
+    # Opt-in via enable_color_grading=True attaches color_grade effects
+    bb_opt = PipelineBlackboard(
+        media_dir=tmp_path, project_dir=tmp_path, use_antigravity=False, enable_color_grading=True
+    )
+    bb_opt.timeline = tl
+    HDRColoristAgent().run(bb_opt)
+    assert len([fx for fx in tl.effects_track if fx.effect_type == "color_grade"]) == 1

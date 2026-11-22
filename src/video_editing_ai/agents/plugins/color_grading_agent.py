@@ -902,7 +902,7 @@ class CinemaColorGradingAgent(BaseEditingAgent):
         "Lift/Gamma/Gain camera matching, synthesizes 33x33x33 .cube 3D LUTs, and emits lookbook "
         "and RGB Parade scopes sheets while keeping synthetic graphics color-bypassed."
     )
-    enabled_by_default = True
+    enabled_by_default = False
     requires_artifacts = ["timeline.yaml"]
     produces_artifacts = ["color_grade_plan.json"]
     skill_reference_file = "19_color_grading_agent.md"

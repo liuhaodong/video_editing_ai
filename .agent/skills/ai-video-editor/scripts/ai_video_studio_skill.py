@@ -665,6 +665,10 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
 
     skip_whisper = bool(getattr(args, "skip_whisper", False) or getattr(args, "fast_prep", False))
     skip_auto_bgm = bool(getattr(args, "skip_auto_bgm", False) or getattr(args, "fast_prep", False))
+    enable_color_grading = bool(getattr(args, "enable_color_grading", False))
+    opt_roles = ["vfx_designer"]
+    if enable_color_grading:
+        opt_roles.append("color_grader")
 
     bb = run_multi_agent_pipeline(
         media_dir=media_dir,
@@ -672,7 +676,7 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
         user_prompt=args.prompt or "",
         extra_audio_paths=extra_audio,
         interview_answers=interview_answers,
-        enabled_optional_roles=["vfx_designer"],
+        enabled_optional_roles=opt_roles,
         width=args.width,
         height=args.height,
         fps=args.fps,
@@ -681,6 +685,7 @@ def cmd_run_pipeline(args: argparse.Namespace) -> int:
         render_video=args.render,
         skip_whisper=skip_whisper,
         skip_auto_bgm=skip_auto_bgm,
+        enable_color_grading=enable_color_grading,
     )
 
     dr = bb.director_review
@@ -1775,6 +1780,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_pipe.add_argument("--fps", type=int, default=30, help="Frame rate (default 30)")
     p_pipe.add_argument("--hdr", dest="hdr", action="store_true", default=True, help="Enable 10-bit HLG HDR (default)")
     p_pipe.add_argument("--sdr", dest="hdr", action="store_false", help="Render in 8-bit SDR")
+    p_pipe.add_argument(
+        "--enable-color-grading",
+        dest="enable_color_grading",
+        action="store_true",
+        default=False,
+        help="Opt-in: enable Stage 42 DI film-stock color grading (disabled by default to preserve original camera colors)",
+    )
     p_pipe.add_argument("--render", dest="render", action="store_true", default=True, help="Render final_story.mp4 (default)")
     p_pipe.add_argument("--no-render", dest="render", action="store_false", help="Skip MP4 render (contracts + timeline only)")
     p_pipe.add_argument("--antigravity-sdk", dest="use_antigravity", action="store_true", default=False, help="Enable nested Google Antigravity SDK escalation inside sub-agents")

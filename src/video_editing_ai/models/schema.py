@@ -580,7 +580,14 @@ class CreativeBrief(BaseModel):
     music_duck_db: float = Field(default=-14.0, description="Music attenuation in dB during A-roll dialogue")
     enabled_optional_agents: list[str] = Field(
         default_factory=list,
-        description="Optional plugin agent role_ids enabled by the user (e.g., ['vfx_designer'])",
+        description="Optional plugin agent role_ids enabled by the user (e.g., ['vfx_designer', 'color_grader'])",
+    )
+    enable_color_grading: bool = Field(
+        default=False,
+        description=(
+            "Opt-in flag: DI color grading and film-stock LUTs are disabled by default to preserve "
+            "authentic original camera colors; enable only when explicitly requested by the user."
+        ),
     )
     cold_open_hook: bool = Field(
         default=True,

@@ -250,24 +250,32 @@ class HDRColoristAgent(BaseEditingAgent):
                 else:
                     chapter_looks[chap.title] = default_look
 
-        ai_resp = self.ask_ai_creative_json(
-            blackboard=blackboard,
-            prompt=(
-                f"Project tone='{tone}', hdr={hdr_active}, chapters={list(chapter_looks.keys())}.\n"
-                f"Available film stock looks: {list(FILM_STOCK_PRESETS.keys())}.\n"
-                "Return JSON {\"primary_film_stock_look\": \"...\", \"chapter_looks\": {\"Chapter Title\": \"...\"}} "
-                "to set the DI color palette."
-            ),
-            decision_key=self.role_id,
-            timeout_sec=20.0,
+        color_grading_enabled = bool(
+            getattr(blackboard, "enable_color_grading", False)
+            or (brief is not None and getattr(brief, "enable_color_grading", False))
         )
-        if isinstance(ai_resp, dict):
-            if ai_resp.get("primary_film_stock_look") in FILM_STOCK_PRESETS:
-                default_look = str(ai_resp["primary_film_stock_look"])
-            if isinstance(ai_resp.get("chapter_looks"), dict):
-                for k, v in ai_resp["chapter_looks"].items():
-                    if str(v) in FILM_STOCK_PRESETS:
-                        chapter_looks[str(k)] = str(v)
+        if not color_grading_enabled:
+            default_look = "neutral_reference"
+            chapter_looks = {k: "neutral_reference" for k in chapter_looks}
+        else:
+            ai_resp = self.ask_ai_creative_json(
+                blackboard=blackboard,
+                prompt=(
+                    f"Project tone='{tone}', hdr={hdr_active}, chapters={list(chapter_looks.keys())}.\n"
+                    f"Available film stock looks: {list(FILM_STOCK_PRESETS.keys())}.\n"
+                    "Return JSON {\"primary_film_stock_look\": \"...\", \"chapter_looks\": {\"Chapter Title\": \"...\"}} "
+                    "to set the DI color palette."
+                ),
+                decision_key=self.role_id,
+                timeout_sec=20.0,
+            )
+            if isinstance(ai_resp, dict):
+                if ai_resp.get("primary_film_stock_look") in FILM_STOCK_PRESETS:
+                    default_look = str(ai_resp["primary_film_stock_look"])
+                if isinstance(ai_resp.get("chapter_looks"), dict):
+                    for k, v in ai_resp["chapter_looks"].items():
+                        if str(v) in FILM_STOCK_PRESETS:
+                            chapter_looks[str(k)] = str(v)
 
         clip_grades: list[ClipColorGrade] = []
         color_transforms: list[ClipColorTransform] = []
@@ -284,6 +292,9 @@ class HDRColoristAgent(BaseEditingAgent):
                 use_zscale=zscale_avail,
             )
             color_transforms.append(ct)
+
+            if not color_grading_enabled:
+                continue
 
             if item.track_lane != 1 or is_synthetic_graphic_clip(
                 item.source, item.id, getattr(item, "narrative_note", "")
